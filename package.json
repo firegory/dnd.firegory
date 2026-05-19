@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types 'tests/**/*.test.mts'",
     "db:migrate": "node --experimental-strip-types scripts/migrate.mts",
-    "worker": "node --experimental-strip-types src/worker/index.ts"
+    "worker": "node --experimental-strip-types src/worker/index.ts",
+    "ingest": "node --experimental-strip-types scripts/ingest.mts"
   },
   "dependencies": {
     "next": "^16.2.6",
