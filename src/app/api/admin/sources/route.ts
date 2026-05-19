@@ -7,6 +7,12 @@ import {
   ContentMetadataValidationError,
   type ListSourcesOptions,
 } from "../../../../server/content/metadata.ts";
+import type {
+  AccessTier,
+  SourceCategory,
+  SourceEdition,
+  SourceLanguage,
+} from "../../../../server/access/retrieval-filter.ts";
 
 function getService(): ContentMetadataService {
   return new ContentMetadataService();
@@ -19,10 +25,10 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const options: ListSourcesOptions = {
     includeDeleted: url.searchParams.get("includeDeleted") === "true",
-    category: optionalParam(url, "category"),
-    edition: optionalParam(url, "edition"),
-    language: optionalParam(url, "language"),
-    accessTier: optionalParam(url, "accessTier"),
+    category: optionalParam<SourceCategory>(url, "category"),
+    edition: optionalParam<SourceEdition>(url, "edition"),
+    language: optionalParam<SourceLanguage>(url, "language"),
+    accessTier: optionalParam<AccessTier>(url, "accessTier"),
   };
 
   try {
@@ -43,8 +49,8 @@ export async function POST(request: Request) {
   }
 }
 
-function optionalParam(url: URL, name: string): never | undefined {
-  return (url.searchParams.get(name) ?? undefined) as never | undefined;
+function optionalParam<T extends string>(url: URL, name: string): T | undefined {
+  return (url.searchParams.get(name) ?? undefined) as T | undefined;
 }
 
 function forbidden(): NextResponse {
