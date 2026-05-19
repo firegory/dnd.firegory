@@ -1,17 +1,17 @@
 /**
  * Worker entrypoint for processing ingestion jobs from the Redis queue.
  *
- * This is a minimal worker that dequeues jobs and updates their status.
- * Actual PDF processing (extraction, OCR, chunking, embeddings) will be
- * added in issue #8.
+ * Dequeues jobs, loads file/source metadata, and runs the full PDF
+ * processing pipeline (normalize → extract → OCR → chunk → embed → persist).
  */
 
-import { ensureRedisConnection, dequeueJob, getRedisClient } from "../server/ingestion/queue";
+import { ensureRedisConnection, dequeueJob, getRedisClient } from "../server/ingestion/queue.ts";
 import {
   getIngestionJob,
-  markJobProcessing,
-  markJobSucceeded,
-} from "../server/ingestion/storage";
+  markJobFailed,
+} from "../server/ingestion/storage.ts";
+import { runPipeline } from "./ingestion/pipeline.ts";
+import { query } from "../server/db/client.ts";
 
 const POLL_INTERVAL_SECONDS = 5;
 const MAX_CONSECUTIVE_ERRORS = 10;
@@ -41,13 +41,38 @@ async function runWorker(): Promise<void> {
         continue;
       }
 
-      await markJobProcessing(job.id);
-      console.log(`[worker] Processing job ${job.id}...`);
+      if (!job.sourceId || !job.fileId) {
+        console.error(`[worker] Job ${message.jobId} missing sourceId or fileId. Marking as failed.`);
+        await markJobFailed(job.id, "Job missing sourceId or fileId");
+        continue;
+      }
 
-      // Actual processing will be implemented in issue #8
-      // For now, mark as succeeded with a placeholder
-      await markJobSucceeded(job.id);
-      console.log(`[worker] Job ${job.id} completed (placeholder — no processing yet).`);
+      // Load the file's storage path from DB
+      const fileResult = await query<{ storage_path: string }>(
+        "SELECT storage_path FROM files WHERE id = $1",
+        [job.fileId],
+      );
+
+      if (fileResult.rows.length === 0) {
+        await markJobFailed(job.id, `File record ${job.fileId} not found in database`);
+        continue;
+      }
+
+      const originalPdfPath = fileResult.rows[0].storage_path;
+
+      console.log(`[worker] Running pipeline for job ${job.id}...`);
+      const result = await runPipeline({
+        jobId: job.id,
+        sourceId: job.sourceId,
+        fileId: job.fileId,
+        originalPdfPath,
+      });
+
+      console.log(
+        `[worker] Job ${job.id} completed. ` +
+        `Chunks: ${result.chunksPersisted}, Pages: ${result.pagesPersisted}, ` +
+        `Quality: ${result.qualityReport.overall.status} (${result.qualityReport.overall.score}/100)`,
+      );
 
       consecutiveErrors = 0;
     } catch (error) {
