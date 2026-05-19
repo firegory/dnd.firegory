@@ -13,7 +13,15 @@ npm install
 npm run dev
 ```
 
-The app starts at <http://localhost:3000> and currently renders a minimal placeholder page.
+The app starts at <http://localhost:3000>. Run database migrations before registering or signing in:
+
+```bash
+export DATABASE_URL="postgres://dnd:dnd_dev_password@localhost:5432/dnd_firegory"
+npm run db:migrate
+npm run dev
+```
+
+The first registered account is promoted to `admin`; later accounts start as `user`. Admins can manage roles at `/admin/users`.
 
 ## Docker Compose development
 
@@ -114,4 +122,4 @@ Required variable names are documented in `.env.example`. Do not commit real sec
 
 ## Current scope
 
-This bootstrap includes the minimal Next.js + TypeScript application skeleton, Docker Compose development infrastructure, and basic developer scripts. Database schema, auth, ingestion, and RAG implementation are planned for later issues.
+This repository currently includes the minimal Next.js + TypeScript application skeleton, Docker Compose development infrastructure, the initial database schema/migration runner, password registration/login, database-backed sessions, and admin role management. Content ingestion, search, and RAG implementation are planned for later issues.
