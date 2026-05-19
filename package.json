@@ -9,15 +9,18 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types 'tests/**/*.test.mts'"
+    "test": "node --test --experimental-strip-types 'tests/**/*.test.mts'",
+    "db:migrate": "node --experimental-strip-types scripts/migrate.mts"
   },
   "dependencies": {
     "next": "^16.2.6",
+    "pg": "^8.21.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },
   "devDependencies": {
     "@types/node": "^25.9.0",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "eslint": "^9.39.4",
