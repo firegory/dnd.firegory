@@ -26,6 +26,7 @@ export default async function Home() {
           ))}
         </ul>
         <div className="button-row">
+          <Link className="button" href="/search">Search</Link>
           {user.role === "admin" ? <Link className="button" href="/admin/ingestion">Ingestion</Link> : null}
           {user.role === "admin" ? <Link className="button" href="/admin/users">Manage users</Link> : null}
           <form action={logoutAction}>
