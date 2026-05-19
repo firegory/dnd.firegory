@@ -158,7 +158,7 @@ cp .env.example .env.local
 | `REDIS_URL` | yes | Redis connection string |
 | `APP_URL` | no | Public app URL (default: `http://localhost:3000`) |
 | `NEXT_PUBLIC_APP_URL` | no | Public app URL exposed to the browser |
-| `AUTH_SECRET` | yes | Secret for session token generation |
+| `AUTH_SECRET` | no | Reserved for future session secret hardening |
 | `ZAI_API_KEY` | no | z.ai API key for embeddings and LLM calls |
 | `STORAGE_ROOT` | no | Root directory for file storage (default: `./storage`) |
 | `APP_PORT` | no | Host port for the app in Docker Compose (default: `3000`) |

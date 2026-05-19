@@ -4,12 +4,9 @@ All endpoints return JSON. Authentication is via session cookie (`token`) set by
 
 ## Authentication
 
-| Endpoint | Method | Auth | Description |
-| --- | --- | --- | --- |
-| `/api/auth/register` | POST | none | Register a new account |
-| `/api/auth/login` | POST | none | Login and set session cookie |
+Authentication uses Next.js server actions (form submissions to `/login` and `/register` pages), not API endpoints. After login, a session cookie (`token`) is set automatically.
 
-All other endpoints require a valid session cookie. Admin endpoints additionally require the `admin` role.
+All API endpoints require a valid session cookie. Admin endpoints additionally require the `admin` role.
 
 ## Search
 
@@ -58,7 +55,7 @@ Search for chunks across authorized content using hybrid retrieval (keyword + ve
       "sourceCategory": "core_rules",
       "accessTier": "open",
       "score": 0.85,
-      "strategy": "hybrid"
+      "strategy": "keyword"
     }
   ],
   "total": 15,

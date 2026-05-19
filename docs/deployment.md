@@ -28,7 +28,7 @@ Edit `.env` with your deployment values:
 # Required
 DATABASE_URL=postgres://dnd:your_secure_password@postgres:5432/dnd_firegory
 REDIS_URL=redis://redis:6379
-AUTH_SECRET=your-random-secret-at-least-32-chars
+AUTH_SECRET=your-random-secret-at-least-32-chars  # reserved for future use
 ZAI_API_KEY=your-zai-api-key
 
 # App URLs
@@ -51,7 +51,7 @@ REDIS_PORT=6379
 
 ### Security notes
 
-- Generate `AUTH_SECRET` with a cryptographically random value: `openssl rand -hex 32`.
+- Generate `AUTH_SECRET` with a cryptographically random value: `openssl rand -hex 32`. This variable is reserved for future session hardening.
 - Use a strong `POSTGRES_PASSWORD` — not the development default.
 - If exposing Redis on a network interface, configure Redis authentication. The development Compose file runs Redis unauthenticated.
 - Never commit `.env` to version control.
