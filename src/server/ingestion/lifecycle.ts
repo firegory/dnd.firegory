@@ -37,14 +37,14 @@ export type IngestionResult = Readonly<{
 
 /**
  * Full ingestion lifecycle:
- * 1. Store original PDF to disk (before any DB records)
- * 2. Create source record
+ * 1. Create source record
+ * 2. Store original PDF to disk (file written before file DB record)
  * 3. Create file record (with correct path, single INSERT)
  * 4. Create ingestion job
  * 5. Enqueue for worker processing
  *
  * Operations are ordered so that:
- * - File is written before DB records (no dangling DB references to missing files)
+ * - Files are written before DB records reference them
  * - Queue enqueue is last (if it fails, job stays in "queued" and can be re-enqueued)
  */
 export async function startIngestion(input: StartIngestionInput): Promise<IngestionResult> {
