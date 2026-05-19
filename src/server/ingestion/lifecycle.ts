@@ -1,17 +1,17 @@
 /**
  * High-level ingestion lifecycle: create source → store PDF → create job → enqueue.
  *
- * NOTE: The DB operations (createSourceRecord, storeOriginalPdf, createIngestionJob)
- * each use the shared query pool, not a single transaction client. This means a crash
- * between operations could leave orphaned records. For MVP this is acceptable since:
- * - The worker can handle re-processing of partially-created records
- * - Issue #15 will add admin retry/reprocess/delete actions
- * - A future iteration should add transaction-aware overloads that accept a PoolClient
+ * DB mutations (source, file, job) run inside a single transaction so a crash
+ * between operations cannot leave partially-created records. File I/O (writing
+ * the PDF to disk) is performed before the DB INSERT within each storage
+ * function, keeping the invariant that DB records reference an existing file.
+ * Redis enqueue is outside the transaction since it's an external system;
+ * if it fails the job remains in "queued" and can be re-enqueued.
  */
 
 import { storeOriginalPdf, createSourceRecord, createIngestionJob, getIngestionJob } from "./storage";
 import { enqueueJob } from "./queue";
-import { query } from "../db/client";
+import { withTransaction } from "../db/client";
 import type { AccessTier, SourceCategory, SourceEdition, SourceLanguage } from "../access/retrieval-filter";
 
 export type StartIngestionInput = Readonly<{
@@ -37,46 +37,54 @@ export type IngestionResult = Readonly<{
 
 /**
  * Full ingestion lifecycle:
- * 1. Create source record
- * 2. Store original PDF to disk (file written before file DB record)
- * 3. Create file record (with correct path, single INSERT)
- * 4. Create ingestion job
- * 5. Enqueue for worker processing
+ * 1. [Transaction] Create source record
+ * 2. [Transaction] Store original PDF to disk + create file record
+ *    (file is written before INSERT; if disk write fails, transaction rolls back)
+ * 3. [Transaction] Create ingestion job
+ * 4. Enqueue for worker processing (outside transaction — Redis is external)
  *
  * Operations are ordered so that:
  * - Files are written before DB records reference them
+ * - DB mutations are atomic — either all three records are created or none
  * - Queue enqueue is last (if it fails, job stays in "queued" and can be re-enqueued)
  */
 export async function startIngestion(input: StartIngestionInput): Promise<IngestionResult> {
-  const sourceId = await createSourceRecord({
-    title: input.title,
-    category: input.category,
-    edition: input.edition,
-    language: input.language,
-    accessTier: input.accessTier,
-    ownerUserId: input.ownerUserId,
-    createdByUserId: input.requestedByUserId,
-    metadata: input.metadata,
+  const { sourceId, fileId, job } = await withTransaction(async (client) => {
+    const sourceId = await createSourceRecord({
+      title: input.title,
+      category: input.category,
+      edition: input.edition,
+      language: input.language,
+      accessTier: input.accessTier,
+      ownerUserId: input.ownerUserId,
+      createdByUserId: input.requestedByUserId,
+      metadata: input.metadata,
+      client,
+    });
+
+    const { fileId } = await storeOriginalPdf({
+      sourceId,
+      originalFilename: input.originalFilename,
+      data: input.pdfData,
+      requestedByUserId: input.requestedByUserId,
+      client,
+    });
+
+    const job = await createIngestionJob({
+      kind: input.kind ?? "upload",
+      sourceId,
+      fileId,
+      requestedByUserId: input.requestedByUserId,
+      metadata: input.metadata,
+      client,
+    });
+
+    return { sourceId, fileId, job };
   });
 
-  const { fileId } = await storeOriginalPdf({
-    sourceId,
-    originalFilename: input.originalFilename,
-    data: input.pdfData,
-    requestedByUserId: input.requestedByUserId,
-  });
-
-  const job = await createIngestionJob({
-    kind: input.kind ?? "upload",
-    sourceId,
-    fileId,
-    requestedByUserId: input.requestedByUserId,
-    metadata: input.metadata,
-  });
-
-  // Queue operations are outside DB — Redis is external
+  // Queue operations are outside DB transaction — Redis is external.
+  // If enqueue fails, the job remains in "queued" and can be re-enqueued.
   const queueId = await enqueueJob(job.id);
-  await query("UPDATE ingestion_jobs SET queue_id = $1 WHERE id = $2", [queueId, job.id]);
 
   return {
     sourceId,

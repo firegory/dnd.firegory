@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import type { PoolClient } from "pg";
 
 import { query } from "../db/client";
 import type {
@@ -73,12 +74,15 @@ function rowToRecord(row: IngestionJobRow): IngestionJobRecord {
  * Writes the file to disk first, then inserts the DB record with the correct
  * storage path in a single query. This avoids the invariant break where the
  * DB could point at a "pending" path that doesn't exist on disk.
+ *
+ * @param client Optional PoolClient for running within a transaction.
  */
 export async function storeOriginalPdf(input: {
   sourceId: string;
   originalFilename: string;
   data: Buffer;
   requestedByUserId?: string | null;
+  client?: PoolClient;
 }): Promise<{ fileId: string; checksumSha256: string }> {
   const checksum = computeChecksum(input.data);
   const byteSize = input.data.byteLength;
@@ -91,26 +95,32 @@ export async function storeOriginalPdf(input: {
   await mkdir(join(getStorageRoot(), "originals", input.sourceId), { recursive: true });
   await writeFile(storagePath, input.data);
 
+  const sql = `INSERT INTO files (id, source_id, original_filename, mime_type, checksum_sha256, byte_size, storage_path, uploaded_by_user_id)
+     VALUES ($1, $2, $3, 'application/pdf', $4, $5, $6, $7)`;
+  const params = [
+    fileId,
+    input.sourceId,
+    input.originalFilename,
+    checksum,
+    byteSize,
+    storagePath,
+    input.requestedByUserId ?? null,
+  ];
+
   // Single INSERT with the correct storage path
-  await query<{ id: string }>(
-    `INSERT INTO files (id, source_id, original_filename, mime_type, checksum_sha256, byte_size, storage_path, uploaded_by_user_id)
-     VALUES ($1, $2, $3, 'application/pdf', $4, $5, $6, $7)`,
-    [
-      fileId,
-      input.sourceId,
-      input.originalFilename,
-      checksum,
-      byteSize,
-      storagePath,
-      input.requestedByUserId ?? null,
-    ],
-  );
+  if (input.client) {
+    await input.client.query(sql, params);
+  } else {
+    await query(sql, params);
+  }
 
   return { fileId, checksumSha256: checksum };
 }
 
 /**
  * Creates a source record and returns its ID.
+ *
+ * @param client Optional PoolClient for running within a transaction.
  */
 export async function createSourceRecord(input: {
   title: string;
@@ -121,27 +131,32 @@ export async function createSourceRecord(input: {
   ownerUserId?: string | null;
   createdByUserId?: string | null;
   metadata?: Record<string, unknown>;
+  client?: PoolClient;
 }): Promise<string> {
-  const result = await query<{ id: string }>(
-    `INSERT INTO sources (title, category, edition, language, access_tier, owner_user_id, created_by_user_id, metadata)
+  const sql = `INSERT INTO sources (title, category, edition, language, access_tier, owner_user_id, created_by_user_id, metadata)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING id`,
-    [
-      input.title,
-      input.category,
-      input.edition,
-      input.language,
-      input.accessTier,
-      input.ownerUserId ?? null,
-      input.createdByUserId ?? null,
-      JSON.stringify(input.metadata ?? {}),
-    ],
-  );
+     RETURNING id`;
+  const params = [
+    input.title,
+    input.category,
+    input.edition,
+    input.language,
+    input.accessTier,
+    input.ownerUserId ?? null,
+    input.createdByUserId ?? null,
+    JSON.stringify(input.metadata ?? {}),
+  ];
+
+  const result = input.client
+    ? await input.client.query<{ id: string }>(sql, params)
+    : await query<{ id: string }>(sql, params);
   return result.rows[0].id;
 }
 
 /**
  * Creates an ingestion job in queued state.
+ *
+ * @param client Optional PoolClient for running within a transaction.
  */
 export async function createIngestionJob(input: {
   kind: "upload" | "cli" | "retry" | "reprocess";
@@ -150,20 +165,23 @@ export async function createIngestionJob(input: {
   requestedByUserId?: string | null;
   metadata?: Record<string, unknown>;
   queueId?: string | null;
+  client?: PoolClient;
 }): Promise<IngestionJobRecord> {
-  const result = await query<IngestionJobRow>(
-    `INSERT INTO ingestion_jobs (kind, source_id, file_id, requested_by_user_id, metadata, queue_id)
+  const sql = `INSERT INTO ingestion_jobs (kind, source_id, file_id, requested_by_user_id, metadata, queue_id)
      VALUES ($1, $2, $3, $4, $5, $6)
-     RETURNING *`,
-    [
-      input.kind,
-      input.sourceId ?? null,
-      input.fileId ?? null,
-      input.requestedByUserId ?? null,
-      JSON.stringify(input.metadata ?? {}),
-      input.queueId ?? null,
-    ],
-  );
+     RETURNING *`;
+  const params = [
+    input.kind,
+    input.sourceId ?? null,
+    input.fileId ?? null,
+    input.requestedByUserId ?? null,
+    JSON.stringify(input.metadata ?? {}),
+    input.queueId ?? null,
+  ];
+
+  const result = input.client
+    ? await input.client.query<IngestionJobRow>(sql, params)
+    : await query<IngestionJobRow>(sql, params);
   return rowToRecord(result.rows[0]);
 }
 
