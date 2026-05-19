@@ -13,7 +13,6 @@ import {
   assertAdmin,
   canManageRoles,
   type AuthUser,
-  type UserRole,
 } from "../../src/server/auth/types.ts";
 
 describe("auth types: isUserRole", () => {

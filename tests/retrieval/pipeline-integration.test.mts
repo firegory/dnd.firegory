@@ -28,7 +28,7 @@ import {
   expandQuery,
   combinedExpandedQuery,
 } from "../../src/server/retrieval/expand.ts";
-import { mergeCandidates, type HybridMergeConfig } from "../../src/server/retrieval/hybrid.ts";
+import { mergeCandidates } from "../../src/server/retrieval/hybrid.ts";
 import {
   rerankCandidates,
   noopRerankConfig,

@@ -23,7 +23,6 @@ import {
   parseLlmResponse,
   mapCitations,
   type RawLlmCitation,
-  type RawLlmResponse,
 } from "../../src/server/rag/format.ts";
 import type { RetrievalCandidate } from "../../src/server/retrieval/types.ts";
 
