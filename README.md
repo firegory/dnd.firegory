@@ -120,6 +120,45 @@ cp .env.example .env
 
 Required variable names are documented in `.env.example`. Do not commit real secrets or local `.env` files.
 
+## CLI ingestion
+
+A CLI command is available for batch and debug PDF ingestion. It uses the same ingestion lifecycle as the admin UI.
+
+### Prerequisites
+
+The CLI requires running Postgres and Redis services and these environment variables:
+
+- `DATABASE_URL` — Postgres connection string
+- `REDIS_URL` — Redis connection string
+- `STORAGE_ROOT` — root directory for file storage
+
+### Usage
+
+```bash
+npm run ingest -- \
+  --pdf path/to/book.pdf \
+  --title "Player's Handbook" \
+  --category core_rules \
+  --edition 5e \
+  --language en \
+  --access open
+```
+
+### Options
+
+| Option | Required | Description |
+| --- | --- | --- |
+| `--pdf` | yes | Path to a local PDF file |
+| `--title` | yes | Source title for the ingestion record |
+| `--category` | yes | `core_rules`, `official_supplement`, or `homebrew` |
+| `--edition` | yes | `5e` or `5.5e` |
+| `--language` | yes | `en` or `ru` |
+| `--access` | yes | `open`, `premium`, or `personal` |
+| `--owner-user-id` | no | Owner user ID for personal content |
+| `--help` | no | Show usage information |
+
+On success the CLI prints the created source, file, and job identifiers along with the initial job status. If the file is missing, empty, or metadata is invalid, the command exits with a non-zero code and a readable error message.
+
 ## Current scope
 
 This repository currently includes the minimal Next.js + TypeScript application skeleton, Docker Compose development infrastructure, the initial database schema/migration runner, password registration/login, database-backed sessions, and admin role management. Content ingestion, search, and RAG implementation are planned for later issues.
