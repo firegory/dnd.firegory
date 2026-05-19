@@ -7,6 +7,17 @@ import {
   type SourceAccessMetadata,
 } from "../../src/server/access/retrieval-filter.ts";
 
+test("user filters with default selection allow only open/SRD sources", () => {
+  const filter = buildRetrievalAuthorizationFilter({ role: "user" });
+
+  assert.deepEqual(filter, {
+    access: { kind: "anyOf", clauses: [{ accessTier: "open" }] },
+  });
+
+  assert.equal(matches({ accessTier: "open" }, filter), true);
+  assert.equal(matches({ accessTier: "premium", shared: true }, filter), false);
+});
+
 test("user filters allow only open/SRD sources and include selected corpus filters", () => {
   const filter = buildRetrievalAuthorizationFilter(
     { role: "user", userId: "user-1" },

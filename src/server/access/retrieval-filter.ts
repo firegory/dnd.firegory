@@ -42,14 +42,18 @@ export type RetrievalAuthorizationFilter = Readonly<{
     | Readonly<{ kind: "anyOf"; clauses: readonly SourceAccessClause[] }>;
 }>;
 
-export type SourceAccessMetadata = Readonly<{
-  accessTier: AccessTier;
-  shared?: boolean;
-  ownerUserId?: string | null;
+type CorpusMetadata = Readonly<{
   edition?: SourceEdition;
   language?: SourceLanguage;
   category?: SourceCategory;
 }>;
+
+export type SourceAccessMetadata = CorpusMetadata &
+  (
+    | Readonly<{ accessTier: "open"; shared?: false; ownerUserId?: null }>
+    | Readonly<{ accessTier: "premium"; shared: boolean; ownerUserId?: null }>
+    | Readonly<{ accessTier: "personal"; shared?: false; ownerUserId: string }>
+  );
 
 /**
  * Builds the server-owned retrieval authorization filter.

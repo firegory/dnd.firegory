@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types tests/**/*.test.mts"
+    "test": "node --test --experimental-strip-types 'tests/**/*.test.mts'"
   },
   "dependencies": {
     "next": "^16.2.6",
