@@ -12,6 +12,8 @@ export type SearchRequestBody = Readonly<{
   offset?: number;
 }>;
 
+const MAX_QUERY_LENGTH = 500;
+
 export async function POST(request: Request): Promise<NextResponse> {
   const user = await getCurrentUser();
   if (!user) {
@@ -27,6 +29,10 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   if (!body.query || typeof body.query !== "string" || !body.query.trim()) {
     return NextResponse.json({ error: "Query is required." }, { status: 400 });
+  }
+
+  if (body.query.length > MAX_QUERY_LENGTH) {
+    return NextResponse.json({ error: "Query too long." }, { status: 400 });
   }
 
   const result = await searchChunks({

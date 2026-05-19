@@ -80,7 +80,7 @@ function buildAuthorizedSourceIdsFilter(
   for (const source of sourceRows) {
     if (source.deleted_at) continue;
 
-    const metadata: SourceAccessMetadata = buildSourceAccessMetadata(source);
+    const metadata = buildSourceAccessMetadata(source);
 
     if (sourceMatchesRetrievalAuthorizationFilter(metadata, filter)) {
       authorizedIds.push(source.id);
@@ -105,11 +105,39 @@ function buildSourceAccessMetadata(source: SourceRow): SourceAccessMetadata {
     return { ...base, accessTier: "premium", shared: source.shared };
   }
 
-  // personal
+  if (source.access_tier === "personal") {
+    return {
+      ...base,
+      accessTier: "personal",
+      ownerUserId: source.owner_user_id ?? "",
+    };
+  }
+
+  throw new Error(`Unknown access_tier: ${source.access_tier}`);
+}
+
+/**
+ * Builds parameterized SQL for searching within authorized source IDs.
+ * Returns { sql, params } with correctly tracked parameter indices.
+ */
+function buildInClauseAndParams(
+  authorizedSourceIds: string[],
+  startIndex: number,
+): { inClause: string; params: string[]; nextIndex: number } {
+  const params: string[] = [];
+  const placeholders: string[] = [];
+
+  let idx = startIndex;
+  for (const id of authorizedSourceIds) {
+    params.push(id);
+    placeholders.push(`$${idx}`);
+    idx++;
+  }
+
   return {
-    ...base,
-    accessTier: "personal",
-    ownerUserId: source.owner_user_id ?? "",
+    inClause: placeholders.join(", "),
+    params,
+    nextIndex: idx,
   };
 }
 
@@ -118,6 +146,11 @@ function buildSourceAccessMetadata(source: SourceRow): SourceAccessMetadata {
  *
  * This is the basic keyword search implementation. Hybrid retrieval
  * (keyword + vector + reranking) will be added in issue #11.
+ *
+ * TODO(issue #11): Push access filtering into SQL WHERE instead of
+ * fetching all sources into application memory. The current approach loads
+ * all non-deleted sources per request, which is acceptable for MVP scale
+ * but won't scale to large source counts.
  */
 export async function searchChunks(input: SearchInput): Promise<SearchResult> {
   const { query: searchQuery, user, selection = {}, limit = 20, offset = 0 } = input;
@@ -126,9 +159,13 @@ export async function searchChunks(input: SearchInput): Promise<SearchResult> {
     return { chunks: [], total: 0, hasMore: false };
   }
 
+  const safeLimit = Math.min(Math.max(1, limit), 100);
+  const safeOffset = Math.max(0, offset);
+
   const filter = buildRetrievalAuthorizationFilter(user, selection);
 
-  // Fetch all non-deleted sources and filter by authorization
+  // TODO(issue #11): Push access filtering into SQL instead of loading all sources.
+  // Current approach: load all non-deleted sources, filter in application code.
   const sourceResult = await query<SourceRow>(
     "SELECT id, title, category, edition, language, access_tier, shared, owner_user_id, deleted_at FROM sources WHERE deleted_at IS NULL",
   );
@@ -145,20 +182,19 @@ export async function searchChunks(input: SearchInput): Promise<SearchResult> {
     sourceMap.set(row.id, row);
   }
 
-  // Full-text search on authorized chunks
-  // Using tsvector index defined in schema: chunks_text_search_idx
-  const safeLimit = Math.min(Math.max(1, limit), 100);
-  const safeOffset = Math.max(0, offset);
-
-  const placeholders = authorizedSourceIds.map((_, i) => `$${i + 3}`).join(", ");
+  // Build parameterized IN clause with clear index tracking
+  // $1 = search query text
+  const { inClause, params: sourceIdParams, nextIndex: afterSourceIds } = buildInClauseAndParams(authorizedSourceIds, 2);
+  const limitIdx = afterSourceIds;
+  const offsetIdx = afterSourceIds + 1;
 
   // Count query
   const countResult = await query<{ count: string }>(
     `SELECT count(*)::text
      FROM chunks
-     WHERE source_id IN (${placeholders})
+     WHERE source_id IN (${inClause})
        AND to_tsvector('simple', text) @@ plainto_tsquery('simple', $1)`,
-    [searchQuery, safeLimit, ...authorizedSourceIds],
+    [searchQuery, ...sourceIdParams],
   );
 
   const total = parseInt(countResult.rows[0]?.count ?? "0", 10);
@@ -167,11 +203,11 @@ export async function searchChunks(input: SearchInput): Promise<SearchResult> {
   const chunkResult = await query<ChunkRow>(
     `SELECT id, source_id, file_id, text, quote_text, section_heading, page_number
      FROM chunks
-     WHERE source_id IN (${placeholders})
+     WHERE source_id IN (${inClause})
        AND to_tsvector('simple', text) @@ plainto_tsquery('simple', $1)
      ORDER BY id
-     LIMIT $2 OFFSET $${authorizedSourceIds.length + 3}`,
-    [searchQuery, safeLimit, ...authorizedSourceIds, safeOffset],
+     LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+    [searchQuery, ...sourceIdParams, safeLimit, safeOffset],
   );
 
   const chunks: ChunkCitation[] = chunkResult.rows.map((row) => {
