@@ -1,5 +1,6 @@
-export const USER_ROLES = ["user", "premium", "admin"] as const;
-export type UserRole = (typeof USER_ROLES)[number];
+import type { UserRole } from "../auth/types";
+
+export type { UserRole } from "../auth/types";
 
 export const ACCESS_TIERS = ["open", "premium", "personal"] as const;
 export type AccessTier = (typeof ACCESS_TIERS)[number];
