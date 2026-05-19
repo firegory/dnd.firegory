@@ -142,7 +142,7 @@ export function JobsTable() {
       )
     )
       return;
-    if (!confirm("Are you absolutely sure? Type the source ID to confirm is not required, but think carefully.")) return;
+    if (!confirm("FINAL WARNING: This action is irreversible. Proceed with deletion?")) return;
     setActionStatus((prev) => ({ ...prev, [jobId]: "deleting" }));
     try {
       const res = await fetch(`/api/admin/ingestion/sources/${sourceId}/delete`, { method: "POST" });

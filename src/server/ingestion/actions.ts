@@ -3,8 +3,8 @@
  *
  * All actions require admin authorization (enforced at the API route layer).
  * Status guards prevent invalid state transitions.
- * Delete uses soft-delete (deleted_at) on sources, with CASCADE removing
- * related files, documents, pages, chunks. Artifacts on disk are also removed.
+ * Delete soft-deletes the source for audit, then hard-deletes files (which
+ * cascades to documents, pages, chunks). Artifacts on disk are also removed.
  */
 
 import { rm } from "node:fs/promises";
@@ -104,6 +104,9 @@ export async function retryFailedJob(
  * preserved. Any existing chunks, pages, and documents from previous jobs are
  * removed before the new job runs, ensuring a clean re-ingestion.
  *
+ * The active-jobs check and cleanup+job-creation run inside a single
+ * transaction with a row-level lock to prevent concurrent reprocess requests.
+ *
  * @returns The new reprocess job record.
  */
 export async function reprocessSource(
@@ -123,19 +126,6 @@ export async function reprocessSource(
   }
   if (sourceCheck.rows[0].deleted_at !== null) {
     throw new Error(`Source ${sourceId} has been deleted and cannot be reprocessed.`);
-  }
-
-  // Check no job is currently active (queued/processing) for this source
-  const activeJobs = await query<{ id: string; status: string }>(
-    `SELECT id, status FROM ingestion_jobs
-     WHERE source_id = $1 AND status IN ('queued', 'processing')`,
-    [sourceId],
-  );
-  if (activeJobs.rows.length > 0) {
-    const active = activeJobs.rows[0];
-    throw new Error(
-      `Cannot reprocess source ${sourceId}: job ${active.id} is currently "${active.status}". Wait for it to finish or cancel it first.`,
-    );
   }
 
   // Find the latest file for this source
@@ -159,9 +149,23 @@ export async function reprocessSource(
 
   const file = fileResult.rows[0];
 
-  // Within a transaction: remove old artifacts from previous successful jobs
-  // (chunks, pages, documents from prior jobs), then create new reprocess job
+  // Within a transaction: lock active jobs to prevent concurrent reprocess,
+  // remove old artifacts, then create new reprocess job
   const { job, oldArtifactsRoot } = await withTransaction(async (client) => {
+    // Lock any active jobs for this source to prevent concurrent reprocess
+    const activeJobs = await client.query<{ id: string; status: string }>(
+      `SELECT id, status FROM ingestion_jobs
+       WHERE source_id = $1 AND status IN ('queued', 'processing')
+       FOR UPDATE`,
+      [sourceId],
+    );
+    if (activeJobs.rows.length > 0) {
+      const active = activeJobs.rows[0];
+      throw new Error(
+        `Cannot reprocess source ${sourceId}: job ${active.id} is currently "${active.status}". Wait for it to finish or cancel it first.`,
+      );
+    }
+
     // Delete chunks from previous jobs for this source
     await client.query(
       `DELETE FROM chunks WHERE source_id = $1`,
@@ -186,6 +190,7 @@ export async function reprocessSource(
       fileId: file.id,
       requestedByUserId,
       metadata: { reprocessOfSource: sourceId },
+      client,
     });
 
     return { job, oldArtifactsRoot: file.artifacts_root };
@@ -214,11 +219,13 @@ export async function reprocessSource(
 // ---------------------------------------------------------------------------
 
 /**
- * Soft-deletes a source by setting `deleted_at`. CASCADE on FK relationships
- * will handle files, documents, pages, chunks cleanup in the DB. Also removes
- * processed artifacts and original files from disk.
+ * Soft-deletes a source by setting `deleted_at`, preserving the source record
+ * for audit. Then hard-deletes files which cascades to documents, pages, and
+ * chunks via ON DELETE CASCADE FK constraints. Also removes processed
+ * artifacts and original files from disk.
  *
  * Any active (queued/processing) jobs for this source are cancelled first.
+ * All DB mutations run inside a single transaction for atomicity.
  *
  * @throws If the source doesn't exist or is already deleted.
  */
@@ -244,29 +251,40 @@ export async function deleteSource(
     throw new Error(`Source ${sourceId} is already deleted.`);
   }
 
-  // Cancel any active jobs
-  const activeJobs = await query<{ id: string }>(
-    `UPDATE ingestion_jobs
-     SET status = 'cancelled', finished_at = now()
-     WHERE source_id = $1 AND status IN ('queued', 'processing')
-     RETURNING id`,
-    [sourceId],
-  );
-  const cancelledJobs = activeJobs.rows.map((r) => r.id);
-
-  // Collect file paths for disk cleanup
+  // Collect file paths for disk cleanup (before DB changes)
   const files = await query<{ id: string; storage_path: string; processed_artifacts_root: string | null }>(
     "SELECT id, storage_path, processed_artifacts_root FROM files WHERE source_id = $1",
     [sourceId],
   );
 
-  // Soft-delete the source (CASCADE handles files, docs, pages, chunks)
-  await query(
-    "UPDATE sources SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
-    [sourceId],
-  );
+  // All DB mutations inside a transaction for atomicity
+  const cancelledJobs = await withTransaction<string[]>(async (client) => {
+    // Cancel any active jobs
+    const activeJobs = await client.query<{ id: string }>(
+      `UPDATE ingestion_jobs
+       SET status = 'cancelled', finished_at = now()
+       WHERE source_id = $1 AND status IN ('queued', 'processing')
+       RETURNING id`,
+      [sourceId],
+    );
+    const cancelled = activeJobs.rows.map((r) => r.id);
 
-  // Remove files from disk (outside DB transaction)
+    // Soft-delete the source for audit trail
+    await client.query(
+      "UPDATE sources SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
+      [sourceId],
+    );
+
+    // Hard-delete files — ON DELETE CASCADE removes documents, pages, chunks
+    await client.query(
+      "DELETE FROM files WHERE source_id = $1",
+      [sourceId],
+    );
+
+    return cancelled;
+  });
+
+  // Remove files from disk (outside DB transaction — non-fatal)
   const removedFiles: string[] = [];
   for (const file of files.rows) {
     // Remove original file
