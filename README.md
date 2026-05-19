@@ -24,6 +24,10 @@ npm run build
 npm start
 ```
 
+## Dependency notes
+
+`package.json` includes an npm `overrides.postcss` entry so `npm audit --omit=dev` resolves to zero known production vulnerabilities while Next.js still depends on a vulnerable PostCSS range.
+
 ## Configuration
 
 Copy `.env.example` to `.env.local` for local-only values when configuration is added:
