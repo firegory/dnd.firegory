@@ -10,8 +10,8 @@ import {
   buildRetrievalAuthorizationFilter,
   type RetrievalUser,
   type RetrievalSelection,
-  type RetrievalAuthorizationFilter,
 } from "../access/retrieval-filter";
+import { buildSourceAccessSql } from "../access/access-sql";
 import { keywordSearch } from "./keyword";
 import { vectorSearch } from "./vector";
 import { mergeCandidates, type HybridMergeConfig } from "./hybrid";
@@ -53,56 +53,6 @@ export type HybridSearchResult = Readonly<{
   /** Query expansions used (for diagnostics). */
   expansions: readonly { text: string; reason: string; weight: number }[];
 }>;
-
-/**
- * Builds the SQL WHERE clause and parameters from a RetrievalAuthorizationFilter.
- *
- * This is the same logic as in search/service.ts — we replicate it here
- * to avoid importing the search service (which we're replacing/enhancing).
- */
-function buildSourceAccessSql(
-  filter: RetrievalAuthorizationFilter,
-): { sql: string; params: unknown[] } {
-  const conditions: string[] = [];
-  const params: unknown[] = [];
-
-  if (filter.edition) {
-    params.push(filter.edition);
-    conditions.push(`s.edition = $${params.length}`);
-  }
-
-  if (filter.language) {
-    params.push(filter.language);
-    conditions.push(`s.language = $${params.length}`);
-  }
-
-  if (filter.category) {
-    params.push(filter.category);
-    conditions.push(`s.category = $${params.length}`);
-  }
-
-  if (filter.access.kind === "all") {
-    // Admin — no access restriction
-  } else {
-    const clauseSql = filter.access.clauses.map((clause) => {
-      if (clause.accessTier === "open") {
-        return "(s.access_tier = 'open')";
-      }
-      if (clause.accessTier === "premium") {
-        return "(s.access_tier = 'premium' AND s.shared = true)";
-      }
-      // personal
-      params.push(clause.ownerUserId);
-      return `(s.access_tier = 'personal' AND s.owner_user_id = $${params.length})`;
-    });
-    conditions.push(`(${clauseSql.join(" OR ")})`);
-  }
-
-  return {
-    sql: conditions.length > 0 ? conditions.join(" AND ") : "1=1",
-    params,
-  };
-}
 
 /**
  * Executes the full hybrid retrieval pipeline.

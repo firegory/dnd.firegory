@@ -9,7 +9,6 @@ export type SearchRequestBody = Readonly<{
   language?: "en" | "ru";
   category?: "core_rules" | "official_supplement" | "homebrew";
   limit?: number;
-  offset?: number;
 }>;
 
 const MAX_QUERY_LENGTH = 500;

@@ -32,6 +32,23 @@ describe("expandQuery", () => {
     assert.strictEqual(result[0].reason, "original");
   });
 
+  it("does not match aliases as substrings", () => {
+    // "description" contains "con" as substring but should NOT trigger constitution alias
+    const result = expandQuery("fireball spell description");
+    assert.strictEqual(result.length, 1);
+    assert.strictEqual(result[0].reason, "original");
+
+    // "index" contains "dex" as substring but should NOT trigger dexterity alias
+    const result2 = expandQuery("index of spells");
+    assert.strictEqual(result2.length, 1);
+    assert.strictEqual(result2[0].reason, "original");
+
+    // "character" contains "cha" as substring but should NOT trigger charisma alias
+    const result3 = expandQuery("character creation");
+    assert.strictEqual(result3.length, 1);
+    assert.strictEqual(result3[0].reason, "original");
+  });
+
   it("expands ac alias to armor class", () => {
     const result = expandQuery("ac modifier");
     assert.ok(result.length >= 2);

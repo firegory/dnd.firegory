@@ -96,6 +96,27 @@ const ALIASES: ReadonlyMap<string, readonly string[]> = new Map([
 ]);
 
 /**
+ * Escapes special regex characters in a string.
+ */
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Checks if a term appears as a whole word in the query text.
+ *
+ * Uses a Unicode-aware approach: matches the term when preceded and followed
+ * by non-word characters (or string boundaries). Supports both Latin and
+ * Cyrillic alphabets.
+ */
+function queryContainsWord(query: string, term: string): boolean {
+  const escaped = escapeRegex(term);
+  // Unicode-aware word boundary: preceded/followed by non-letter, non-digit, non-underscore
+  // or at string start/end. Uses [\\s\\p{P}] for whitespace/punctuation boundaries.
+  return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, "iu").test(query);
+}
+
+/**
  * Expands a query with related terms.
  *
  * Returns the original query plus any expansions. The `language` parameter
@@ -119,12 +140,11 @@ export function expandQuery(
     { text: searchQuery, reason: "original", weight: 1.0 },
   ];
 
-  const lowerQuery = searchQuery.toLowerCase();
-  const seen = new Set<string>([lowerQuery]);
+  const seen = new Set<string>([searchQuery.toLowerCase()]);
 
-  // Alias expansion
+  // Alias expansion (word-boundary matching to avoid false positives)
   for (const [key, aliases] of ALIASES) {
-    if (lowerQuery.includes(key)) {
+    if (queryContainsWord(searchQuery, key)) {
       for (const alias of aliases) {
         const lowerAlias = alias.toLowerCase();
         if (!seen.has(lowerAlias)) {
@@ -139,10 +159,10 @@ export function expandQuery(
     }
   }
 
-  // Bilingual expansion
+  // Bilingual expansion (word-boundary matching)
   if (config.bilingual) {
     for (const [key, translations] of BILINGUAL_TERMS) {
-      if (lowerQuery.includes(key)) {
+      if (queryContainsWord(searchQuery, key)) {
         for (const translation of translations) {
           const lowerTranslation = translation.toLowerCase();
           if (!seen.has(lowerTranslation)) {
