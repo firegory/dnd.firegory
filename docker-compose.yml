@@ -1,3 +1,9 @@
+x-common-env: &common-env
+  DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-dnd}:${POSTGRES_PASSWORD:-dnd_dev_password}@postgres:5432/${POSTGRES_DB:-dnd_firegory}}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+  ZAI_API_KEY: ${ZAI_API_KEY:-}
+  STORAGE_ROOT: ${STORAGE_ROOT:-/app/storage}
+
 services:
   app:
     build:
@@ -7,12 +13,10 @@ services:
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:
+      <<: *common-env
       APP_URL: ${APP_URL:-http://localhost:3000}
       NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
-      DATABASE_URL: ${DATABASE_URL:-postgresql://dnd:dnd_dev_password@postgres:5432/dnd_firegory}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-      ZAI_API_KEY: ${ZAI_API_KEY:-}
-      STORAGE_ROOT: ${STORAGE_ROOT:-/app/storage}
+      AUTH_SECRET: ${AUTH_SECRET:-}
     volumes:
       - .:/app
       - node_modules:/app/node_modules
@@ -34,10 +38,7 @@ services:
         console.log('Worker placeholder started. Ingestion/RAG worker will be implemented in a later issue.');
         setInterval(() => {}, 60_000);
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://dnd:dnd_dev_password@postgres:5432/dnd_firegory}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
-      ZAI_API_KEY: ${ZAI_API_KEY:-}
-      STORAGE_ROOT: ${STORAGE_ROOT:-/app/storage}
+      <<: *common-env
     volumes:
       - .:/app
       - node_modules:/app/node_modules
