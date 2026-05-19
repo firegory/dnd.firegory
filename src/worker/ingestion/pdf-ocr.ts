@@ -79,7 +79,6 @@ export async function ocrPdf(
 
     await execFile("ocrmypdf", [
       "--language", "eng+rus",
-      "--skip-text",         // Don't re-OCR pages that already have text
       "--deskew",            // Fix skewed scans
       "--remove-background", // Clean up scanned backgrounds
       "--sidecar", join(outputDir, "ocr-sidecar.txt"), // Extract text alongside

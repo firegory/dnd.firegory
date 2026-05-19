@@ -138,22 +138,44 @@ export async function persistChunksWithEmbeddings(
 ): Promise<number> {
   if (chunks.length === 0) return 0;
 
-  let inserted = 0;
+  const BATCH_SIZE = 25;
+  let totalInserted = 0;
 
-  // Insert in batches of 10 to keep query size manageable
-  for (let i = 0; i < chunks.length; i += 10) {
-    const batch = chunks.slice(i, i + 10);
+  for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+    const batch = chunks.slice(i, i + BATCH_SIZE);
 
-    for (const chunk of batch) {
-      const embeddingStr = `[${chunk.embedding.join(",")}]`;
+    // Build multi-row INSERT with parameterized values
+    const valueGroups: string[] = [];
+    const params: unknown[] = [];
 
-      await query(
-        `INSERT INTO chunks (
+    for (let j = 0; j < batch.length; j++) {
+      const chunk = batch[j];
+      const base = j * 12;
+      valueGroups.push(
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, NULL, $${base + 11}::vector, $${base + 12})`,
+      );
+      params.push(
+        chunk.sourceId,
+        chunk.fileId,
+        chunk.jobId,
+        chunk.chunkIndex,
+        chunk.text,
+        chunk.quoteText,
+        chunk.sectionHeading,
+        chunk.pageNumber,
+        chunk.textSpanStart,
+        chunk.textSpanEnd,
+        `[${chunk.embedding.join(",")}]`,
+        chunk.embeddingModel,
+      );
+    }
+
+    const sql = `INSERT INTO chunks (
           source_id, file_id, ingestion_job_id, chunk_index,
           text, quote_text, section_heading, page_number,
           text_span_start, text_span_end,
           token_count, embedding, embedding_model
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11::vector, $12)
+        ) VALUES ${valueGroups.join(", ")}
         ON CONFLICT (file_id, chunk_index) DO UPDATE SET
           source_id = EXCLUDED.source_id,
           ingestion_job_id = EXCLUDED.ingestion_job_id,
@@ -164,27 +186,13 @@ export async function persistChunksWithEmbeddings(
           text_span_start = EXCLUDED.text_span_start,
           text_span_end = EXCLUDED.text_span_end,
           embedding = EXCLUDED.embedding,
-          embedding_model = EXCLUDED.embedding_model`,
-        [
-          chunk.sourceId,
-          chunk.fileId,
-          chunk.jobId,
-          chunk.chunkIndex,
-          chunk.text,
-          chunk.quoteText,
-          chunk.sectionHeading,
-          chunk.pageNumber,
-          chunk.textSpanStart,
-          chunk.textSpanEnd,
-          embeddingStr,
-          chunk.embeddingModel,
-        ],
-      );
-      inserted++;
-    }
+          embedding_model = EXCLUDED.embedding_model`;
+
+    await query(sql, params);
+    totalInserted += batch.length;
   }
 
-  return inserted;
+  return totalInserted;
 }
 
 /**
@@ -202,24 +210,44 @@ export async function persistPages(
 ): Promise<number> {
   if (pages.length === 0) return 0;
 
-  let inserted = 0;
-  for (const page of pages) {
-    await query(
-      `INSERT INTO pages (
-        source_id, file_id, ingestion_job_id,
-        page_number, section_heading, text
-      ) VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
+  const BATCH_SIZE = 25;
+  let totalInserted = 0;
+
+  for (let i = 0; i < pages.length; i += BATCH_SIZE) {
+    const batch = pages.slice(i, i + BATCH_SIZE);
+
+    const valueGroups: string[] = [];
+    const params: unknown[] = [];
+
+    for (let j = 0; j < batch.length; j++) {
+      const page = batch[j];
+      const base = j * 6;
+      valueGroups.push(
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`,
+      );
+      params.push(
         page.sourceId,
         page.fileId,
         page.jobId,
         page.pageNumber,
         page.sectionHeading,
         page.text,
-      ],
-    );
-    inserted++;
+      );
+    }
+
+    const sql = `INSERT INTO pages (
+        source_id, file_id, ingestion_job_id,
+        page_number, section_heading, text
+      ) VALUES ${valueGroups.join(", ")}
+      ON CONFLICT (file_id, page_number) DO UPDATE SET
+        source_id = EXCLUDED.source_id,
+        ingestion_job_id = EXCLUDED.ingestion_job_id,
+        section_heading = EXCLUDED.section_heading,
+        text = EXCLUDED.text`;
+
+    await query(sql, params);
+    totalInserted += batch.length;
   }
 
-  return inserted;
+  return totalInserted;
 }

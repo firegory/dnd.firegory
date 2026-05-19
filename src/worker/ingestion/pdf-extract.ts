@@ -10,6 +10,8 @@ import { join } from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
+import { getPdfPageCount } from "./pdf-normalize.ts";
+
 const execFile = promisify(execFileCb);
 
 export type ExtractedPage = Readonly<{
@@ -153,19 +155,6 @@ async function extractWholeFile(
     return await readFile(outputPath, "utf-8");
   } catch {
     return "";
-  }
-}
-
-/**
- * Gets PDF page count using pdfinfo.
- */
-async function getPdfPageCount(pdfPath: string): Promise<number | null> {
-  try {
-    const { stdout } = await execFile("pdfinfo", [pdfPath]);
-    const match = stdout.match(/Pages:\s+(\d+)/);
-    return match ? parseInt(match[1], 10) : null;
-  } catch {
-    return null;
   }
 }
 
