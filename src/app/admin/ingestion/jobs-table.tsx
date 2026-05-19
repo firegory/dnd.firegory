@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 
 type JobRecord = {
   id: string;
@@ -29,11 +29,29 @@ export function JobsTable() {
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionStatus, setActionStatus] = useState<Record<string, string>>({});
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch("/api/admin/ingestion/jobs?limit=50");
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? "Failed to load jobs.");
+        return;
+      }
+      setJobs(data.jobs ?? []);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
 
-    async function load() {
+    async function initialLoad() {
       try {
         const res = await fetch("/api/admin/ingestion/jobs?limit=50");
         const data = await res.json();
@@ -52,13 +70,101 @@ export function JobsTable() {
       }
     }
 
-    load();
-    const interval = setInterval(load, REFRESH_INTERVAL_MS);
+    initialLoad();
+    const interval = setInterval(() => {
+      if (!cancelled) load();
+    }, REFRESH_INTERVAL_MS);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [load]);
+
+  async function handleRetry(jobId: string) {
+    if (!confirm("Retry this failed job? A new job will be created with the same source and file.")) return;
+    setActionStatus((prev) => ({ ...prev, [jobId]: "retrying" }));
+    try {
+      const res = await fetch(`/api/admin/ingestion/jobs/${jobId}/retry`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error ?? "Retry failed.");
+        return;
+      }
+      setActionStatus((prev) => ({ ...prev, [jobId]: "retry-ok" }));
+      await load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setTimeout(() => {
+        setActionStatus((prev) => {
+          const next = { ...prev };
+          delete next[jobId];
+          return next;
+        });
+      }, 3000);
+    }
+  }
+
+  async function handleReprocess(sourceId: string, jobId: string) {
+    if (
+      !confirm(
+        "Reprocess this source? Existing chunks, pages, and documents will be removed and regenerated from the original PDF.",
+      )
+    )
+      return;
+    setActionStatus((prev) => ({ ...prev, [jobId]: "reprocessing" }));
+    try {
+      const res = await fetch(`/api/admin/ingestion/sources/${sourceId}/reprocess`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error ?? "Reprocess failed.");
+        return;
+      }
+      setActionStatus((prev) => ({ ...prev, [jobId]: "reprocess-ok" }));
+      await load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setTimeout(() => {
+        setActionStatus((prev) => {
+          const next = { ...prev };
+          delete next[jobId];
+          return next;
+        });
+      }, 3000);
+    }
+  }
+
+  async function handleDelete(sourceId: string, jobId: string) {
+    if (
+      !confirm(
+        "⚠️ DELETE this source permanently?\n\nThis will remove the source, its files, all extracted chunks/pages/documents, and original PDF from disk. This cannot be undone.",
+      )
+    )
+      return;
+    if (!confirm("FINAL WARNING: This action is irreversible. Proceed with deletion?")) return;
+    setActionStatus((prev) => ({ ...prev, [jobId]: "deleting" }));
+    try {
+      const res = await fetch(`/api/admin/ingestion/sources/${sourceId}/delete`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        alert(data.error ?? "Delete failed.");
+        return;
+      }
+      setActionStatus((prev) => ({ ...prev, [jobId]: "delete-ok" }));
+      await load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setTimeout(() => {
+        setActionStatus((prev) => {
+          const next = { ...prev };
+          delete next[jobId];
+          return next;
+        });
+      }, 3000);
+    }
+  }
 
   if (loading) {
     return <p className="muted">Loading jobs…</p>;
@@ -85,12 +191,15 @@ export function JobsTable() {
             <th>Queued</th>
             <th>Finished</th>
             <th>Error</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody>
           {jobs.map((job) => (
             <tr key={job.id}>
-              <td><code>{job.id.slice(0, 8)}</code></td>
+              <td>
+                <code>{job.id.slice(0, 8)}</code>
+              </td>
               <td>{job.kind}</td>
               <td>
                 <span style={{ color: STATUS_COLORS[job.status] ?? "inherit", fontWeight: 600 }}>
@@ -98,14 +207,85 @@ export function JobsTable() {
                 </span>
               </td>
               <td>{job.progress}%</td>
-              <td><code>{job.sourceId?.slice(0, 8) ?? "—"}</code></td>
+              <td>
+                <code>{job.sourceId?.slice(0, 8) ?? "—"}</code>
+              </td>
               <td className="timestamp">{formatTimestamp(job.queuedAt)}</td>
               <td className="timestamp">{formatTimestamp(job.finishedAt)}</td>
               <td className="error-cell">{job.errorSummary ?? "—"}</td>
+              <td className="actions-cell">
+                <Actions
+                  job={job}
+                  actionStatus={actionStatus}
+                  onRetry={handleRetry}
+                  onReprocess={handleReprocess}
+                  onDelete={handleDelete}
+                />
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function Actions({
+  job,
+  actionStatus,
+  onRetry,
+  onReprocess,
+  onDelete,
+}: {
+  job: JobRecord;
+  actionStatus: Record<string, string>;
+  onRetry: (jobId: string) => void;
+  onReprocess: (sourceId: string, jobId: string) => void;
+  onDelete: (sourceId: string, jobId: string) => void;
+}) {
+  const status = actionStatus[job.id];
+
+  if (status === "retrying" || status === "reprocessing" || status === "deleting") {
+    return <span className="action-hint">{status}…</span>;
+  }
+
+  if (status === "retry-ok") return <span className="action-success">Retried ✓</span>;
+  if (status === "reprocess-ok") return <span className="action-success">Reprocessing ✓</span>;
+  if (status === "delete-ok") return <span className="action-success">Deleted ✓</span>;
+
+  const canRetry = (job.status === "failed" || job.status === "cancelled") && job.sourceId && job.fileId;
+  const canReprocess = (job.status === "succeeded" || job.status === "failed") && job.sourceId;
+  const canDelete = job.sourceId;
+
+  return (
+    <div className="actions-group">
+      {canRetry && (
+        <button
+          className="action-btn action-retry"
+          onClick={() => onRetry(job.id)}
+          title="Retry this failed job"
+        >
+          Retry
+        </button>
+      )}
+      {canReprocess && (
+        <button
+          className="action-btn action-reprocess"
+          onClick={() => onReprocess(job.sourceId!, job.id)}
+          title="Reprocess this source from original PDF"
+        >
+          Reprocess
+        </button>
+      )}
+      {canDelete && (
+        <button
+          className="action-btn action-delete"
+          onClick={() => onDelete(job.sourceId!, job.id)}
+          title="Delete this source and all related data"
+        >
+          Delete
+        </button>
+      )}
     </div>
   );
 }
