@@ -90,8 +90,8 @@ button, .button, .secondary-button {
   text-decoration: none;
 }
 button:disabled { cursor: not-allowed; opacity: 0.5; }
-button.upload-submit:not(:disabled) { background: var(--accent); color: #fff; }
-button.upload-submit:disabled { background: #93c5fd; color: #0f172a; }
+button.upload-submit { background: var(--accent); color: #fff; }
+button.upload-submit:hover { opacity: 0.9; }
 .secondary-button { background: rgba(148, 163, 184, 0.2); color: #e2e8f0; }
 .button-row { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.5rem; }
 .form-error { color: #fecaca; font-weight: 700; }
@@ -322,17 +322,20 @@ code { color: #bae6fd; }
 
 /* Admin ingestion UI */
 .upload-form { display: grid; gap: 1rem; margin-top: 1rem; }
-.form-label { display: grid; gap: 0.4rem; color: #dbeafe; font-weight: 600; }
+.form-label, .form-group { display: grid; gap: 0.4rem; color: #dbeafe; font-weight: 600; }
 .form-label input[type="text"],
 .form-label input[type="file"],
-.form-label select {
+.form-label select,
+.form-group input[type="text"],
+.form-group input[type="file"],
+.form-group select {
   border: 1px solid rgba(148, 163, 184, 0.45);
   border-radius: 0.75rem;
   background: rgba(15, 23, 42, 0.75);
   color: #f8fafc;
   padding: 0.75rem 0.85rem;
 }
-.form-label input[type="file"] { font-size: 0.9rem; }
+.form-label input[type="file"], .form-group input[type="file"] { font-size: 0.9rem; }
 .form-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: 1rem; }
 .form-success { color: #6ee7b7; font-weight: 600; }
 .timestamp { font-size: 0.85rem; white-space: nowrap; }
