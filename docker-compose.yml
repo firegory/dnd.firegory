@@ -36,12 +36,7 @@ services:
       context: .
       target: dev
     entrypoint: ["./docker/entrypoint.dev.sh"]
-    command:
-      - node
-      - -e
-      - |
-        console.log('Worker placeholder started. Ingestion/RAG worker will be implemented in a later issue.');
-        setInterval(() => {}, 60_000);
+    command: npm run worker
     environment:
       <<: *common-env
     volumes:
