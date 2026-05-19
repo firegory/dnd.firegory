@@ -38,7 +38,7 @@ export type SourceCitation = Readonly<{
 
 const LANGUAGE_INSTRUCTIONS: Record<AnswerLanguage, string> = {
   en: "Respond in English.",
-  ru: "Отвекай на русском языке.",
+  ru: "Отвечай на русском языке.",
 };
 
 /**

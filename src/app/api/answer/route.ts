@@ -60,6 +60,11 @@ export async function POST(request: Request): Promise<NextResponse> {
       ? body.answerLanguage
       : "en";
 
+  // Clamp retrieval limit to reasonable range
+  const retrievalLimit = body.limit
+    ? Math.min(Math.max(1, body.limit), 20)
+    : undefined;
+
   try {
     const result = await generateAnswer({
       query: body.query,
@@ -70,7 +75,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         ...(body.category ? { category: body.category } : {}),
       },
       answerLanguage,
-      retrievalLimit: body.limit,
+      retrievalLimit,
     });
 
     return NextResponse.json({
