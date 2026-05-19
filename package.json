@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types tests/**/*.test.mts"
   },
   "dependencies": {
     "next": "^16.2.6",
@@ -25,5 +26,6 @@
   },
   "overrides": {
     "postcss": "^8.5.10"
-  }
+  },
+  "type": "module"
 }
