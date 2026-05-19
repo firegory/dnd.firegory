@@ -1,20 +1,19 @@
 /**
  * Search service: returns authorized chunk/citation candidates.
  *
- * Uses the retrieval authorization filter builder to enforce role-based access
- * before returning results. The actual keyword/vector/hybrid search will be
- * added in issue #11. This issue establishes the search endpoint, filter
- * enforcement, and structured response shape.
+ * Generates SQL WHERE conditions directly from the RetrievalAuthorizationFilter
+ * so access control is enforced at the database level without loading all sources
+ * into application memory. The actual keyword/vector/hybrid search will be
+ * added in issue #11.
  */
 
 import { query } from "../db/client";
 import {
   buildRetrievalAuthorizationFilter,
-  sourceMatchesRetrievalAuthorizationFilter,
   type RetrievalSelection,
   type RetrievalUser,
-  type SourceAccessMetadata,
   type RetrievalAuthorizationFilter,
+  type SourceAccessClause,
 } from "../access/retrieval-filter";
 
 export type SearchInput = Readonly<{
@@ -55,7 +54,6 @@ type SourceRow = Readonly<{
   access_tier: string;
   shared: boolean;
   owner_user_id: string | null;
-  deleted_at: string | null;
 }>;
 
 type ChunkRow = Readonly<{
@@ -69,88 +67,83 @@ type ChunkRow = Readonly<{
 }>;
 
 /**
- * Builds the SQL WHERE clause for access-filtered source IDs.
+ * Generates a SQL WHERE clause fragment and params for a single SourceAccessClause.
+ *
+ * Each clause maps to a condition on the sources table:
+ * - open: access_tier = 'open'
+ * - premium: access_tier = 'premium' AND shared = true
+ * - personal: access_tier = 'personal' AND owner_user_id = $N
  */
-function buildAuthorizedSourceIdsFilter(
-  sourceRows: readonly SourceRow[],
-  filter: RetrievalAuthorizationFilter,
-): string[] {
-  const authorizedIds: string[] = [];
-
-  for (const source of sourceRows) {
-    if (source.deleted_at) continue;
-
-    const metadata = buildSourceAccessMetadata(source);
-
-    if (sourceMatchesRetrievalAuthorizationFilter(metadata, filter)) {
-      authorizedIds.push(source.id);
-    }
+function accessClauseToSql(
+  clause: SourceAccessClause,
+  params: unknown[],
+): string {
+  if (clause.accessTier === "open") {
+    return "(s.access_tier = 'open')";
   }
 
-  return authorizedIds;
-}
-
-function buildSourceAccessMetadata(source: SourceRow): SourceAccessMetadata {
-  const base = {
-    edition: source.edition as "5e" | "5.5e",
-    language: source.language as "en" | "ru",
-    category: source.category as "core_rules" | "official_supplement" | "homebrew",
-  };
-
-  if (source.access_tier === "open") {
-    return { ...base, accessTier: "open" };
+  if (clause.accessTier === "premium") {
+    return "(s.access_tier = 'premium' AND s.shared = true)";
   }
 
-  if (source.access_tier === "premium") {
-    return { ...base, accessTier: "premium", shared: source.shared };
-  }
-
-  if (source.access_tier === "personal") {
-    return {
-      ...base,
-      accessTier: "personal",
-      ownerUserId: source.owner_user_id ?? "",
-    };
-  }
-
-  throw new Error(`Unknown access_tier: ${source.access_tier}`);
+  // personal
+  params.push(clause.ownerUserId);
+  const idx = params.length;
+  return `(s.access_tier = 'personal' AND s.owner_user_id = $${idx})`;
 }
 
 /**
- * Builds parameterized SQL for searching within authorized source IDs.
- * Returns { sql, params } with correctly tracked parameter indices.
+ * Builds the full SQL WHERE clause and parameters from a RetrievalAuthorizationFilter.
+ *
+ * Returns { sql, params } where sql is a parenthesized WHERE expression
+ * referencing source table alias "s", and params are the corresponding values.
+ * The filter's edition/language/category fields add equality conditions.
+ * The filter's access field adds role-appropriate access tier conditions.
  */
-function buildInClauseAndParams(
-  authorizedSourceIds: string[],
-  startIndex: number,
-): { inClause: string; params: string[]; nextIndex: number } {
-  const params: string[] = [];
-  const placeholders: string[] = [];
+function buildSourceAccessSql(
+  filter: RetrievalAuthorizationFilter,
+): { sql: string; params: unknown[] } {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
 
-  let idx = startIndex;
-  for (const id of authorizedSourceIds) {
-    params.push(id);
-    placeholders.push(`$${idx}`);
-    idx++;
+  // Corpus narrowing filters (edition, language, category)
+  if (filter.edition) {
+    params.push(filter.edition);
+    conditions.push(`s.edition = $${params.length}`);
+  }
+
+  if (filter.language) {
+    params.push(filter.language);
+    conditions.push(`s.language = $${params.length}`);
+  }
+
+  if (filter.category) {
+    params.push(filter.category);
+    conditions.push(`s.category = $${params.length}`);
+  }
+
+  // Access tier conditions
+  if (filter.access.kind === "all") {
+    // Admin — no access restriction
+  } else {
+    const clauseSql = filter.access.clauses.map(
+      (clause) => accessClauseToSql(clause, params),
+    );
+    conditions.push(`(${clauseSql.join(" OR ")})`);
   }
 
   return {
-    inClause: placeholders.join(", "),
+    sql: conditions.length > 0 ? conditions.join(" AND ") : "1=1",
     params,
-    nextIndex: idx,
   };
 }
 
 /**
- * Performs a full-text search across chunks, enforcing access filters.
+ * Performs a full-text search across chunks, enforcing access filters at the
+ * SQL level via a JOIN with filtered sources.
  *
  * This is the basic keyword search implementation. Hybrid retrieval
  * (keyword + vector + reranking) will be added in issue #11.
- *
- * TODO(issue #11): Push access filtering into SQL WHERE instead of
- * fetching all sources into application memory. The current approach loads
- * all non-deleted sources per request, which is acceptable for MVP scale
- * but won't scale to large source counts.
  */
 export async function searchChunks(input: SearchInput): Promise<SearchResult> {
   const { query: searchQuery, user, selection = {}, limit = 20, offset = 0 } = input;
@@ -163,70 +156,57 @@ export async function searchChunks(input: SearchInput): Promise<SearchResult> {
   const safeOffset = Math.max(0, offset);
 
   const filter = buildRetrievalAuthorizationFilter(user, selection);
+  const { sql: accessSql, params: accessParams } = buildSourceAccessSql(filter);
 
-  // TODO(issue #11): Push access filtering into SQL instead of loading all sources.
-  // Current approach: load all non-deleted sources, filter in application code.
-  const sourceResult = await query<SourceRow>(
-    "SELECT id, title, category, edition, language, access_tier, shared, owner_user_id, deleted_at FROM sources WHERE deleted_at IS NULL",
-  );
-
-  const authorizedSourceIds = buildAuthorizedSourceIdsFilter(sourceResult.rows, filter);
-
-  if (authorizedSourceIds.length === 0) {
-    return { chunks: [], total: 0, hasMore: false };
-  }
-
-  // Build a source lookup map for citation metadata
-  const sourceMap = new Map<string, SourceRow>();
-  for (const row of sourceResult.rows) {
-    sourceMap.set(row.id, row);
-  }
-
-  // Build parameterized IN clause with clear index tracking
   // $1 = search query text
-  const { inClause, params: sourceIdParams, nextIndex: afterSourceIds } = buildInClauseAndParams(authorizedSourceIds, 2);
-  const limitIdx = afterSourceIds;
-  const offsetIdx = afterSourceIds + 1;
+  // accessParams start at $2+
+  const searchParamIdx = accessParams.length + 1;
+  const limitIdx = accessParams.length + 2;
+  const offsetIdx = accessParams.length + 3;
 
-  // Count query
+  const allParams = [...accessParams, searchQuery, safeLimit, safeOffset];
+
+  // Count query — join chunks with access-filtered sources
   const countResult = await query<{ count: string }>(
     `SELECT count(*)::text
-     FROM chunks
-     WHERE source_id IN (${inClause})
-       AND to_tsvector('simple', text) @@ plainto_tsquery('simple', $1)`,
-    [searchQuery, ...sourceIdParams],
+     FROM chunks c
+     JOIN sources s ON s.id = c.source_id
+     WHERE s.deleted_at IS NULL
+       AND ${accessSql}
+       AND to_tsvector('simple', c.text) @@ plainto_tsquery('simple', $${searchParamIdx})`,
+    allParams.slice(0, -2), // count doesn't need limit/offset
   );
 
   const total = parseInt(countResult.rows[0]?.count ?? "0", 10);
 
-  // Data query
-  const chunkResult = await query<ChunkRow>(
-    `SELECT id, source_id, file_id, text, quote_text, section_heading, page_number
-     FROM chunks
-     WHERE source_id IN (${inClause})
-       AND to_tsvector('simple', text) @@ plainto_tsquery('simple', $1)
-     ORDER BY id
+  // Data query — fetch chunks with source metadata in a single query
+  const chunkResult = await query<ChunkRow & SourceRow>(
+    `SELECT c.id, c.source_id, c.file_id, c.text, c.quote_text, c.section_heading, c.page_number,
+            s.title, s.category, s.edition, s.language, s.access_tier
+     FROM chunks c
+     JOIN sources s ON s.id = c.source_id
+     WHERE s.deleted_at IS NULL
+       AND ${accessSql}
+       AND to_tsvector('simple', c.text) @@ plainto_tsquery('simple', $${searchParamIdx})
+     ORDER BY c.id
      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
-    [searchQuery, ...sourceIdParams, safeLimit, safeOffset],
+    allParams,
   );
 
-  const chunks: ChunkCitation[] = chunkResult.rows.map((row) => {
-    const source = sourceMap.get(row.source_id);
-    return {
-      chunkId: row.id,
-      sourceId: row.source_id,
-      fileId: row.file_id,
-      text: row.text,
-      quoteText: row.quote_text,
-      sectionHeading: row.section_heading,
-      pageNumber: row.page_number,
-      edition: source?.edition ?? "",
-      language: source?.language ?? "",
-      sourceTitle: source?.title ?? "",
-      sourceCategory: source?.category ?? "",
-      accessTier: source?.access_tier ?? "",
-    };
-  });
+  const chunks: ChunkCitation[] = chunkResult.rows.map((row) => ({
+    chunkId: row.id,
+    sourceId: row.source_id,
+    fileId: row.file_id,
+    text: row.text,
+    quoteText: row.quote_text,
+    sectionHeading: row.section_heading,
+    pageNumber: row.page_number,
+    edition: row.edition,
+    language: row.language,
+    sourceTitle: row.title,
+    sourceCategory: row.category,
+    accessTier: row.access_tier,
+  }));
 
   return {
     chunks,
