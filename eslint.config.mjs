@@ -10,6 +10,7 @@ const config = [
       "out/**",
       "build/**",
       "next-env.d.ts",
+      "dnd.firegory-issue*/**",
     ],
   },
 ];
