@@ -13,9 +13,8 @@ services:
     build:
       context: .
       target: dev
-    command: >
-      sh -c 'export DATABASE_URL="$${DATABASE_URL:-postgresql://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}}";
-      npm run dev -- --hostname 0.0.0.0'
+    entrypoint: ["./docker/entrypoint.dev.sh"]
+    command: npm run dev -- --hostname 0.0.0.0
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:
@@ -36,9 +35,13 @@ services:
     build:
       context: .
       target: dev
-    command: >
-      sh -c 'export DATABASE_URL="$${DATABASE_URL:-postgresql://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@postgres:5432/$${POSTGRES_DB}}";
-      node -e "console.log('"'"'Worker placeholder started. Ingestion/RAG worker will be implemented in a later issue.'"'"'); setInterval(() => {}, 60_000);"'
+    entrypoint: ["./docker/entrypoint.dev.sh"]
+    command:
+      - node
+      - -e
+      - |
+        console.log('Worker placeholder started. Ingestion/RAG worker will be implemented in a later issue.');
+        setInterval(() => {}, 60_000);
     environment:
       <<: *common-env
     volumes:

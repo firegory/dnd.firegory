@@ -2,7 +2,6 @@ node_modules
 .next
 out
 build
-docker
 .git
 .env
 .env*.local
