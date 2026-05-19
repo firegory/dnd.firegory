@@ -28,3 +28,4 @@ next-env.d.ts
 
 # Local storage (originals, processed artifacts)
 storage/
+.cr/

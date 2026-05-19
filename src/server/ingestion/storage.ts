@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { query } from "../db/client";
 import type {
@@ -68,6 +69,10 @@ function rowToRecord(row: IngestionJobRow): IngestionJobRecord {
 
 /**
  * Stores the original PDF to disk and creates the corresponding file record in the DB.
+ *
+ * Writes the file to disk first, then inserts the DB record with the correct
+ * storage path in a single query. This avoids the invariant break where the
+ * DB could point at a "pending" path that doesn't exist on disk.
  */
 export async function storeOriginalPdf(input: {
   sourceId: string;
@@ -78,32 +83,28 @@ export async function storeOriginalPdf(input: {
   const checksum = computeChecksum(input.data);
   const byteSize = input.data.byteLength;
 
-  // Create file record first to get the ID
-  const insertResult = await query<{ id: string }>(
-    `INSERT INTO files (source_id, original_filename, mime_type, checksum_sha256, byte_size, storage_path, uploaded_by_user_id)
-     VALUES ($1, $2, 'application/pdf', $3, $4, $5, $6)
-     RETURNING id`,
+  // Generate file ID before writing so the path is deterministic
+  const fileId = randomUUID();
+  const storagePath = originalFilePath(input.sourceId, fileId);
+
+  // Write file to disk first — if this fails, no DB record is created
+  await mkdir(join(getStorageRoot(), "originals", input.sourceId), { recursive: true });
+  await writeFile(storagePath, input.data);
+
+  // Single INSERT with the correct storage path
+  await query<{ id: string }>(
+    `INSERT INTO files (id, source_id, original_filename, mime_type, checksum_sha256, byte_size, storage_path, uploaded_by_user_id)
+     VALUES ($1, $2, $3, 'application/pdf', $4, $5, $6, $7)`,
     [
+      fileId,
       input.sourceId,
       input.originalFilename,
       checksum,
       byteSize,
-      originalFilePath(input.sourceId, "pending"),
+      storagePath,
       input.requestedByUserId ?? null,
     ],
   );
-
-  const fileId = insertResult.rows[0].id;
-
-  // Compute actual storage path with the real file ID
-  const storagePath = originalFilePath(input.sourceId, fileId);
-
-  // Update the storage path
-  await query("UPDATE files SET storage_path = $1 WHERE id = $2", [storagePath, fileId]);
-
-  // Ensure directory exists and write file
-  await mkdir(join(getStorageRoot(), "originals", input.sourceId), { recursive: true });
-  await writeFile(storagePath, input.data);
 
   return { fileId, checksumSha256: checksum };
 }
