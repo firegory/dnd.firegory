@@ -10,13 +10,15 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types 'tests/**/*.test.mts'",
-    "db:migrate": "node --experimental-strip-types scripts/migrate.mts"
+    "db:migrate": "node --experimental-strip-types scripts/migrate.mts",
+    "worker": "node --experimental-strip-types src/worker/index.ts"
   },
   "dependencies": {
     "next": "^16.2.6",
     "pg": "^8.21.0",
     "react": "^19.2.6",
-    "react-dom": "^19.2.6"
+    "react-dom": "^19.2.6",
+    "redis": "^5.12.1"
   },
   "devDependencies": {
     "@types/node": "^25.9.0",

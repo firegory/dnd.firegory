@@ -25,3 +25,7 @@ pnpm-debug.log*
 # TypeScript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local storage (originals, processed artifacts)
+storage/
+.cr/
