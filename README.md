@@ -45,7 +45,7 @@ Useful service URLs and ports:
 - Postgres: `localhost:5432` (`POSTGRES_PORT` overrides host port).
 - Redis: `localhost:6379` (`REDIS_PORT` overrides host port).
 
-Compose uses the `pgvector/pgvector:pg16` image and initializes the database with `CREATE EXTENSION IF NOT EXISTS vector;` from `docker/postgres/init/001-pgvector.sql` on first database volume creation.
+Compose uses the `pgvector/pgvector:pg16` image and initializes the database with `CREATE EXTENSION IF NOT EXISTS vector;` from `docker/postgres/init/001-pgvector.sql` on first database volume creation. Redis is intentionally unauthenticated and host-exposed for local development only; do not use this Compose file as-is on a shared network or public host.
 
 To reset local infrastructure data:
 

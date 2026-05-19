@@ -1,0 +1,38 @@
+[
+  {
+    "sha": "732c383028ecfeba9a7ffaa8254061546feac80b",
+    "filename": ".env.example",
+    "status": "modified",
+    "additions": 23,
+    "deletions": 3,
+    "changes": 26,
+    "blob_url": "https://github.com/firegory/dnd.firegory/blob/25600eef8f07b997b2188ef9b445a2af9a305a8b/.env.example",
+    "raw_url": "https://github.com/firegory/dnd.firegory/raw/25600eef8f07b997b2188ef9b445a2af9a305a8b/.env.example",
+    "contents_url": "https://api.github.com/repos/firegory/dnd.firegory/contents/.env.example?ref=25600eef8f07b997b2188ef9b445a2af9a305a8b",
+    "patch": "@@ -1,5 +1,25 @@\n+# Copy to .env.local for local development overrides.\n+# Keep real secrets out of git.\n+\n # App\n-NEXT_PUBLIC_APP_URL=http://localhost:3000\n+APP_URL=\n+NEXT_PUBLIC_APP_URL=\n+APP_PORT=\n+\n+# Database\n+DATABASE_URL=\n+POSTGRES_DB=\n+POSTGRES_USER=\n+POSTGRES_PASSWORD=\n+POSTGRES_PORT=\n+\n+# Redis\n+REDIS_URL=\n+REDIS_PORT=\n+\n+# Auth and providers\n+AUTH_SECRET=\n+ZAI_API_KEY=\n \n-# Server-only secrets/configuration will be introduced in later milestones.\n-# Do not commit real secrets. Keep local values in .env.local.\n+# Storage\n+STORAGE_ROOT="
+  },
+  {
+    "sha": "d963a27be2949a534c9b3cebf6987708bd56240b",
+    "filename": "docker-compose.yml",
+    "status": "added",
+    "additions": 86,
+    "deletions": 0,
+    "changes": 86,
+    "blob_url": "https://github.com/firegory/dnd.firegory/blob/25600eef8f07b997b2188ef9b445a2af9a305a8b/docker-compose.yml",
+    "raw_url": "https://github.com/firegory/dnd.firegory/raw/25600eef8f07b997b2188ef9b445a2af9a305a8b/docker-compose.yml",
+    "contents_url": "https://api.github.com/repos/firegory/dnd.firegory/contents/docker-compose.yml?ref=25600eef8f07b997b2188ef9b445a2af9a305a8b",
+    "patch": "@@ -0,0 +1,86 @@\n+services:\n+  app:\n+    build:\n+      context: .\n+      target: dev\n+    command: npm run dev -- --hostname 0.0.0.0\n+    ports:\n+      - \"${APP_PORT:-3000}:3000\"\n+    environment:\n+      APP_URL: ${APP_URL:-http://localhost:3000}\n+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}\n+      DATABASE_URL: ${DATABASE_URL:-postgresql://dnd:dnd@postgres:5432/dnd_firegory}\n+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}\n+      AUTH_SECRET: ${AUTH_SECRET:-dev-only-change-me}\n+      ZAI_API_KEY: ${ZAI_API_KEY:-}\n+      STORAGE_ROOT: ${STORAGE_ROOT:-/app/storage}\n+    volumes:\n+      - .:/app\n+      - node_modules:/app/node_modules\n+      - app_storage:/app/storage\n+    depends_on:\n+      postgres:\n+        condition: service_healthy\n+      redis:\n+        condition: service_healthy\n+\n+  worker:\n+    build:\n+      context: .\n+      target: dev\n+    command:\n+      - node\n+      - -e\n+      - |\n+        console.log('Worker placeholder started. Ingestion/RAG worker will be implemented in a later issue.');\n+        setInterval(() => {}, 60_000);\n+    environment:\n+      DATABASE_URL: ${DATABASE_URL:-postgresql://dnd:dnd@postgres:5432/dnd_firegory}\n+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}\n+      ZAI_API_KEY: ${ZAI_API_KEY:-}\n+      STORAGE_ROOT: ${STORAGE_ROOT:-/app/storage}\n+    volumes:\n+      - .:/app\n+      - node_modules:/app/node_modules\n+      - app_storage:/app/storage\n+    depends_on:\n+      postgres:\n+        condition: service_healthy\n+      redis:\n+        condition: service_healthy\n+\n+  postgres:\n+    image: pgvector/pgvector:pg16\n+    environment:\n+      POSTGRES_DB: ${POSTGRES_DB:-dnd_firegory}\n+      POSTGRES_USER: ${POSTGRES_USER:-dnd}\n+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dnd}\n+    ports:\n+      - \"${POSTGRES_PORT:-5432}:5432\"\n+    volumes:\n+      - postgres_data:/var/lib/postgresql/data\n+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro\n+    healthcheck:\n+      test: [\"CMD-SHELL\", \"pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}\"]\n+      interval: 5s\n+      timeout: 5s\n+      retries: 10\n+\n+  redis:\n+    image: redis:7-alpine\n+    command: redis-server --appendonly yes\n+    ports:\n+      - \"${REDIS_PORT:-6379}:6379\"\n+    volumes:\n+      - redis_data:/data\n+    healthcheck:\n+      test: [\"CMD\", \"redis-cli\", \"ping\"]\n+      interval: 5s\n+      timeout: 5s\n+      retries: 10\n+\n+volumes:\n+  app_storage:\n+  node_modules:\n+  postgres_data:\n+  redis_data:"
+  },
+  {
+    "sha": "0aa0fc22558644b6dec3f8f24e90d6523c8d12a6",
+    "filename": "docker/postgres/init/001-pgvector.sql",
+    "status": "added",
+    "additions": 1,
+    "deletions": 0,
+    "changes": 1,
+    "blob_url": "https://github.com/firegory/dnd.firegory/blob/25600eef8f07b997b2188ef9b445a2af9a305a8b/docker%2Fpostgres%2Finit%2F001-pgvector.sql",
+    "raw_url": "https://github.com/firegory/dnd.firegory/raw/25600eef8f07b997b2188ef9b445a2af9a305a8b/docker%2Fpostgres%2Finit%2F001-pgvector.sql",
+    "contents_url": "https://api.github.com/repos/firegory/dnd.firegory/contents/docker%2Fpostgres%2Finit%2F001-pgvector.sql?ref=25600eef8f07b997b2188ef9b445a2af9a305a8b",
+    "patch": "@@ -0,0 +1 @@\n+CREATE EXTENSION IF NOT EXISTS vector;"
+  }
+]
