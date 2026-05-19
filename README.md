@@ -76,6 +76,27 @@ Validate Compose syntax without starting services:
 docker compose config
 ```
 
+## Database migrations
+
+The MVP schema uses plain SQL migrations in `migrations/` and a small Node runner backed by `pg`.
+The first migration enables `pgcrypto` and `pgvector`, then creates auth, source/file, ingestion, document/page/chunk, and diagnostic tables.
+
+Run migrations against a local Postgres instance:
+
+```bash
+# If using Compose defaults from this repository:
+export DATABASE_URL="postgres://dnd:dnd_dev_password@localhost:5432/dnd_firegory"
+npm run db:migrate
+```
+
+Inside the Compose app/worker network, the equivalent connection string is:
+
+```text
+postgres://dnd:dnd_dev_password@postgres:5432/dnd_firegory
+```
+
+The runner records applied files in `schema_migrations`, so rerunning `npm run db:migrate` is repeatable and skips migrations that were already applied.
+
 ## Dependency notes
 
 `package.json` includes an npm `overrides.postcss` entry so `npm audit --omit=dev` resolves to zero known production vulnerabilities while Next.js still depends on a vulnerable PostCSS range.
