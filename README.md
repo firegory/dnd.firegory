@@ -45,7 +45,7 @@ Useful service URLs and ports:
 - Postgres: `localhost:5432` (`POSTGRES_PORT` overrides host port).
 - Redis: `localhost:6379` (`REDIS_PORT` overrides host port).
 
-Compose uses the `pgvector/pgvector:pg16` image and initializes the database with `CREATE EXTENSION IF NOT EXISTS vector;` from `docker/postgres/init/001-pgvector.sql` on first database volume creation. Redis is intentionally unauthenticated and host-exposed for local development only; do not use this Compose file as-is on a shared network or public host.
+Compose uses the `pgvector/pgvector:pg16` image and initializes the database with `CREATE EXTENSION IF NOT EXISTS vector;` from `docker/postgres/init/001-pgvector.sql` on first database volume creation. The default local database connection is `postgresql://dnd:dnd_dev_password@postgres:5432/dnd_firegory`; set `DATABASE_URL` if the app or worker should use a different database. Redis is intentionally unauthenticated and host-exposed for local development only; do not use this Compose file as-is on a shared network or public host.
 
 To reset local infrastructure data:
 
@@ -58,7 +58,7 @@ This removes the Compose-managed Postgres, Redis, dependency, and storage volume
 ### Compose troubleshooting
 
 - If port `3000`, `5432`, or `6379` is already in use, set `APP_PORT`, `POSTGRES_PORT`, or `REDIS_PORT` in `.env` or export them before running Compose.
-- If the app container has stale dependencies, rebuild with `docker compose build --no-cache app worker`.
+- If the app container has stale dependencies, rebuild with `docker compose build --no-cache app worker`; if the named `node_modules` volume is stale, reset local volumes with `docker compose down -v`.
 - If the `vector` extension is missing after changing init scripts, recreate the Postgres volume with `docker compose down -v` and start again.
 
 ## Developer commands
