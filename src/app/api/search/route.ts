@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { searchChunks } from "../../../server/search/service";
+import { hybridSearch } from "../../../server/retrieval/pipeline";
 import { getCurrentUser } from "../../../server/auth/session";
 
 export type SearchRequestBody = Readonly<{
@@ -35,7 +35,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: "Query too long." }, { status: 400 });
   }
 
-  const result = await searchChunks({
+  const hybridResult = await hybridSearch({
     query: body.query,
     user: { role: user.role, userId: user.id },
     selection: {
@@ -44,8 +44,38 @@ export async function POST(request: Request): Promise<NextResponse> {
       ...(body.category ? { category: body.category } : {}),
     },
     limit: body.limit,
-    offset: body.offset,
+    expansionConfig: {
+      enabled: true,
+      bilingual: body.language === undefined, // bilingual only when no language selected
+    },
+    rerankConfig: {
+      enabled: true,
+    },
   });
 
-  return NextResponse.json(result);
+  // Map hybrid result to the existing search API response shape
+  // for backward compatibility. Strategy and score are included
+  // for diagnostics but the core citation fields are unchanged.
+  return NextResponse.json({
+    chunks: hybridResult.chunks.map((c) => ({
+      chunkId: c.chunkId,
+      sourceId: c.sourceId,
+      fileId: c.fileId,
+      text: c.text,
+      quoteText: c.quoteText,
+      sectionHeading: c.sectionHeading,
+      pageNumber: c.pageNumber,
+      edition: c.edition,
+      language: c.language,
+      sourceTitle: c.sourceTitle,
+      sourceCategory: c.sourceCategory,
+      accessTier: c.accessTier,
+      // New fields from hybrid retrieval
+      score: c.score,
+      strategy: c.strategy,
+    })),
+    total: hybridResult.totalMerged,
+    hasMore: hybridResult.hasMore,
+    expansions: hybridResult.expansions,
+  });
 }
