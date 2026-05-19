@@ -111,69 +111,72 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
 
   return (
     <form ref={formRef} onSubmit={handleSubmit} className="upload-form">
-      <label className="form-label">
-        PDF file
+      {/* File input separated from label wrapper to avoid label→input click double-fire
+          that can swallow the change event in React + Next.js hydration. */}
+      <div className="form-label">
+        <label htmlFor="pdf-file-input">PDF file</label>
         <input
+          id="pdf-file-input"
           ref={fileInputRef}
           type="file"
           accept=".pdf,application/pdf"
           onChange={handleFileChange}
-          required
           disabled={isUploading}
         />
-      </label>
+        {file && <span className="hint">Selected: {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</span>}
+      </div>
 
-      <label className="form-label">
-        Source title
+      <div className="form-label">
+        <label htmlFor="source-title-input">Source title</label>
         <input
+          id="source-title-input"
           type="text"
           value={title}
           onChange={handleTitleChange}
           placeholder="e.g. Player's Handbook"
-          required
           disabled={isUploading}
         />
-      </label>
+      </div>
 
       <div className="form-row">
-        <label className="form-label">
-          Category
-          <select value={category} onChange={(e) => setCategory(e.target.value)} disabled={isUploading}>
+        <div className="form-label">
+          <label htmlFor="category-select">Category</label>
+          <select id="category-select" value={category} onChange={(e) => setCategory(e.target.value)} disabled={isUploading}>
             {CATEGORIES.map((c) => (
               <option key={c.value} value={c.value}>{c.label}</option>
             ))}
           </select>
-        </label>
+        </div>
 
-        <label className="form-label">
-          Edition
-          <select value={edition} onChange={(e) => setEdition(e.target.value)} disabled={isUploading}>
+        <div className="form-label">
+          <label htmlFor="edition-select">Edition</label>
+          <select id="edition-select" value={edition} onChange={(e) => setEdition(e.target.value)} disabled={isUploading}>
             {EDITIONS.map((ed) => (
               <option key={ed.value} value={ed.value}>{ed.label}</option>
             ))}
           </select>
-        </label>
+        </div>
 
-        <label className="form-label">
-          Language
-          <select value={language} onChange={(e) => setLanguage(e.target.value)} disabled={isUploading}>
+        <div className="form-label">
+          <label htmlFor="language-select">Language</label>
+          <select id="language-select" value={language} onChange={(e) => setLanguage(e.target.value)} disabled={isUploading}>
             {LANGUAGES.map((l) => (
               <option key={l.value} value={l.value}>{l.label}</option>
             ))}
           </select>
-        </label>
+        </div>
 
-        <label className="form-label">
-          Access tier
-          <select value={accessTier} onChange={(e) => setAccessTier(e.target.value)} disabled={isUploading}>
+        <div className="form-label">
+          <label htmlFor="access-tier-select">Access tier</label>
+          <select id="access-tier-select" value={accessTier} onChange={(e) => setAccessTier(e.target.value)} disabled={isUploading}>
             {ACCESS_TIERS.map((a) => (
               <option key={a.value} value={a.value}>{a.label}</option>
             ))}
           </select>
-        </label>
+        </div>
       </div>
 
-      <button type="submit" disabled={!canSubmit}>
+      <button type="submit" disabled={!canSubmit} className="upload-submit">
         {isUploading ? "Uploading…" : "Upload and ingest"}
       </button>
 
