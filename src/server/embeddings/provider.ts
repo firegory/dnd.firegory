@@ -153,7 +153,18 @@ export async function persistChunksWithEmbeddings(
           text, quote_text, section_heading, page_number,
           text_span_start, text_span_end,
           token_count, embedding, embedding_model
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11::vector, $12)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11::vector, $12)
+        ON CONFLICT (file_id, chunk_index) DO UPDATE SET
+          source_id = EXCLUDED.source_id,
+          ingestion_job_id = EXCLUDED.ingestion_job_id,
+          text = EXCLUDED.text,
+          quote_text = EXCLUDED.quote_text,
+          section_heading = EXCLUDED.section_heading,
+          page_number = EXCLUDED.page_number,
+          text_span_start = EXCLUDED.text_span_start,
+          text_span_end = EXCLUDED.text_span_end,
+          embedding = EXCLUDED.embedding,
+          embedding_model = EXCLUDED.embedding_model`,
         [
           chunk.sourceId,
           chunk.fileId,

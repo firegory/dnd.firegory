@@ -70,13 +70,12 @@ export async function normalizePdf(
       ]);
       return { normalizedPath: outputPath, method: "qpdf", wasRepaired: false };
     } catch {
-      // qpdf failed — may need repair
+      // qpdf failed — try more aggressive recovery options
       try {
         await execFile("qpdf", [
-          "--linearize",
-          "--qdf",
+          "--normalize",         // normalize content streams
+          "--suppress-recovery", // bypass qpdf's own recovery to force output
           "--no-warn",
-          "--replace-input",  // attempt repair
           inputPath,
           outputPath,
         ]);

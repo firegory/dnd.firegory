@@ -275,27 +275,35 @@ export async function runPipeline(input: {
     // Persist chunks without embeddings (if embedding failed but we still want chunks for full-text search)
     if (embeddingsSkipped > 0 && chunksWithEmbeddings.length === 0) {
       // Insert chunks without embeddings so full-text search still works
+      const { query: dbQuery } = await import("../../server/db/client.ts");
       for (const chunk of chunks) {
-        await import("../../server/db/client.ts").then(({ query }) =>
-          query(
-            `INSERT INTO chunks (
-              source_id, file_id, ingestion_job_id, chunk_index,
-              text, quote_text, section_heading, page_number,
-              text_span_start, text_span_end
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-            [
-              sourceId,
-              fileId,
-              jobId,
-              chunk.chunkIndex,
-              chunk.text,
-              chunk.quoteText,
-              chunk.sectionHeading,
-              chunk.pageNumber,
-              chunk.textSpanStart,
-              chunk.textSpanEnd,
-            ],
-          ),
+        await dbQuery(
+          `INSERT INTO chunks (
+            source_id, file_id, ingestion_job_id, chunk_index,
+            text, quote_text, section_heading, page_number,
+            text_span_start, text_span_end
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          ON CONFLICT (file_id, chunk_index) DO UPDATE SET
+            source_id = EXCLUDED.source_id,
+            ingestion_job_id = EXCLUDED.ingestion_job_id,
+            text = EXCLUDED.text,
+            quote_text = EXCLUDED.quote_text,
+            section_heading = EXCLUDED.section_heading,
+            page_number = EXCLUDED.page_number,
+            text_span_start = EXCLUDED.text_span_start,
+            text_span_end = EXCLUDED.text_span_end`,
+          [
+            sourceId,
+            fileId,
+            jobId,
+            chunk.chunkIndex,
+            chunk.text,
+            chunk.quoteText,
+            chunk.sectionHeading,
+            chunk.pageNumber,
+            chunk.textSpanStart,
+            chunk.textSpanEnd,
+          ],
         );
       }
       chunksPersisted = chunks.length;
