@@ -15,6 +15,52 @@ npm run dev
 
 The app starts at <http://localhost:3000> and currently renders a minimal placeholder page.
 
+## Docker Compose development
+
+The repository includes a local Compose stack with:
+
+- `app`: Next.js development server.
+- `worker`: placeholder process for the future ingestion/RAG worker.
+- `postgres`: PostgreSQL 16 with `pgvector` available.
+- `redis`: Redis queue/cache service.
+
+Start the stack:
+
+```bash
+# Defaults are provided by docker-compose.yml for dev.
+docker compose up --build
+```
+
+To override Compose values, either export variables in your shell or create a local `.env` file from `.env.example`:
+
+```bash
+cp .env.example .env
+# Fill local values as needed; .env is git-ignored.
+docker compose up --build
+```
+
+Useful service URLs and ports:
+
+- App: <http://localhost:3000> (`APP_PORT` overrides host port).
+- Postgres: `localhost:5432` (`POSTGRES_PORT` overrides host port).
+- Redis: `localhost:6379` (`REDIS_PORT` overrides host port).
+
+Compose uses the `pgvector/pgvector:pg16` image and initializes the database with `CREATE EXTENSION IF NOT EXISTS vector;` from `docker/postgres/init/001-pgvector.sql` on first database volume creation. By default, app and worker derive `DATABASE_URL` inside the container from `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`; set `DATABASE_URL` explicitly if they should use a different database. Redis is intentionally unauthenticated and host-exposed for local development only; do not use this Compose file as-is on a shared network or public host.
+
+To reset local infrastructure data:
+
+```bash
+docker compose down -v
+```
+
+This removes the Compose-managed Postgres, Redis, dependency, and storage volumes. Do not run it if you need to keep local data.
+
+### Compose troubleshooting
+
+- If port `3000`, `5432`, or `6379` is already in use, set `APP_PORT`, `POSTGRES_PORT`, or `REDIS_PORT` in `.env` or export them before running Compose.
+- If the app container has stale dependencies, rebuild with `docker compose build --no-cache app worker`; if the named `node_modules` volume is stale, reset local volumes with `docker compose down -v`.
+- If the `vector` extension is missing after changing init scripts, recreate the Postgres volume with `docker compose down -v` and start again.
+
 ## Developer commands
 
 ```bash
@@ -24,20 +70,27 @@ npm run build
 npm start
 ```
 
+Validate Compose syntax without starting services:
+
+```bash
+docker compose config
+```
+
 ## Dependency notes
 
 `package.json` includes an npm `overrides.postcss` entry so `npm audit --omit=dev` resolves to zero known production vulnerabilities while Next.js still depends on a vulnerable PostCSS range.
 
 ## Configuration
 
-Copy `.env.example` to `.env.local` for local-only values when configuration is added:
+Copy `.env.example` to `.env.local` for Next.js/npm local-only values, or to `.env` for Docker Compose overrides:
 
 ```bash
 cp .env.example .env.local
+cp .env.example .env
 ```
 
-Do not commit real secrets or local `.env` files.
+Required variable names are documented in `.env.example`. Do not commit real secrets or local `.env` files.
 
 ## Current scope
 
-This bootstrap only includes the minimal Next.js + TypeScript application skeleton and basic developer scripts. Database, auth, worker, Docker Compose, ingestion, and RAG implementation are planned for later issues.
+This bootstrap includes the minimal Next.js + TypeScript application skeleton, Docker Compose development infrastructure, and basic developer scripts. Database schema, auth, ingestion, and RAG implementation are planned for later issues.
