@@ -60,7 +60,10 @@ Search for chunks across authorized content using hybrid retrieval (keyword + ve
   ],
   "total": 15,
   "hasMore": true,
-  "expansions": ["grapple", "grab"]
+  "expansions": [
+    { "text": "grapple", "reason": "synonym", "weight": 0.8 },
+    { "text": "grab", "reason": "synonym", "weight": 0.6 }
+  ]
 }
 ```
 
