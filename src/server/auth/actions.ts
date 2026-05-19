@@ -38,17 +38,22 @@ export async function loginAction(
   _state: AuthActionState,
   formData: FormData,
 ): Promise<AuthActionState> {
-  const user = await authenticateUser(
-    String(formData.get("email") ?? ""),
-    String(formData.get("password") ?? ""),
-  );
+  try {
+    const user = await authenticateUser(
+      String(formData.get("email") ?? ""),
+      String(formData.get("password") ?? ""),
+    );
 
-  if (!user) {
-    return { error: "Invalid email or password." };
+    if (!user) {
+      return { error: "Invalid email or password." };
+    }
+
+    const session = await createSession(user.id);
+    await setSessionCookie(session.token, session.expiresAt);
+  } catch (error) {
+    return { error: toMessage(error) };
   }
 
-  const session = await createSession(user.id);
-  await setSessionCookie(session.token, session.expiresAt);
   redirect("/");
 }
 

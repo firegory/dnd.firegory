@@ -79,6 +79,7 @@ export async function listUsers(): Promise<readonly PublicUser[]> {
   const result = await query<UserRow>(
     `SELECT id, email, role, display_name, created_at, last_login_at, disabled_at
      FROM users
+     WHERE disabled_at IS NULL
      ORDER BY created_at ASC, email ASC`,
   );
   return result.rows.map(toPublicUser);
