@@ -4,8 +4,8 @@ import { useState, type FormEvent } from "react";
 
 const EDITIONS = [
   { value: "", label: "Any edition" },
-  { value: "5e", label: "5e" },
-  { value: "5.5e", label: "5.5e" },
+  { value: "5e", label: "D&D 5e" },
+  { value: "5.5e", label: "D&D 5.5e" },
 ] as const;
 
 const LANGUAGES = [
@@ -15,12 +15,12 @@ const LANGUAGES = [
 ] as const;
 
 const ANSWER_LANGUAGES = [
-  { value: "en", label: "EN" },
-  { value: "ru", label: "RU" },
+  { value: "en", label: "English" },
+  { value: "ru", label: "Русский" },
 ] as const;
 
 const CATEGORIES = [
-  { value: "", label: "Any category" },
+  { value: "", label: "All categories" },
   { value: "core_rules", label: "Core Rules" },
   { value: "official_supplement", label: "Official Supplement" },
   { value: "homebrew", label: "Homebrew" },
@@ -34,6 +34,8 @@ type Citation = Readonly<{
   page: number | null;
   section: string | null;
   category: string;
+  fileId: string;
+  sourceId: string;
 }>;
 
 type SearchResult = Readonly<{
@@ -41,38 +43,37 @@ type SearchResult = Readonly<{
   citations: readonly Citation[];
   confident: boolean;
   retrievedChunks: number;
-  meta: Readonly<{
+  meta: {
     model?: string;
-    retrievalTotal: number;
-    retrievalHasMore: boolean;
+    retrievalTotal?: number;
+    retrievalHasMore?: boolean;
     usage?: unknown;
-  }>;
+  };
 }>;
 
-type SearchStatus = "idle" | "searching" | "success" | "error" | "no-support";
+type FetchStatus = "idle" | "loading" | "success" | "error" | "not-configured";
 
 export function SearchForm() {
   const [query, setQuery] = useState("");
   const [edition, setEdition] = useState("");
   const [language, setLanguage] = useState("");
-  const [answerLanguage, setAnswerLanguage] = useState<"en" | "ru">("en");
+  const [answerLanguage, setAnswerLanguage] = useState<string>("en");
   const [category, setCategory] = useState("");
-  const [status, setStatus] = useState<SearchStatus>("idle");
+  const [status, setStatus] = useState<FetchStatus>("idle");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [result, setResult] = useState<SearchResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    const trimmed = query.trim();
-    if (!trimmed) return;
+    if (!query.trim()) return;
 
-    setStatus("searching");
+    setStatus("loading");
+    setErrorMessage(null);
     setResult(null);
-    setError(null);
 
     try {
       const body: Record<string, unknown> = {
-        query: trimmed,
+        query: query.trim(),
         answerLanguage,
       };
       if (edition) body.edition = edition;
@@ -88,21 +89,26 @@ export function SearchForm() {
       const data = await response.json();
 
       if (!response.ok) {
+        if (response.status === 401) {
+          setStatus("error");
+          setErrorMessage("Session expired. Please sign in again.");
+          return;
+        }
+        if (response.status === 503) {
+          setStatus("not-configured");
+          setErrorMessage(data.error ?? "Answer generation is not available.");
+          return;
+        }
         setStatus("error");
-        setError(data.error ?? "Search failed.");
+        setErrorMessage(data.error ?? "Request failed.");
         return;
       }
 
       setResult(data as SearchResult);
-
-      if (!data.confident && (!data.citations || data.citations.length === 0)) {
-        setStatus("no-support");
-      } else {
-        setStatus("success");
-      }
+      setStatus("success");
     } catch (err) {
       setStatus("error");
-      setError(err instanceof Error ? err.message : "Network error.");
+      setErrorMessage(err instanceof Error ? err.message : "Network error.");
     }
   }
 
@@ -112,48 +118,44 @@ export function SearchForm() {
         <div className="search-input-row">
           <input
             type="text"
+            className="search-query-input"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Ask a D&D question…"
-            className="search-query-input"
+            placeholder="Ask about D&D rules…"
             maxLength={500}
             required
-            disabled={status === "searching"}
+            disabled={status === "loading"}
             autoFocus
           />
           <button
             type="submit"
-            className="search-submit"
-            disabled={!query.trim() || status === "searching"}
+            className="search-submit-btn"
+            disabled={!query.trim() || status === "loading"}
           >
-            {status === "searching" ? "Searching…" : "Search"}
+            {status === "loading" ? "Searching…" : "Search"}
           </button>
         </div>
 
         <div className="search-toggles">
-          <label className="toggle-group">
-            <span className="toggle-label">Answer</span>
-            <div className="toggle-buttons">
+          <label className="search-toggle-label">
+            Answer in
+            <select
+              value={answerLanguage}
+              onChange={(e) => setAnswerLanguage(e.target.value)}
+              disabled={status === "loading"}
+            >
               {ANSWER_LANGUAGES.map((l) => (
-                <button
-                  key={l.value}
-                  type="button"
-                  className={`toggle-btn ${answerLanguage === l.value ? "active" : ""}`}
-                  onClick={() => setAnswerLanguage(l.value as "en" | "ru")}
-                >
-                  {l.label}
-                </button>
+                <option key={l.value} value={l.value}>{l.label}</option>
               ))}
-            </div>
+            </select>
           </label>
 
-          <label className="toggle-group">
-            <span className="toggle-label">Edition</span>
+          <label className="search-toggle-label">
+            Edition
             <select
               value={edition}
               onChange={(e) => setEdition(e.target.value)}
-              disabled={status === "searching"}
-              className="toggle-select"
+              disabled={status === "loading"}
             >
               {EDITIONS.map((ed) => (
                 <option key={ed.value} value={ed.value}>{ed.label}</option>
@@ -161,13 +163,12 @@ export function SearchForm() {
             </select>
           </label>
 
-          <label className="toggle-group">
-            <span className="toggle-label">Source lang</span>
+          <label className="search-toggle-label">
+            Source lang
             <select
               value={language}
               onChange={(e) => setLanguage(e.target.value)}
-              disabled={status === "searching"}
-              className="toggle-select"
+              disabled={status === "loading"}
             >
               {LANGUAGES.map((l) => (
                 <option key={l.value} value={l.value}>{l.label}</option>
@@ -175,13 +176,12 @@ export function SearchForm() {
             </select>
           </label>
 
-          <label className="toggle-group">
-            <span className="toggle-label">Category</span>
+          <label className="search-toggle-label">
+            Category
             <select
               value={category}
               onChange={(e) => setCategory(e.target.value)}
-              disabled={status === "searching"}
-              className="toggle-select"
+              disabled={status === "loading"}
             >
               {CATEGORIES.map((c) => (
                 <option key={c.value} value={c.value}>{c.label}</option>
@@ -191,94 +191,90 @@ export function SearchForm() {
         </div>
       </form>
 
-      <SearchResults status={status} result={result} error={error} />
+      {status === "error" && errorMessage && (
+        <div className="search-error">
+          <p className="form-error">{errorMessage}</p>
+        </div>
+      )}
+
+      {status === "not-configured" && errorMessage && (
+        <div className="search-error">
+          <p className="form-error">{errorMessage}</p>
+          <p className="hint">
+            Answer generation requires a configured LLM provider. Contact your admin.
+          </p>
+        </div>
+      )}
+
+      {status === "success" && result && (
+        <SearchResultView result={result} />
+      )}
     </div>
   );
 }
 
-function SearchResults({
-  status,
-  result,
-  error,
-}: {
-  status: SearchStatus;
-  result: SearchResult | null;
-  error: string | null;
-}) {
-  if (status === "idle") return null;
-
-  if (status === "searching") {
-    return (
-      <div className="search-results" aria-live="polite">
-        <div className="search-loading">
-          <span className="loading-spinner" aria-hidden="true"></span>
-          Searching for an answer…
-        </div>
-      </div>
-    );
-  }
-
-  if (status === "error") {
-    return (
-      <div className="search-results" aria-live="polite">
-        <div className="search-error">
-          <p className="form-error">{error ?? "Something went wrong."}</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (status === "no-support" && result) {
-    return (
-      <div className="search-results" aria-live="polite">
-        <div className="answer-card no-support">
-          <p className="answer-text">{result.answer}</p>
-          <p className="answer-meta hint">
-            No supporting sources found in the selected corpus.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!result) return null;
-
+function SearchResultView({ result }: { result: SearchResult }) {
   return (
-    <div className="search-results" aria-live="polite">
-      <div className="answer-card">
-        <div className="answer-text">{result.answer}</div>
-
-        {result.citations.length > 0 && (
-          <div className="citations-section">
-            <h3 className="citations-heading">Sources</h3>
-            <ul className="citations-list">
-              {result.citations.map((citation, i) => (
-                <li key={i} className="citation-item">
-                  <blockquote className="citation-quote">
-                    &ldquo;{citation.quote}&rdquo;
-                  </blockquote>
-                  <div className="citation-source">
-                    <span className="source-title">{citation.sourceTitle}</span>
-                    <span className="source-meta">
-                      {citation.edition}
-                      {citation.language ? ` · ${citation.language.toUpperCase()}` : ""}
-                      {citation.page != null ? ` · p. ${citation.page}` : ""}
-                      {citation.section ? ` · ${citation.section}` : ""}
-                    </span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
+    <div className="search-result">
+      <div className="search-answer">
+        <h2>Answer</h2>
+        <p className={result.confident ? "answer-text" : "answer-text answer-low-confidence"}>
+          {result.answer}
+        </p>
+        {!result.confident && (
+          <p className="hint confidence-hint">
+            ⚠ The system could not find a definitive answer in the available sources.
+          </p>
         )}
-
-        <div className="answer-meta">
-          <span className="hint">
-            {result.retrievedChunks} chunk{result.retrievedChunks !== 1 ? "s" : ""} retrieved
-            {result.meta.retrievalHasMore ? " (more available)" : ""}
-          </span>
-        </div>
       </div>
+
+      {result.citations.length > 0 && (
+        <div className="search-citations">
+          <h3>Sources ({result.citations.length})</h3>
+          <ul className="citations-list">
+            {result.citations.map((citation, i) => (
+              <li key={i} className="citation-item">
+                <blockquote className="citation-quote">
+                  &ldquo;{citation.quote}&rdquo;
+                </blockquote>
+                <div className="citation-meta">
+                  <span className="citation-title">{citation.sourceTitle}</span>
+                  {citation.edition && (
+                    <span className="citation-tag">{citation.edition}</span>
+                  )}
+                  {citation.language && (
+                    <span className="citation-tag">{citation.language.toUpperCase()}</span>
+                  )}
+                  {citation.page !== null && (
+                    <span className="citation-tag">p.{citation.page}</span>
+                  )}
+                  {citation.section && (
+                    <span className="citation-tag citation-section">{citation.section}</span>
+                  )}
+                  {citation.category && (
+                    <span className="citation-tag">{formatCategory(citation.category)}</span>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <p className="hint search-meta">
+        Retrieved {result.meta.retrievalTotal ?? result.retrievedChunks} chunk{result.meta.retrievalTotal !== 1 ? "s" : ""}
+        {result.meta.retrievalHasMore ? " (more available)" : ""}
+        {result.meta.model ? ` · Model: ${result.meta.model}` : ""}
+      </p>
     </div>
   );
+}
+
+function formatCategory(category: string): string {
+  const map: Record<string, string> = {
+    core_rules: "Core Rules",
+    official_supplement: "Supplement",
+    homebrew: "Homebrew",
+  };
+  return map[category] ?? category;
 }
