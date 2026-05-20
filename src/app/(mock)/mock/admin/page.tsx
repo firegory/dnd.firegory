@@ -43,30 +43,6 @@ const MOCK_JOBS = [
   },
 ];
 
-const MOCK_USERS = [
-  {
-    id: "usr-1",
-    name: "Егор",
-    email: "egor@example.com",
-    role: "admin",
-    lastSeen: "сегодня, 17:58",
-  },
-  {
-    id: "usr-2",
-    name: "Марина",
-    email: "marina@example.com",
-    role: "premium",
-    lastSeen: "вчера, 22:14",
-  },
-  {
-    id: "usr-3",
-    name: "Гость кампании",
-    email: "guest@example.com",
-    role: "user",
-    lastSeen: "3 дня назад",
-  },
-];
-
 const STATUS_STYLES: Record<string, string> = {
   completed: "bg-success/15 text-success",
   processing: "bg-warning/15 text-warning",
@@ -103,18 +79,6 @@ const ACCESS_OPTIONS = [
   { value: "personal", label: "Personal", description: "Только владелец" },
 ];
 
-const ROLE_OPTIONS = [
-  { value: "admin", label: "Admin", description: "Полный доступ" },
-  { value: "premium", label: "Premium", description: "Платные источники" },
-  { value: "user", label: "User", description: "Базовый доступ" },
-];
-
-const ROLE_STYLES: Record<string, string> = {
-  admin: "bg-danger/15 text-danger",
-  premium: "bg-accent/15 text-accent",
-  user: "bg-surface-light text-text-muted",
-};
-
 export default function MockAdminPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadDone, setUploadDone] = useState(false);
@@ -122,7 +86,6 @@ export default function MockAdminPage() {
   const [edition, setEdition] = useState("5.5e");
   const [language, setLanguage] = useState("ru");
   const [accessTier, setAccessTier] = useState("open");
-  const [users, setUsers] = useState(MOCK_USERS);
 
   function handleUpload(e: FormEvent) {
     e.preventDefault();
@@ -272,66 +235,6 @@ export default function MockAdminPage() {
                       {job.status === "completed" && <button className="rounded-md border border-accent/40 px-2 py-1 text-xs font-medium text-accent hover:bg-accent/10">Reprocess</button>}
                       <button className="rounded-md border border-danger/40 px-2 py-1 text-xs font-medium text-danger hover:bg-danger/10">Delete</button>
                     </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section>
-        <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h2 className="text-xl font-bold text-text-primary">Права пользователей</h2>
-            <p className="mt-1 text-sm text-text-muted">
-              Mock-таблица: роли меняются локально без сохранения на сервере.
-            </p>
-          </div>
-          <span className="rounded-full bg-accent/15 px-3 py-1 text-xs font-semibold text-accent">
-            {users.length} пользователя
-          </span>
-        </div>
-
-        <div className="overflow-x-auto rounded-xl border border-border">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-border bg-surface">
-                <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Пользователь</th>
-                <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Текущая роль</th>
-                <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Изменить роль</th>
-                <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Активность</th>
-              </tr>
-            </thead>
-            <tbody>
-              {users.map((user) => (
-                <tr key={user.id} className="border-b border-border-light transition-colors hover:bg-surface-light/50">
-                  <td className="px-4 py-3">
-                    <p className="font-medium text-text-primary">{user.name}</p>
-                    <p className="mt-1 text-xs text-text-muted">{user.email}</p>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-semibold ${ROLE_STYLES[user.role]}`}>
-                      {user.role}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <MockSelect
-                      label="Роль"
-                      value={user.role}
-                      options={ROLE_OPTIONS}
-                      onChange={(role) =>
-                        setUsers((current) =>
-                          current.map((item) =>
-                            item.id === user.id ? { ...item, role } : item,
-                          ),
-                        )
-                      }
-                      className="min-w-44"
-                    />
-                  </td>
-                  <td className="px-4 py-3 text-xs whitespace-nowrap text-text-muted">
-                    {user.lastSeen}
                   </td>
                 </tr>
               ))}
