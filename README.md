@@ -128,15 +128,32 @@ npm run ingest -- \
 
 ### Worker system dependencies
 
-The ingestion worker requires these system packages for full PDF/OCR support:
+The ingestion worker depends on system PDF tools. The Docker image installs them automatically for both `app` and `worker` services.
 
-- `ocrmypdf`
-- `tesseract-ocr` with `eng` and `rus` language data
-- `poppler-utils`
-- `qpdf`
-- `ghostscript`
+For bare-metal Debian/Ubuntu worker runs, install at least Poppler before processing PDFs:
 
-If these tools are missing, the pipeline continues with graceful degradation — OCR is skipped and quality reports reflect the limitations.
+```bash
+sudo apt-get update && sudo apt-get install -y poppler-utils
+```
+
+Full PDF normalization and OCR support needs the complete set:
+
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  poppler-utils \
+  qpdf \
+  ghostscript \
+  ocrmypdf \
+  tesseract-ocr \
+  tesseract-ocr-eng \
+  tesseract-ocr-rus
+```
+
+- `poppler-utils` provides `pdfinfo` and `pdftotext`; these are required for text extraction, and jobs fail before extraction if they are missing.
+- `qpdf` and `ghostscript` improve PDF normalization/repair.
+- `ocrmypdf` plus Tesseract English/Russian data enables OCR fallback for scanned or low-text pages.
+
+On worker startup, a preflight check logs any missing required or optional tools so deployment issues are visible before a PDF job is processed.
 
 ## API reference
 
@@ -159,7 +176,7 @@ cp .env.example .env.local
 | `APP_URL` | no | Public app URL (default: `http://localhost:3000`) |
 | `NEXT_PUBLIC_APP_URL` | no | Public app URL exposed to the browser |
 | `AUTH_SECRET` | no | Reserved for future session secret hardening |
-| `ZAI_API_KEY` | no | z.ai API key for embeddings and LLM calls |
+| `ZAI_API_KEY` | no | z.ai API key for LLM calls and optional z.ai embeddings |
 | `STORAGE_ROOT` | no | Root directory for file storage (default: `./storage`) |
 | `APP_PORT` | no | Host port for the app in Docker Compose (default: `3000`) |
 | `POSTGRES_DB` | no | PostgreSQL database name (default: `dnd_firegory`) |
@@ -172,13 +189,19 @@ cp .env.example .env.local
 
 ### Embedding configuration
 
-Optional environment variables for fine-tuning the embedding provider:
+Optional environment variables for selecting and fine-tuning the embedding provider:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `ZAI_EMBEDDING_BASE_URL` | z.ai default | Embedding API base URL |
-| `ZAI_EMBEDDING_MODEL` | `z-embedding` | Embedding model name |
-| `ZAI_EMBEDDING_DIMENSIONS` | `1024` | Embedding vector dimensions |
+| `EMBEDDING_PROVIDER` | `zai` | Embedding provider: `zai` or `ollama` |
+| `EMBEDDING_DIMENSIONS` | provider default | Generic embedding vector dimensions override |
+| `ZAI_EMBEDDING_BASE_URL` | z.ai default | z.ai embedding API base URL |
+| `ZAI_EMBEDDING_MODEL` | `z-embedding` | z.ai embedding model name |
+| `ZAI_EMBEDDING_DIMENSIONS` | `1024` | z.ai embedding vector dimensions |
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama API base URL |
+| `OLLAMA_EMBEDDING_MODEL` | `bge-m3` | Ollama embedding model name; `nomic-embed-text` is a lighter fallback |
+| `OLLAMA_EMBEDDING_DIMENSIONS` | `1024` | Ollama embedding vector dimensions. `bge-m3` is expected to return 1024 dimensions. |
+| `OLLAMA_KEEP_ALIVE` | `1m` | Ollama model residency after a request; set `0` to unload immediately |
 
 ## Storage layout
 

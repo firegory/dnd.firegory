@@ -141,8 +141,23 @@ export async function generateAnswer(
     { role: "user", content: userMessage },
   ];
 
-  // 4. Call LLM
-  const result = await chatCompletion(messages, llmConfig);
+  // 4. Call LLM. If the LLM provider is missing or unavailable, keep the
+  // retrieval result useful instead of returning a generic 500/no-chunks UI.
+  let result: Awaited<ReturnType<typeof chatCompletion>>;
+  try {
+    result = await chatCompletion(messages, llmConfig);
+  } catch {
+    return {
+      answer: buildAnswerGenerationUnavailableAnswer(answerLanguage, chunks),
+      retrieval,
+      llmModel: "none",
+      usage: {
+        promptTokens: null,
+        completionTokens: null,
+        totalTokens: null,
+      },
+    };
+  }
 
   // 5. Parse and map
   const parsed = parseLlmResponse(result.content);
@@ -177,5 +192,32 @@ function buildNoSupportAnswer(language: AnswerLanguage): RagAnswer {
     citations: [],
     confident: false,
     retrievedChunks: 0,
+  };
+}
+
+function buildAnswerGenerationUnavailableAnswer(
+  language: AnswerLanguage,
+  chunks: HybridSearchResult["chunks"],
+): RagAnswer {
+  const messages: Record<AnswerLanguage, string> = {
+    en: "I found relevant source excerpts, but answer generation is not available right now. Please review the citations below.",
+    ru: "Я нашёл релевантные фрагменты источников, но генерация ответа сейчас недоступна. Посмотрите цитаты ниже.",
+  };
+
+  return {
+    answer: messages[language],
+    citations: chunks.map((chunk): SourceCitation => ({
+      quote: chunk.quoteText,
+      sourceTitle: chunk.sourceTitle,
+      edition: chunk.edition,
+      language: chunk.language,
+      page: chunk.pageNumber,
+      section: chunk.sectionHeading,
+      category: chunk.sourceCategory,
+      fileId: chunk.fileId,
+      sourceId: chunk.sourceId,
+    })),
+    confident: false,
+    retrievedChunks: chunks.length,
   };
 }

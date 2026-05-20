@@ -11,6 +11,8 @@ import { join } from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
+import { isCommandAvailable } from "./dependencies.ts";
+
 const execFile = promisify(execFileCb);
 
 export type OcrResult = Readonly<{
@@ -24,12 +26,7 @@ export type OcrResult = Readonly<{
  * Checks if ocrmypdf is available on the system.
  */
 export async function isOcrAvailable(): Promise<boolean> {
-  try {
-    await execFile("which", ["ocrmypdf"]);
-    return true;
-  } catch {
-    return false;
-  }
+  return isCommandAvailable("ocrmypdf");
 }
 
 /**

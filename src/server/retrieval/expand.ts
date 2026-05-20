@@ -41,6 +41,11 @@ const BILINGUAL_TERMS: ReadonlyMap<string, readonly string[]> = new Map([
   ["attack roll", ["бросок атаки"]],
   ["damage", ["урон"]],
   ["spell", ["заклинание"]],
+  ["subclass", ["подкласс"]],
+  ["druid", ["друид", "друида", "друиды"]],
+  ["sea", ["море", "моря", "морской", "морским", "океан"]],
+  ["ocean", ["море", "моря", "морской", "морским", "sea"]],
+  ["circle of the sea", ["круг моря", "морской круг"]],
   ["ability score", ["характеристика"]],
   ["proficiency", ["владение"]],
   ["advantage", ["преимущество"]],
@@ -62,6 +67,15 @@ const BILINGUAL_TERMS: ReadonlyMap<string, readonly string[]> = new Map([
   ["бросок атаки", ["attack roll"]],
   ["урон", ["damage"]],
   ["заклинание", ["spell"]],
+  ["подкласс", ["subclass"]],
+  ["друид", ["druid"]],
+  ["друида", ["druid"]],
+  ["друиды", ["druid"]],
+  ["море", ["sea", "ocean", "Circle of the Sea"]],
+  ["моря", ["sea", "ocean", "Circle of the Sea"]],
+  ["морской", ["sea", "ocean", "Circle of the Sea"]],
+  ["морским", ["sea", "ocean", "Circle of the Sea"]],
+  ["океан", ["ocean", "sea"]],
   ["характеристика", ["ability score"]],
   ["владение", ["proficiency"]],
   ["преимущество", ["advantage"]],
@@ -182,7 +196,7 @@ export function expandQuery(
 }
 
 /**
- * Combines expanded queries into a single search string for keyword search.
+ * Combines expanded queries into a single websearch query for keyword search.
  * Uses OR logic between expansions so any variant matches.
  */
 export function combinedExpandedQuery(
@@ -191,7 +205,6 @@ export function combinedExpandedQuery(
   if (expansions.length <= 1) {
     return expansions[0]?.text ?? "";
   }
-  // For keyword search, combine with OR for plainto_tsquery
-  // plainto_tsquery doesn't support OR, so we concatenate terms
-  return expansions.map((e) => e.text).join(" ");
+  // keywordSearch uses websearch_to_tsquery, where OR is supported.
+  return expansions.map((e) => e.text).join(" OR ");
 }

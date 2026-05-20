@@ -11,6 +11,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
 import { getPdfPageCount } from "./pdf-normalize.ts";
+import { isCommandAvailable } from "./dependencies.ts";
 
 const execFile = promisify(execFileCb);
 
@@ -46,6 +47,15 @@ export async function extractTextFromPdf(
   outputDir: string,
 ): Promise<ExtractionResult> {
   await mkdir(outputDir, { recursive: true });
+
+  const missingCommands: string[] = [];
+  if (!(await isCommandAvailable("pdfinfo"))) missingCommands.push("pdfinfo");
+  if (!(await isCommandAvailable("pdftotext"))) missingCommands.push("pdftotext");
+  if (missingCommands.length > 0) {
+    throw new Error(
+      `Missing PDF text extraction dependency: ${missingCommands.join(", ")} (install poppler-utils).`,
+    );
+  }
 
   const pages = await extractPagesIndividually(pdfPath, outputDir);
 

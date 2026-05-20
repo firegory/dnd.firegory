@@ -1,24 +1,39 @@
 /**
- * Embedding provider integration via z.ai API.
+ * Embedding provider integration.
  *
- * Generates text embeddings using the z.ai API and persists them
+ * Generates text embeddings using either z.ai or Ollama and persists them
  * into the chunks table with pgvector.
  */
 
 import { query } from "../../server/db/client.ts";
 
+export type EmbeddingProvider = "zai" | "ollama";
+
 export type EmbeddingConfig = Readonly<{
+  provider: EmbeddingProvider;
   apiKey: string;
   baseUrl: string;
   model: string;
   dimensions: number;
+  keepAlive: string;
 }>;
 
-const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
+const DEFAULT_ZAI_EMBEDDING_CONFIG: EmbeddingConfig = {
+  provider: "zai",
   apiKey: "",
   baseUrl: "https://api.z.ai/v1",
   model: "z-embedding",
   dimensions: 1024,
+  keepAlive: "",
+};
+
+const DEFAULT_OLLAMA_EMBEDDING_CONFIG: EmbeddingConfig = {
+  provider: "ollama",
+  apiKey: "",
+  baseUrl: "http://127.0.0.1:11434",
+  model: "bge-m3",
+  dimensions: 1024,
+  keepAlive: "1m",
 };
 
 export type EmbeddingResult = Readonly<{
@@ -27,30 +42,71 @@ export type EmbeddingResult = Readonly<{
   model: string;
 }>;
 
+function parseEmbeddingProvider(value: string | undefined): EmbeddingProvider {
+  if (!value) return "zai";
+  if (value === "zai" || value === "ollama") return value;
+  throw new Error(`Unsupported EMBEDDING_PROVIDER: ${value}`);
+}
+
+function parseDimensions(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const dimensions = parseInt(value, 10);
+  if (!Number.isFinite(dimensions) || dimensions <= 0) {
+    throw new Error(`Invalid embedding dimensions: ${value}`);
+  }
+  return dimensions;
+}
+
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
 /**
  * Gets the embedding configuration from environment variables.
  */
 export function getEmbeddingConfig(): EmbeddingConfig {
+  const provider = parseEmbeddingProvider(process.env.EMBEDDING_PROVIDER);
+
+  if (provider === "ollama") {
+    return {
+      ...DEFAULT_OLLAMA_EMBEDDING_CONFIG,
+      baseUrl: trimTrailingSlash(
+        process.env.OLLAMA_BASE_URL ?? DEFAULT_OLLAMA_EMBEDDING_CONFIG.baseUrl,
+      ),
+      model: process.env.OLLAMA_EMBEDDING_MODEL ?? DEFAULT_OLLAMA_EMBEDDING_CONFIG.model,
+      dimensions: parseDimensions(
+        process.env.OLLAMA_EMBEDDING_DIMENSIONS ?? process.env.EMBEDDING_DIMENSIONS,
+        DEFAULT_OLLAMA_EMBEDDING_CONFIG.dimensions,
+      ),
+      keepAlive: process.env.OLLAMA_KEEP_ALIVE ?? DEFAULT_OLLAMA_EMBEDDING_CONFIG.keepAlive,
+    };
+  }
+
   return {
-    ...DEFAULT_EMBEDDING_CONFIG,
+    ...DEFAULT_ZAI_EMBEDDING_CONFIG,
     apiKey: process.env.ZAI_API_KEY ?? "",
-    baseUrl: process.env.ZAI_EMBEDDING_BASE_URL ?? DEFAULT_EMBEDDING_CONFIG.baseUrl,
-    model: process.env.ZAI_EMBEDDING_MODEL ?? DEFAULT_EMBEDDING_CONFIG.model,
-    dimensions: parseInt(process.env.ZAI_EMBEDDING_DIMENSIONS ?? "1024", 10),
+    baseUrl: trimTrailingSlash(
+      process.env.ZAI_EMBEDDING_BASE_URL ?? DEFAULT_ZAI_EMBEDDING_CONFIG.baseUrl,
+    ),
+    model: process.env.ZAI_EMBEDDING_MODEL ?? DEFAULT_ZAI_EMBEDDING_CONFIG.model,
+    dimensions: parseDimensions(
+      process.env.ZAI_EMBEDDING_DIMENSIONS ?? process.env.EMBEDDING_DIMENSIONS,
+      DEFAULT_ZAI_EMBEDDING_CONFIG.dimensions,
+    ),
   };
 }
 
-/**
- * Generates an embedding for a single text string.
- */
-export async function generateEmbedding(
-  text: string,
-  config?: Partial<EmbeddingConfig>,
-): Promise<EmbeddingResult> {
-  const cfg = { ...getEmbeddingConfig(), ...config };
+function assertEmbeddingDimensions(embedding: readonly number[], cfg: EmbeddingConfig): void {
+  if (embedding.length !== cfg.dimensions) {
+    throw new Error(
+      `Embedding dimension mismatch for ${cfg.provider}/${cfg.model}: expected ${cfg.dimensions}, got ${embedding.length}`,
+    );
+  }
+}
 
+async function generateZaiEmbedding(text: string, cfg: EmbeddingConfig): Promise<EmbeddingResult> {
   if (!cfg.apiKey) {
-    throw new Error("ZAI_API_KEY is required for embedding generation");
+    throw new Error("ZAI_API_KEY is required for z.ai embedding generation");
   }
 
   const response = await fetch(`${cfg.baseUrl}/embeddings`, {
@@ -79,35 +135,106 @@ export async function generateEmbedding(
     model?: string;
   };
 
-  if (!data.data?.[0]?.embedding) {
+  const embedding = data.data?.[0]?.embedding;
+  if (!embedding) {
     throw new Error("Embedding API returned no embedding data");
   }
 
+  assertEmbeddingDimensions(embedding, cfg);
+
   return {
-    embedding: data.data[0].embedding,
+    embedding,
     tokenCount: data.usage?.prompt_tokens ?? null,
     model: data.model ?? cfg.model,
   };
 }
 
+async function generateOllamaEmbeddings(
+  texts: readonly string[],
+  cfg: EmbeddingConfig,
+): Promise<EmbeddingResult[]> {
+  const requestBody: Record<string, unknown> = {
+    model: cfg.model,
+    input: texts.length === 1 ? texts[0] : texts,
+  };
+
+  if (cfg.keepAlive) {
+    requestBody.keep_alive = cfg.keepAlive;
+  }
+
+  const response = await fetch(`${cfg.baseUrl}/api/embed`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(requestBody),
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(
+      `Ollama embedding API error: ${response.status} ${response.statusText}${body ? ` — ${body}` : ""}`,
+    );
+  }
+
+  const data = await response.json() as {
+    embeddings?: number[][];
+    model?: string;
+    prompt_eval_count?: number;
+  };
+
+  if (!data.embeddings || data.embeddings.length !== texts.length) {
+    throw new Error("Ollama embedding API returned unexpected embedding data");
+  }
+
+  return data.embeddings.map((embedding) => {
+    assertEmbeddingDimensions(embedding, cfg);
+    return {
+      embedding,
+      tokenCount: data.prompt_eval_count ?? null,
+      model: data.model ?? cfg.model,
+    };
+  });
+}
+
+/**
+ * Generates an embedding for a single text string.
+ */
+export async function generateEmbedding(
+  text: string,
+  config?: Partial<EmbeddingConfig>,
+): Promise<EmbeddingResult> {
+  const cfg = { ...getEmbeddingConfig(), ...config };
+
+  if (cfg.provider === "ollama") {
+    const [result] = await generateOllamaEmbeddings([text], cfg);
+    return result;
+  }
+
+  return generateZaiEmbedding(text, cfg);
+}
+
 /**
  * Generates embeddings for multiple texts in a batch.
  *
- * Processes in batches to respect API rate limits.
+ * Processes in batches to respect API rate limits and local model memory usage.
  */
 export async function generateEmbeddings(
   texts: readonly string[],
   config?: Partial<EmbeddingConfig>,
   batchSize = 20,
 ): Promise<EmbeddingResult[]> {
+  const cfg = { ...getEmbeddingConfig(), ...config };
   const results: EmbeddingResult[] = [];
 
   for (let i = 0; i < texts.length; i += batchSize) {
     const batch = texts.slice(i, i + batchSize);
-    const batchResults = await Promise.all(
-      batch.map((text) => generateEmbedding(text, config)),
-    );
-    results.push(...batchResults);
+    if (cfg.provider === "ollama") {
+      results.push(...await generateOllamaEmbeddings(batch, cfg));
+    } else {
+      const batchResults = await Promise.all(
+        batch.map((text) => generateZaiEmbedding(text, cfg)),
+      );
+      results.push(...batchResults);
+    }
   }
 
   return results;

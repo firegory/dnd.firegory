@@ -264,7 +264,7 @@ function SearchResultView({ result }: { result: SearchResult }) {
       <p className="hint search-meta">
         Retrieved {result.meta.retrievalTotal ?? result.retrievedChunks} chunk{result.meta.retrievalTotal !== 1 ? "s" : ""}
         {result.meta.retrievalHasMore ? " (more available)" : ""}
-        {result.meta.model ? ` · Model: ${result.meta.model}` : ""}
+        {result.meta.model && result.meta.model !== "none" ? ` · Model: ${result.meta.model}` : ""}
       </p>
     </div>
   );

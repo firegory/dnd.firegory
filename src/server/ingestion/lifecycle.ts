@@ -9,10 +9,10 @@
  * if it fails the job remains in "queued" and can be re-enqueued.
  */
 
-import { storeOriginalPdf, createSourceRecord, createIngestionJob, getIngestionJob } from "./storage";
-import { enqueueJob } from "./queue";
-import { withTransaction } from "../db/client";
-import type { AccessTier, SourceCategory, SourceEdition, SourceLanguage } from "../access/retrieval-filter";
+import { storeOriginalPdf, createSourceRecord, createIngestionJob, getIngestionJob } from "./storage.ts";
+import { enqueueJob } from "./queue.ts";
+import { withTransaction } from "../db/client.ts";
+import type { AccessTier, SourceCategory, SourceEdition, SourceLanguage } from "../access/retrieval-filter.ts";
 
 export type StartIngestionInput = Readonly<{
   title: string;

@@ -8,13 +8,13 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { normalizePdf, isValidPdf } from "./pdf-normalize";
+import { normalizePdf, isValidPdf } from "./pdf-normalize.ts";
 import {
   extractTextFromPdf,
   saveExtractionResults,
-} from "./pdf-extract";
-import { ocrPdf, readOcrSidecar, isOcrAvailable } from "./pdf-ocr";
-import { chunkPages } from "./chunking";
+} from "./pdf-extract.ts";
+import { ocrPdf, readOcrSidecar, isOcrAvailable } from "./pdf-ocr.ts";
+import { chunkPages } from "./chunking.ts";
 import {
   generateEmbeddings,
   persistChunksWithEmbeddings,
@@ -25,7 +25,7 @@ import {
   generateQualityReport,
   saveQualityReport,
   type QualityReport,
-} from "./quality-report";
+} from "./quality-report.ts";
 import {
   markJobProcessing,
   markJobSucceeded,
@@ -213,7 +213,10 @@ export async function runPipeline(input: {
       embeddingModel: string;
     }> = [];
 
-    if (embeddingConfig.apiKey && chunks.length > 0) {
+    const canGenerateEmbeddings = chunks.length > 0
+      && (embeddingConfig.provider === "ollama" || Boolean(embeddingConfig.apiKey));
+
+    if (canGenerateEmbeddings) {
       try {
         const texts = chunks.map((c) => c.text);
         const embeddingResults = await generateEmbeddings(texts);
@@ -248,7 +251,7 @@ export async function runPipeline(input: {
       }
     } else {
       embeddingsSkipped = chunks.length;
-      if (!embeddingConfig.apiKey) {
+      if (embeddingConfig.provider !== "ollama" && !embeddingConfig.apiKey) {
         embeddingErrors.push("ZAI_API_KEY not configured — embeddings skipped");
       }
     }

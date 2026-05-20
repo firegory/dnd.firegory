@@ -27,6 +27,23 @@ const ACCESS_TIERS = [
 
 type FormStatus = "idle" | "uploading" | "success" | "error";
 
+type UploadResponse = Partial<{
+  sourceId: string;
+  jobId: string;
+  error: string;
+}>;
+
+async function readUploadResponse(response: Response): Promise<UploadResponse> {
+  const text = await response.text();
+  if (!text.trim()) return {};
+
+  try {
+    return JSON.parse(text) as UploadResponse;
+  } catch {
+    return { error: text };
+  }
+}
+
 export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
@@ -85,11 +102,17 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
         return;
       }
 
-      const data = await response.json();
+      const data = await readUploadResponse(response);
 
       if (!response.ok) {
         setFormStatus("error");
-        setErrorMessage(data.error ?? "Upload failed.");
+        setErrorMessage(data.error ?? `Upload failed with HTTP ${response.status}.`);
+        return;
+      }
+
+      if (!data.sourceId || !data.jobId) {
+        setFormStatus("error");
+        setErrorMessage("Upload succeeded, but the server returned an unexpected response.");
         return;
       }
 

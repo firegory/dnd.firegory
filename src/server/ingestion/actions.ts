@@ -10,14 +10,14 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
-import { query, withTransaction } from "../db/client";
+import { query, withTransaction } from "../db/client.ts";
 import {
   getIngestionJob,
   createIngestionJob,
   type IngestionJobRecord,
-} from "./storage";
-import { enqueueJob } from "./queue";
-import { getStorageRoot } from "./paths";
+} from "./storage.ts";
+import { enqueueJob } from "./queue.ts";
+import { getStorageRoot } from "./paths.ts";
 
 // ---------------------------------------------------------------------------
 // Retry

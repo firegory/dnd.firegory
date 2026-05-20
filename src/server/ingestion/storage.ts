@@ -3,14 +3,15 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
-import { query } from "../db/client";
+import { query } from "../db/client.ts";
 import type {
   AccessTier,
   SourceCategory,
   SourceEdition,
   SourceLanguage,
-} from "../access/retrieval-filter";
-import { computeChecksum, originalFilePath, getStorageRoot } from "./paths";
+} from "../access/retrieval-filter.ts";
+import { normalizeSourceInput } from "../content/metadata.ts";
+import { computeChecksum, originalFilePath, getStorageRoot } from "./paths.ts";
 
 export type IngestionJobRecord = Readonly<{
   id: string;
@@ -133,18 +134,29 @@ export async function createSourceRecord(input: {
   metadata?: Record<string, unknown>;
   client?: PoolClient;
 }): Promise<string> {
-  const sql = `INSERT INTO sources (title, category, edition, language, access_tier, owner_user_id, created_by_user_id, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+  const normalized = normalizeSourceInput({
+    title: input.title,
+    category: input.category,
+    edition: input.edition,
+    language: input.language,
+    accessTier: input.accessTier,
+    ownerUserId: input.ownerUserId,
+    metadata: input.metadata,
+  });
+
+  const sql = `INSERT INTO sources (title, category, edition, language, access_tier, shared, owner_user_id, created_by_user_id, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING id`;
   const params = [
-    input.title,
-    input.category,
-    input.edition,
-    input.language,
-    input.accessTier,
-    input.ownerUserId ?? null,
+    normalized.title,
+    normalized.category,
+    normalized.edition,
+    normalized.language,
+    normalized.accessTier,
+    normalized.shared,
+    normalized.ownerUserId,
     input.createdByUserId ?? null,
-    JSON.stringify(input.metadata ?? {}),
+    JSON.stringify(normalized.metadata ?? {}),
   ];
 
   const result = input.client

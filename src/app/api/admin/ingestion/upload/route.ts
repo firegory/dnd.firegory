@@ -81,6 +81,7 @@ export async function POST(request: Request) {
       edition: edition as SourceEdition,
       language: language as SourceLanguage,
       accessTier: accessTier as AccessTier,
+      ownerUserId: accessTier === "personal" ? user.id : null,
       requestedByUserId: user.id,
       originalFilename: file.name,
       pdfData,

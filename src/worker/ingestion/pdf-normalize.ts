@@ -11,6 +11,8 @@ import { join } from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
+import { isCommandAvailable } from "./dependencies.ts";
+
 const execFile = promisify(execFileCb);
 
 /** PDF magic bytes: %PDF- */
@@ -27,18 +29,6 @@ export type NormalizeResult = Readonly<{
  */
 export function isValidPdf(data: Buffer): boolean {
   return data.length >= 5 && data.subarray(0, 5).equals(PDF_MAGIC);
-}
-
-/**
- * Checks if a given system command is available on PATH.
- */
-async function commandExists(cmd: string): Promise<boolean> {
-  try {
-    await execFile("which", [cmd]);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -59,7 +49,7 @@ export async function normalizePdf(
   const outputPath = join(outputDir, "normalized.pdf");
 
   // Try qpdf first — fast, preserves structure
-  if (await commandExists("qpdf")) {
+  if (await isCommandAvailable("qpdf")) {
     try {
       await execFile("qpdf", [
         "--linearize",       // optimize for web/random access
@@ -87,7 +77,7 @@ export async function normalizePdf(
   }
 
   // Try Ghostscript — re-renders pages, strongest normalization
-  if (await commandExists("gs")) {
+  if (await isCommandAvailable("gs")) {
     try {
       await execFile("gs", [
         "-dNOPAUSE",
