@@ -189,19 +189,110 @@ cp .env.example .env.local
 
 ### Embedding configuration
 
-Optional environment variables for selecting and fine-tuning the embedding provider:
+The system supports separate embedding providers for ingestion (batch embeddings during PDF upload) and query (embedding search queries for vector retrieval). If the specific config is not set, it falls back to the generic embedding config.
+
+**Why split?** In a typical deployment:
+- The **ingestion worker** runs where you do PDF processing — often on a development PC with a powerful GPU for fast batch embedding.
+- The **query vector search** runs on the deploy server — a lightweight local Ollama instance for low-latency query embedding.
+- Both must use the same model and dimensions so embeddings are compatible.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `EMBEDDING_PROVIDER` | `zai` | Embedding provider: `zai` or `ollama` |
+| `EMBEDDING_PROVIDER` | `zai` | Generic embedding provider: `zai` or `ollama` |
 | `EMBEDDING_DIMENSIONS` | provider default | Generic embedding vector dimensions override |
+
+#### z.ai embedding (generic fallback)
+
+| Variable | Default | Description |
+| --- | --- | --- |
 | `ZAI_EMBEDDING_BASE_URL` | z.ai default | z.ai embedding API base URL |
 | `ZAI_EMBEDDING_MODEL` | `z-embedding` | z.ai embedding model name |
 | `ZAI_EMBEDDING_DIMENSIONS` | `1024` | z.ai embedding vector dimensions |
+
+#### Ollama embedding (generic fallback)
+
+| Variable | Default | Description |
+| --- | --- | --- |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | Ollama API base URL |
-| `OLLAMA_EMBEDDING_MODEL` | `bge-m3` | Ollama embedding model name; `nomic-embed-text` is a lighter fallback |
-| `OLLAMA_EMBEDDING_DIMENSIONS` | `1024` | Ollama embedding vector dimensions. `bge-m3` is expected to return 1024 dimensions. |
+| `OLLAMA_EMBEDDING_MODEL` | `bge-m3` | Ollama embedding model name |
+| `OLLAMA_EMBEDDING_DIMENSIONS` | `1024` | Ollama embedding vector dimensions |
 | `OLLAMA_KEEP_ALIVE` | `1m` | Ollama model residency after a request; set `0` to unload immediately |
+
+#### Ingestion embedding (worker/pipeline)
+
+Overrides for the ingestion worker. Falls back to generic config if not set.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `INGESTION_EMBEDDING_PROVIDER` | generic fallback | Provider for batch embeddings during ingestion |
+| `INGESTION_OLLAMA_BASE_URL` | `OLLAMA_BASE_URL` | Ollama URL for ingestion (e.g. remote PC) |
+| `INGESTION_OLLAMA_EMBEDDING_MODEL` | `OLLAMA_EMBEDDING_MODEL` | Model name for ingestion |
+| `INGESTION_OLLAMA_EMBEDDING_DIMENSIONS` | `OLLAMA_EMBEDDING_DIMENSIONS` | Dimensions for ingestion |
+| `INGESTION_OLLAMA_KEEP_ALIVE` | `OLLAMA_KEEP_ALIVE` | Keep-alive for ingestion Ollama |
+
+#### Query embedding (vector search)
+
+Overrides for vector search. Falls back to generic config if not set.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `QUERY_EMBEDDING_PROVIDER` | generic fallback | Provider for query-time embeddings |
+| `QUERY_OLLAMA_BASE_URL` | `OLLAMA_BASE_URL` | Ollama URL for search (e.g. localhost on server) |
+| `QUERY_OLLAMA_EMBEDDING_MODEL` | `OLLAMA_EMBEDDING_MODEL` | Model name for search |
+| `QUERY_OLLAMA_EMBEDDING_DIMENSIONS` | `OLLAMA_EMBEDDING_DIMENSIONS` | Dimensions for search |
+| `QUERY_OLLAMA_KEEP_ALIVE` | `OLLAMA_KEEP_ALIVE` | Keep-alive for search Ollama |
+
+### Example `.env.local` for Ollama deployment
+
+```bash
+# LLM
+ZAI_API_KEY=your-zai-api-key
+ZAI_LLM_BASE_URL=https://api.z.ai/api/paas/v4
+ZAI_LLM_MODEL=glm-5.1
+
+# Generic embedding fallback: Ollama
+EMBEDDING_PROVIDER=ollama
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_EMBEDDING_MODEL=bge-m3
+OLLAMA_EMBEDDING_DIMENSIONS=1024
+
+# Ingestion uses remote Ollama on developer's PC
+INGESTION_EMBEDDING_PROVIDER=ollama
+INGESTION_OLLAMA_BASE_URL=http://192.168.0.101:11434
+
+# Query uses local Ollama on the deploy server
+QUERY_EMBEDDING_PROVIDER=ollama
+QUERY_OLLAMA_BASE_URL=http://127.0.0.1:11434
+```
+
+### Installing Ollama for embeddings
+
+1. Install Ollama: follow [ollama.com/download](https://ollama.com/download) or run:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+2. Pull the embedding model:
+
+```bash
+ollama pull bge-m3
+```
+
+3. Set the env vars in `.env.local`:
+
+```bash
+EMBEDDING_PROVIDER=ollama
+```
+
+4. Verify Ollama is running and the model is available:
+
+```bash
+curl http://127.0.0.1:11434/api/embed \
+  -d '{"model":"bge-m3","input":"test"}'
+```
+
+**Note:** Both ingestion and query must use the same model and dimensions for compatible embeddings.
 
 ## Storage layout
 
@@ -276,7 +367,7 @@ dnd.firegory/
 │   │   ├── auth/               # Password hashing, sessions, user management
 │   │   ├── content/            # Source and file metadata CRUD
 │   │   ├── db/                 # Database client and migration runner
-│   │   ├── embeddings/         # Embedding provider (z.ai API)
+│   │   ├── embeddings/         # Embedding provider (z.ai / Ollama)
 │   │   ├── ingestion/          # Storage, queue, lifecycle, actions
 │   │   ├── retrieval/          # Hybrid retrieval: keyword, vector, expand, rerank
 │   │   └── search/             # Search service

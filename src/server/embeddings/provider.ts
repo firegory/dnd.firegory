@@ -62,7 +62,9 @@ function trimTrailingSlash(value: string): string {
 }
 
 /**
- * Gets the embedding configuration from environment variables.
+ * Gets the generic (legacy) embedding configuration from environment variables.
+ *
+ * Used as a fallback when neither ingestion- nor query-specific config is set.
  */
 export function getEmbeddingConfig(): EmbeddingConfig {
   const provider = parseEmbeddingProvider(process.env.EMBEDDING_PROVIDER);
@@ -91,6 +93,126 @@ export function getEmbeddingConfig(): EmbeddingConfig {
     model: process.env.ZAI_EMBEDDING_MODEL ?? DEFAULT_ZAI_EMBEDDING_CONFIG.model,
     dimensions: parseDimensions(
       process.env.ZAI_EMBEDDING_DIMENSIONS ?? process.env.EMBEDDING_DIMENSIONS,
+      DEFAULT_ZAI_EMBEDDING_CONFIG.dimensions,
+    ),
+  };
+}
+
+/**
+ * Gets the embedding configuration for ingestion (worker/pipeline).
+ *
+ * Uses INGESTION_EMBEDDING_* env vars with fallback to the generic
+ * EMBEDDING_PROVIDER / OLLAMA_* / ZAI_EMBEDDING_* vars.
+ *
+ * This is used when generating embeddings during PDF upload/processing
+ * (e.g. on a remote Ollama instance on the developer's PC).
+ */
+export function getIngestionEmbeddingConfig(): EmbeddingConfig {
+  const provider = parseEmbeddingProvider(
+    process.env.INGESTION_EMBEDDING_PROVIDER ?? process.env.EMBEDDING_PROVIDER,
+  );
+
+  if (provider === "ollama") {
+    return {
+      ...DEFAULT_OLLAMA_EMBEDDING_CONFIG,
+      baseUrl: trimTrailingSlash(
+        process.env.INGESTION_OLLAMA_BASE_URL
+          ?? process.env.OLLAMA_BASE_URL
+          ?? DEFAULT_OLLAMA_EMBEDDING_CONFIG.baseUrl,
+      ),
+      model:
+        process.env.INGESTION_OLLAMA_EMBEDDING_MODEL
+          ?? process.env.OLLAMA_EMBEDDING_MODEL
+          ?? DEFAULT_OLLAMA_EMBEDDING_CONFIG.model,
+      dimensions: parseDimensions(
+        process.env.INGESTION_OLLAMA_EMBEDDING_DIMENSIONS
+          ?? process.env.OLLAMA_EMBEDDING_DIMENSIONS
+          ?? process.env.EMBEDDING_DIMENSIONS,
+        DEFAULT_OLLAMA_EMBEDDING_CONFIG.dimensions,
+      ),
+      keepAlive:
+        process.env.INGESTION_OLLAMA_KEEP_ALIVE
+          ?? process.env.OLLAMA_KEEP_ALIVE
+          ?? DEFAULT_OLLAMA_EMBEDDING_CONFIG.keepAlive,
+    };
+  }
+
+  return {
+    ...DEFAULT_ZAI_EMBEDDING_CONFIG,
+    apiKey: process.env.ZAI_API_KEY ?? "",
+    baseUrl: trimTrailingSlash(
+      process.env.INGESTION_ZAI_EMBEDDING_BASE_URL
+        ?? process.env.ZAI_EMBEDDING_BASE_URL
+        ?? DEFAULT_ZAI_EMBEDDING_CONFIG.baseUrl,
+    ),
+    model:
+      process.env.INGESTION_ZAI_EMBEDDING_MODEL
+        ?? process.env.ZAI_EMBEDDING_MODEL
+        ?? DEFAULT_ZAI_EMBEDDING_CONFIG.model,
+    dimensions: parseDimensions(
+      process.env.INGESTION_ZAI_EMBEDDING_DIMENSIONS
+        ?? process.env.ZAI_EMBEDDING_DIMENSIONS
+        ?? process.env.EMBEDDING_DIMENSIONS,
+      DEFAULT_ZAI_EMBEDDING_CONFIG.dimensions,
+    ),
+  };
+}
+
+/**
+ * Gets the embedding configuration for query-time search (vector retrieval).
+ *
+ * Uses QUERY_EMBEDDING_* env vars with fallback to the generic
+ * EMBEDDING_PROVIDER / OLLAMA_* / ZAI_EMBEDDING_* vars.
+ *
+ * This is used when generating embeddings for search queries
+ * (e.g. on a local Ollama instance on the deploy server).
+ */
+export function getQueryEmbeddingConfig(): EmbeddingConfig {
+  const provider = parseEmbeddingProvider(
+    process.env.QUERY_EMBEDDING_PROVIDER ?? process.env.EMBEDDING_PROVIDER,
+  );
+
+  if (provider === "ollama") {
+    return {
+      ...DEFAULT_OLLAMA_EMBEDDING_CONFIG,
+      baseUrl: trimTrailingSlash(
+        process.env.QUERY_OLLAMA_BASE_URL
+          ?? process.env.OLLAMA_BASE_URL
+          ?? DEFAULT_OLLAMA_EMBEDDING_CONFIG.baseUrl,
+      ),
+      model:
+        process.env.QUERY_OLLAMA_EMBEDDING_MODEL
+          ?? process.env.OLLAMA_EMBEDDING_MODEL
+          ?? DEFAULT_OLLAMA_EMBEDDING_CONFIG.model,
+      dimensions: parseDimensions(
+        process.env.QUERY_OLLAMA_EMBEDDING_DIMENSIONS
+          ?? process.env.OLLAMA_EMBEDDING_DIMENSIONS
+          ?? process.env.EMBEDDING_DIMENSIONS,
+        DEFAULT_OLLAMA_EMBEDDING_CONFIG.dimensions,
+      ),
+      keepAlive:
+        process.env.QUERY_OLLAMA_KEEP_ALIVE
+          ?? process.env.OLLAMA_KEEP_ALIVE
+          ?? DEFAULT_OLLAMA_EMBEDDING_CONFIG.keepAlive,
+    };
+  }
+
+  return {
+    ...DEFAULT_ZAI_EMBEDDING_CONFIG,
+    apiKey: process.env.ZAI_API_KEY ?? "",
+    baseUrl: trimTrailingSlash(
+      process.env.QUERY_ZAI_EMBEDDING_BASE_URL
+        ?? process.env.ZAI_EMBEDDING_BASE_URL
+        ?? DEFAULT_ZAI_EMBEDDING_CONFIG.baseUrl,
+    ),
+    model:
+      process.env.QUERY_ZAI_EMBEDDING_MODEL
+        ?? process.env.ZAI_EMBEDDING_MODEL
+        ?? DEFAULT_ZAI_EMBEDDING_CONFIG.model,
+    dimensions: parseDimensions(
+      process.env.QUERY_ZAI_EMBEDDING_DIMENSIONS
+        ?? process.env.ZAI_EMBEDDING_DIMENSIONS
+        ?? process.env.EMBEDDING_DIMENSIONS,
       DEFAULT_ZAI_EMBEDDING_CONFIG.dimensions,
     ),
   };

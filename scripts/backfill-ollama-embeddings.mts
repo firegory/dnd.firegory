@@ -1,4 +1,4 @@
-import { generateEmbeddings, getEmbeddingConfig } from "../src/server/embeddings/provider.ts";
+import { generateEmbeddings, getIngestionEmbeddingConfig } from "../src/server/embeddings/provider.ts";
 import { query } from "../src/server/db/client.ts";
 
 const sourceIdArg = process.argv[2];
@@ -15,8 +15,9 @@ const limitSql = Number.isFinite(limitArg as number) && (limitArg as number) > 0
 const params: unknown[] = [sourceIdArg];
 if (limitSql) params.push(limitArg);
 
-const config = getEmbeddingConfig();
-console.log(`[backfill] provider=${config.provider} model=${config.model} dimensions=${config.dimensions} keepAlive=${config.keepAlive || ""}`);
+// Use ingestion config (remote Ollama) for backfill operations
+const config = getIngestionEmbeddingConfig();
+console.log(`[backfill] provider=${config.provider} model=${config.model} dimensions=${config.dimensions} baseUrl=${config.baseUrl} keepAlive=${config.keepAlive || ""}`);
 
 const initial = await query<{ total: string; missing: string }>(
   `SELECT count(*)::text AS total, count(*) FILTER (WHERE embedding IS NULL)::text AS missing FROM chunks WHERE source_id = $1`,
@@ -35,7 +36,7 @@ console.log(`[backfill] selected=${rows.length} batchSize=${batchSize}`);
 let done = 0;
 for (let offset = 0; offset < rows.length; offset += batchSize) {
   const batch = rows.slice(offset, offset + batchSize);
-  const embeddings = await generateEmbeddings(batch.map((row) => row.text), undefined, batch.length);
+  const embeddings = await generateEmbeddings(batch.map((row) => row.text), config, batch.length);
 
   await query("BEGIN");
   try {
