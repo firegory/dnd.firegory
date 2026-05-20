@@ -20,7 +20,7 @@ import {
   persistChunksWithEmbeddings,
   persistChunksWithoutEmbeddings,
   persistPages,
-  getEmbeddingConfig,
+  getIngestionEmbeddingConfig,
 } from "../../server/embeddings/provider.ts";
 import {
   generateQualityReport,
@@ -191,7 +191,7 @@ export async function runPipeline(input: {
     await updateJobProgress(jobId, 60);
 
     // === Stage 6: Generate embeddings ===
-    const embeddingConfig = getEmbeddingConfig();
+    const embeddingConfig = getIngestionEmbeddingConfig();
     let embeddingsGenerated = 0;
     let embeddingsSkipped = 0;
     const embeddingErrors: string[] = [];
@@ -219,7 +219,7 @@ export async function runPipeline(input: {
     if (canGenerateEmbeddings) {
       try {
         const texts = chunks.map((c) => c.text);
-        const embeddingResults = await generateEmbeddings(texts);
+        const embeddingResults = await generateEmbeddings(texts, embeddingConfig);
 
         for (let i = 0; i < chunks.length; i++) {
           if (i < embeddingResults.length) {

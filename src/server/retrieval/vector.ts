@@ -6,7 +6,7 @@
  */
 
 import { query } from "../db/client";
-import { generateEmbedding, getEmbeddingConfig } from "../embeddings/provider";
+import { generateEmbedding, getQueryEmbeddingConfig } from "../embeddings/provider";
 import type { RetrievalCandidate, RetrievalParams } from "./types";
 
 /**
@@ -27,15 +27,16 @@ export async function vectorSearch(
   const { limit, accessSql, accessParams } = params;
   const safeLimit = Math.min(Math.max(1, limit), 200);
 
-  // Generate query embedding
+  // Generate query embedding using query-specific config
   let queryEmbedding: readonly number[];
   try {
-    const config = getEmbeddingConfig();
-    if (!config.apiKey) {
-      // No API key configured — skip vector search gracefully
+    const config = getQueryEmbeddingConfig();
+    // Ollama does not require an API key; only skip when provider is z.ai
+    // and no key is configured.
+    if (config.provider !== "ollama" && !config.apiKey) {
       return [];
     }
-    const result = await generateEmbedding(searchQuery);
+    const result = await generateEmbedding(searchQuery, config);
     queryEmbedding = result.embedding;
   } catch {
     // Embedding generation failed — skip vector search gracefully
