@@ -1,7 +1,9 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { MockToggle } from "./toggle";
 
 const NAV_ITEMS = [
   { href: "/mock/search", label: "Поиск", marker: "SR" },
@@ -11,6 +13,7 @@ const NAV_ITEMS = [
 
 export function MockSidebar() {
   const pathname = usePathname();
+  const [siteLanguage, setSiteLanguage] = useState("ru");
 
   return (
     <aside className="fixed inset-y-0 left-0 z-30 flex w-64 flex-col border-r border-border bg-surface lg:w-56">
@@ -57,6 +60,15 @@ export function MockSidebar() {
       </nav>
 
       <div className="border-t border-border px-5 py-4">
+        <MockToggle
+          label="Язык сайта"
+          value={siteLanguage}
+          options={[
+            { value: "ru", label: "RU" },
+            { value: "en", label: "EN" },
+          ]}
+          onChange={setSiteLanguage}
+        />
         <p className="text-xs text-text-muted">Mock UI · Версия 0.2</p>
         <p className="mt-1 text-xs text-text-muted">
           Палитра из firegory.site

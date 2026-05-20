@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
 import { MockSelect } from "../../../../components/mock/select";
+import { MockToggle } from "../../../../components/mock/toggle";
 
 const MOCK_RESULTS = [
   {
@@ -44,15 +45,19 @@ const MOCK_RESULTS = [
 ];
 
 const EDITION_OPTIONS = [
-  { value: "", label: "Любая", description: "Искать по всем редакциям" },
-  { value: "5e", label: "D&D 5e" },
-  { value: "5.5e", label: "D&D 5.5e", description: "Правила 2024" },
-];
+  { value: "5e", label: "5e" },
+  { value: "5.5e", label: "5.5e" },
+] as const;
 
 const LANGUAGE_OPTIONS = [
-  { value: "", label: "Любой", description: "RU и EN источники" },
-  { value: "ru", label: "Русский" },
-  { value: "en", label: "English" },
+  { value: "ru", label: "RU" },
+  { value: "en", label: "EN" },
+] as const;
+
+const SCOPE_OPTIONS = [
+  { value: "core_rules", label: "Core rules", description: "Базовые книги" },
+  { value: "official_supplement", label: "Supplements", description: "Официальные дополнения" },
+  { value: "homebrew", label: "Homebrew", description: "Пользовательские материалы" },
 ];
 
 type ResultStatus = "idle" | "loading" | "done";
@@ -60,7 +65,8 @@ type ResultStatus = "idle" | "loading" | "done";
 export default function MockSearchPage() {
   const [query, setQuery] = useState("Sneak Attack");
   const [edition, setEdition] = useState("5.5e");
-  const [language, setLanguage] = useState("");
+  const [language, setLanguage] = useState("ru");
+  const [scope, setScope] = useState("core_rules");
   const [status, setStatus] = useState<ResultStatus>("done");
 
   function handleSubmit(e: FormEvent) {
@@ -72,22 +78,6 @@ export default function MockSearchPage() {
 
   return (
     <div className="space-y-8">
-      <section className="rounded-2xl border border-border bg-gradient-to-br from-surface via-surface to-secondary/45 p-6 lg:p-8">
-        <div className="max-w-3xl">
-          <p className="mb-3 text-sm font-semibold tracking-widest text-accent uppercase">
-            Citation-first D&D Search
-          </p>
-          <h1 className="mb-3 text-3xl leading-tight font-bold text-text-primary lg:text-4xl">
-            Поиск по правилам с точной цитатой из источника
-          </h1>
-          <p className="text-sm leading-relaxed text-text-secondary lg:text-base">
-            Главный экран сразу открывает поиск: запрос, фильтры и результаты.
-            Источники вынесены во второй раздел, чтобы библиотека не мешала
-            быстрому ответу за игровым столом.
-          </p>
-        </div>
-      </section>
-
       <section className="rounded-2xl border border-border bg-surface p-6">
         <form onSubmit={handleSubmit} className="space-y-5">
           <div className="flex flex-col gap-3 lg:flex-row">
@@ -107,18 +97,24 @@ export default function MockSearchPage() {
             </button>
           </div>
 
-          <div className="flex flex-wrap gap-4">
-            <MockSelect
+          <div className="flex flex-wrap items-end gap-4">
+            <MockToggle
+              label="Язык"
+              value={language}
+              options={LANGUAGE_OPTIONS}
+              onChange={setLanguage}
+            />
+            <MockToggle
               label="Редакция"
               value={edition}
               options={EDITION_OPTIONS}
               onChange={setEdition}
             />
             <MockSelect
-              label="Язык"
-              value={language}
-              options={LANGUAGE_OPTIONS}
-              onChange={setLanguage}
+              label="Scope"
+              value={scope}
+              options={SCOPE_OPTIONS}
+              onChange={setScope}
             />
           </div>
         </form>
