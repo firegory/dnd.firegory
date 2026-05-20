@@ -18,6 +18,7 @@ import {
   ContentMetadataValidationError,
 } from "../../src/server/content/metadata.ts";
 import { computeChecksum } from "../../src/server/ingestion/paths.ts";
+import { createSourceRecord } from "../../src/server/ingestion/storage.ts";
 
 describe("ingestion: source metadata validation", () => {
   it("validates a complete open source input", () => {
@@ -192,6 +193,55 @@ describe("ingestion: source metadata validation", () => {
     });
 
     assert.deepEqual(result.metadata, { isbn: "978-0-123456-78-9", pages: 320 });
+  });
+});
+
+describe("ingestion: source record creation", () => {
+  it("sets shared=true when inserting a premium source", async () => {
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const client = {
+      async query<T>(sql: string, params?: readonly unknown[]) {
+        calls.push({ sql, params: [...(params ?? [])] });
+        return { rows: [{ id: "source-1" } as T] };
+      },
+    };
+
+    const sourceId = await createSourceRecord({
+      title: "Premium Source",
+      category: "official_supplement",
+      edition: "5e",
+      language: "en",
+      accessTier: "premium",
+      createdByUserId: "admin-1",
+      client: client as never,
+    });
+
+    assert.equal(sourceId, "source-1");
+    assert.match(calls[0]?.sql ?? "", /shared/);
+    assert.deepEqual(calls[0]?.params.slice(4, 8), ["premium", true, null, "admin-1"]);
+  });
+
+  it("sets shared=false and owner when inserting a personal source", async () => {
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const client = {
+      async query<T>(sql: string, params?: readonly unknown[]) {
+        calls.push({ sql, params: [...(params ?? [])] });
+        return { rows: [{ id: "source-2" } as T] };
+      },
+    };
+
+    await createSourceRecord({
+      title: "Personal Source",
+      category: "homebrew",
+      edition: "5.5e",
+      language: "ru",
+      accessTier: "personal",
+      ownerUserId: "user-1",
+      createdByUserId: "admin-1",
+      client: client as never,
+    });
+
+    assert.deepEqual(calls[0]?.params.slice(4, 8), ["personal", false, "user-1", "admin-1"]);
   });
 });
 

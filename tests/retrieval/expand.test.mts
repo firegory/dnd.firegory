@@ -89,6 +89,17 @@ describe("expandQuery", () => {
     assert.ok(texts.includes("hit points"));
   });
 
+  it("expands fuzzy Russian Druid sea subclass wording", () => {
+    const result = expandQuery("подкласс с морским вайбом у друида", {
+      bilingual: true,
+    });
+    const texts = result.map((r) => r.text.toLowerCase());
+
+    assert.ok(texts.includes("subclass"));
+    assert.ok(texts.includes("druid"));
+    assert.ok(texts.includes("circle of the sea"));
+  });
+
   it("does not duplicate already-present terms", () => {
     const result = expandQuery("hit points", { bilingual: true });
     // "hit points" should appear only once as original, not again as alias
@@ -149,11 +160,11 @@ describe("combinedExpandedQuery", () => {
     assert.strictEqual(result, "fireball");
   });
 
-  it("joins multiple expansions with spaces", () => {
+  it("joins multiple expansions with websearch OR", () => {
     const result = combinedExpandedQuery([
       { text: "ac", reason: "original", weight: 1.0 },
       { text: "armor class", reason: "alias", weight: 0.8 },
     ]);
-    assert.strictEqual(result, "ac armor class");
+    assert.strictEqual(result, "ac OR armor class");
   });
 });

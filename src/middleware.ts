@@ -16,6 +16,10 @@ function isPublic(pathname: string): boolean {
   return false;
 }
 
+function isApiRoute(pathname: string): boolean {
+  return pathname.startsWith("/api/");
+}
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -24,6 +28,17 @@ export function middleware(request: NextRequest) {
   }
 
   const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+
+  // API routes without auth: return 401 JSON instead of redirecting to /login.
+  // Client-side fetch() follows redirects silently and tries to parse HTML as JSON,
+  // which causes SyntaxError and confusing "Network error" messages.
+  if (!sessionToken && isApiRoute(pathname)) {
+    return NextResponse.json(
+      { error: "Authentication required." },
+      { status: 401 },
+    );
+  }
+
   if (!sessionToken) {
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("next", pathname);

@@ -115,6 +115,7 @@ Run through this checklist:
 - Runs `npm run worker` which polls the Redis queue for ingestion jobs.
 - Shares the `app_storage` volume with the app for file access.
 - Requires the same environment variables as the app.
+- The image includes PDF processing packages (`poppler-utils`, `qpdf`, `ghostscript`, `ocrmypdf`, `tesseract-ocr`, `tesseract-ocr-eng`, `tesseract-ocr-rus`) needed by the ingestion pipeline.
 
 **postgres**:
 
@@ -169,15 +170,28 @@ docker compose build --no-cache app worker
 
 **Missing pgvector extension**: If the `vector` extension is missing after changing init scripts, recreate the Postgres volume: `docker compose down -v` then `docker compose up -d`.
 
-**Worker OCR failures**: The Docker image uses `node:22-alpine`. For full OCR support, the worker container needs system packages installed:
+**Worker PDF/OCR failures**: The Docker image installs the PDF processing packages required by the worker. If you run `npm run worker` directly on Debian/Ubuntu instead of Docker, install the same system dependencies on the host.
 
-- `ocrmypdf`
-- `tesseract-ocr` with `eng` and `rus` data
-- `poppler-utils`
-- `qpdf`
-- `ghostscript`
+Minimum required for text extraction:
 
-If these are not installed in the worker image, the pipeline degrades gracefully — OCR is skipped for scanned pages, and the quality report reflects this. Full production Docker images should include these packages.
+```bash
+sudo apt-get update && sudo apt-get install -y poppler-utils
+```
+
+Full normalization and OCR pipeline:
+
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  poppler-utils \
+  qpdf \
+  ghostscript \
+  ocrmypdf \
+  tesseract-ocr \
+  tesseract-ocr-eng \
+  tesseract-ocr-rus
+```
+
+`poppler-utils` provides `pdfinfo` and `pdftotext`; without those, ingestion jobs fail before PDF text extraction. Missing `qpdf`, `ghostscript`, `ocrmypdf`, or Tesseract keeps the worker running but degrades normalization/OCR quality. The worker logs a startup preflight warning listing missing tools before it processes jobs.
 
 **Redis connection errors**: Ensure the worker and app can reach `redis:6379` on the internal Docker network. Check `docker compose logs redis`.
 

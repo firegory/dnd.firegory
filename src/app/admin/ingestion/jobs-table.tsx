@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 
 type JobRecord = {
   id: string;
@@ -30,10 +31,15 @@ export function JobsTable() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<Record<string, string>>({});
+  const router = useRouter();
 
   const load = useCallback(async () => {
     try {
       const res = await fetch("/api/admin/ingestion/jobs?limit=50");
+      if (res.status === 401) {
+        router.push("/login");
+        return;
+      }
       const data = await res.json();
       if (!res.ok) {
         setError(data.error ?? "Failed to load jobs.");
@@ -46,7 +52,7 @@ export function JobsTable() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [router]);
 
   useEffect(() => {
     let cancelled = false;
@@ -54,6 +60,10 @@ export function JobsTable() {
     async function initialLoad() {
       try {
         const res = await fetch("/api/admin/ingestion/jobs?limit=50");
+        if (res.status === 401) {
+          router.push("/login");
+          return;
+        }
         const data = await res.json();
         if (cancelled) return;
         if (!res.ok) {
@@ -78,7 +88,7 @@ export function JobsTable() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [load]);
+  }, [load, router]);
 
   async function handleRetry(jobId: string) {
     if (!confirm("Retry this failed job? A new job will be created with the same source and file.")) return;

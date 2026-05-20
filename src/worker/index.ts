@@ -12,12 +12,21 @@ import {
 } from "../server/ingestion/storage.ts";
 import { runPipeline } from "./ingestion/pipeline.ts";
 import { query } from "../server/db/client.ts";
+import { checkPdfToolDependencies, formatPdfDependencyReport } from "./ingestion/dependencies.ts";
 
 const POLL_INTERVAL_SECONDS = 5;
 const MAX_CONSECUTIVE_ERRORS = 10;
 
 async function runWorker(): Promise<void> {
   console.log("[worker] Starting ingestion worker...");
+
+  const dependencyReport = formatPdfDependencyReport(await checkPdfToolDependencies());
+  if (dependencyReport) {
+    console.warn(`[worker] ${dependencyReport.replaceAll("\n", "\n[worker] ")}`);
+  } else {
+    console.log("[worker] PDF ingestion system dependencies are available.");
+  }
+
   await ensureRedisConnection();
   console.log("[worker] Connected to Redis.");
 
@@ -61,18 +70,23 @@ async function runWorker(): Promise<void> {
       const originalPdfPath = fileResult.rows[0].storage_path;
 
       console.log(`[worker] Running pipeline for job ${job.id}...`);
-      const result = await runPipeline({
-        jobId: job.id,
-        sourceId: job.sourceId,
-        fileId: job.fileId,
-        originalPdfPath,
-      });
+      try {
+        const result = await runPipeline({
+          jobId: job.id,
+          sourceId: job.sourceId,
+          fileId: job.fileId,
+          originalPdfPath,
+        });
 
-      console.log(
-        `[worker] Job ${job.id} completed. ` +
-        `Chunks: ${result.chunksPersisted}, Pages: ${result.pagesPersisted}, ` +
-        `Quality: ${result.qualityReport.overall.status} (${result.qualityReport.overall.score}/100)`,
-      );
+        console.log(
+          `[worker] Job ${job.id} completed. ` +
+          `Chunks: ${result.chunksPersisted}, Pages: ${result.pagesPersisted}, ` +
+          `Quality: ${result.qualityReport.overall.status} (${result.qualityReport.overall.score}/100)`,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[worker] Job ${job.id} failed:`, message);
+      }
 
       consecutiveErrors = 0;
     } catch (error) {

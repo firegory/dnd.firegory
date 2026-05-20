@@ -3,6 +3,10 @@
  *
  * Uses the existing GIN index on `chunks.text` with the 'simple' text search
  * configuration. Returns ranked candidates with ts_rank scoring.
+ *
+ * websearch_to_tsquery is used instead of plainto_tsquery so query expansion
+ * can express OR between independent aliases/translations. This matters when
+ * vector search is unavailable and the user asks with fuzzy/bilingual wording.
  */
 
 import { query } from "../db/client";
@@ -11,7 +15,7 @@ import type { RetrievalCandidate, RetrievalParams } from "./types";
 /**
  * Performs a full-text keyword search against chunk text.
  *
- * Uses `plainto_tsquery('simple', ...)` to convert the user query into
+ * Uses `websearch_to_tsquery('simple', ...)` to convert the user query into
  * a tsquery, then matches against the GIN-indexed tsvector on chunks.text.
  * Results are ranked by `ts_rank` with normalization (document length).
  */
@@ -52,14 +56,14 @@ export async function keywordSearch(
             s.title, s.category, s.edition, s.language, s.access_tier,
             ts_rank(
               to_tsvector('simple', c.text),
-              plainto_tsquery('simple', $${queryIdx}),
+              websearch_to_tsquery('simple', $${queryIdx}),
               1  /* normalize by document length */
             ) AS rank
      FROM chunks c
      JOIN sources s ON s.id = c.source_id
      WHERE s.deleted_at IS NULL
        AND ${accessSql}
-       AND to_tsvector('simple', c.text) @@ plainto_tsquery('simple', $${queryIdx})
+       AND to_tsvector('simple', c.text) @@ websearch_to_tsquery('simple', $${queryIdx})
      ORDER BY rank DESC
      LIMIT $${limitIdx}`,
     sqlParams,

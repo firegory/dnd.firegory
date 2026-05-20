@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useRef, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
 
 const CATEGORIES = [
   { value: "core_rules", label: "Core Rules" },
@@ -24,7 +25,24 @@ const ACCESS_TIERS = [
   { value: "personal", label: "Personal" },
 ] as const;
 
-type UploadStatus = "idle" | "uploading" | "success" | "error";
+type FormStatus = "idle" | "uploading" | "success" | "error";
+
+type UploadResponse = Partial<{
+  sourceId: string;
+  jobId: string;
+  error: string;
+}>;
+
+async function readUploadResponse(response: Response): Promise<UploadResponse> {
+  const text = await response.text();
+  if (!text.trim()) return {};
+
+  try {
+    return JSON.parse(text) as UploadResponse;
+  } catch {
+    return { error: text };
+  }
+}
 
 export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
   const [file, setFile] = useState<File | null>(null);
@@ -33,16 +51,35 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
   const [edition, setEdition] = useState<string>("5e");
   const [language, setLanguage] = useState<string>("en");
   const [accessTier, setAccessTier] = useState<string>("open");
-  const [status, setStatus] = useState<UploadStatus>("idle");
+  const [formStatus, setFormStatus] = useState<FormStatus>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [result, setResult] = useState<{ sourceId: string; jobId: string } | null>(null);
-  const formRef = useRef<HTMLFormElement>(null);
+  const router = useRouter();
 
-  async function handleSubmit(e: FormEvent) {
+  const isUploading = formStatus === "uploading";
+
+  // Validate in submit, not via disabled prop
+  function handleSubmit(e: FormEvent) {
     e.preventDefault();
+
+    if (!file) {
+      setFormStatus("error");
+      setErrorMessage("Please select a PDF file.");
+      return;
+    }
+    if (!title.trim()) {
+      setFormStatus("error");
+      setErrorMessage("Please enter a source title.");
+      return;
+    }
+
+    void doUpload();
+  }
+
+  async function doUpload() {
     if (!file) return;
 
-    setStatus("uploading");
+    setFormStatus("uploading");
     setErrorMessage(null);
     setResult(null);
 
@@ -60,98 +97,136 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
         body: formData,
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        setStatus("error");
-        setErrorMessage(data.error ?? "Upload failed.");
+      if (response.status === 401) {
+        router.push("/login");
         return;
       }
 
-      setStatus("success");
+      const data = await readUploadResponse(response);
+
+      if (!response.ok) {
+        setFormStatus("error");
+        setErrorMessage(data.error ?? `Upload failed with HTTP ${response.status}.`);
+        return;
+      }
+
+      if (!data.sourceId || !data.jobId) {
+        setFormStatus("error");
+        setErrorMessage("Upload succeeded, but the server returned an unexpected response.");
+        return;
+      }
+
+      setFormStatus("success");
       setResult({ sourceId: data.sourceId, jobId: data.jobId });
+
+      // Reset form
       setFile(null);
       setTitle("");
-      formRef.current?.reset();
+      // Reset the native file input via DOM
+      const fileInput = document.getElementById("pdf-file-input") as HTMLInputElement | null;
+      if (fileInput) fileInput.value = "";
       onSuccess?.();
     } catch (err) {
-      setStatus("error");
+      setFormStatus("error");
       setErrorMessage(err instanceof Error ? err.message : "Network error.");
     }
   }
 
   return (
-    <form ref={formRef} onSubmit={handleSubmit} className="upload-form">
-      <label className="form-label">
-        PDF file
+    <form onSubmit={handleSubmit} className="upload-form">
+      <div className="form-group">
+        <label htmlFor="pdf-file-input">PDF file</label>
         <input
+          id="pdf-file-input"
           type="file"
           accept=".pdf,application/pdf"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          required
-          disabled={status === "uploading"}
+          onChange={(e) => {
+            setFile(e.target.files?.[0] ?? null);
+            if (formStatus === "success" || formStatus === "error") {
+              setFormStatus("idle");
+              setErrorMessage(null);
+            }
+          }}
         />
-      </label>
+        {file && (
+          <span className="hint">Selected: {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</span>
+        )}
+      </div>
 
-      <label className="form-label">
-        Source title
+      <div className="form-group">
+        <label htmlFor="source-title-input">Source title</label>
         <input
+          id="source-title-input"
           type="text"
           value={title}
-          onChange={(e) => setTitle(e.target.value)}
+          onChange={(e) => {
+            setTitle(e.target.value);
+            if (formStatus === "success" || formStatus === "error") {
+              setFormStatus("idle");
+              setErrorMessage(null);
+            }
+          }}
           placeholder="e.g. Player's Handbook"
-          required
-          disabled={status === "uploading"}
         />
-      </label>
+      </div>
 
       <div className="form-row">
-        <label className="form-label">
-          Category
-          <select value={category} onChange={(e) => setCategory(e.target.value)} disabled={status === "uploading"}>
+        <div className="form-group">
+          <label htmlFor="category-select">Category</label>
+          <select id="category-select" value={category} onChange={(e) => setCategory(e.target.value)}>
             {CATEGORIES.map((c) => (
               <option key={c.value} value={c.value}>{c.label}</option>
             ))}
           </select>
-        </label>
+        </div>
 
-        <label className="form-label">
-          Edition
-          <select value={edition} onChange={(e) => setEdition(e.target.value)} disabled={status === "uploading"}>
+        <div className="form-group">
+          <label htmlFor="edition-select">Edition</label>
+          <select id="edition-select" value={edition} onChange={(e) => setEdition(e.target.value)}>
             {EDITIONS.map((ed) => (
               <option key={ed.value} value={ed.value}>{ed.label}</option>
             ))}
           </select>
-        </label>
+        </div>
 
-        <label className="form-label">
-          Language
-          <select value={language} onChange={(e) => setLanguage(e.target.value)} disabled={status === "uploading"}>
+        <div className="form-group">
+          <label htmlFor="language-select">Language</label>
+          <select id="language-select" value={language} onChange={(e) => setLanguage(e.target.value)}>
             {LANGUAGES.map((l) => (
               <option key={l.value} value={l.value}>{l.label}</option>
             ))}
           </select>
-        </label>
+        </div>
 
-        <label className="form-label">
-          Access tier
-          <select value={accessTier} onChange={(e) => setAccessTier(e.target.value)} disabled={status === "uploading"}>
+        <div className="form-group">
+          <label htmlFor="access-tier-select">Access tier</label>
+          <select id="access-tier-select" value={accessTier} onChange={(e) => setAccessTier(e.target.value)}>
             {ACCESS_TIERS.map((a) => (
               <option key={a.value} value={a.value}>{a.label}</option>
             ))}
           </select>
-        </label>
+        </div>
       </div>
 
-      <button type="submit" disabled={!file || !title.trim() || status === "uploading"}>
-        {status === "uploading" ? "Uploading…" : "Upload and ingest"}
+      {/*
+        NOTE: Button is NEVER disabled via HTML attribute.
+        This avoids the persistent cursor:not-allowed / unclickable bug
+        where React state and DOM disabled attribute could get out of sync
+        during Next.js client hydration.
+        Validation happens in handleSubmit instead.
+      */}
+      <button
+        type="submit"
+        className="upload-submit"
+      >
+        {isUploading ? "Uploading…" : "Upload and ingest"}
       </button>
 
-      {status === "error" && errorMessage && (
+      {formStatus === "error" && errorMessage && (
         <p className="form-error">{errorMessage}</p>
       )}
 
-      {status === "success" && result && (
+      {formStatus === "success" && result && (
         <p className="form-success">
           Upload queued. Job <code>{result.jobId}</code> created for source <code>{result.sourceId}</code>.
         </p>
