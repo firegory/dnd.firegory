@@ -323,6 +323,79 @@ export async function persistChunksWithEmbeddings(
 }
 
 /**
+ * Persists chunks without embeddings into the database.
+ *
+ * Used when embedding generation fails or is not configured.
+ * Chunks are still persisted for full-text keyword search.
+ */
+export async function persistChunksWithoutEmbeddings(
+  chunks: readonly Readonly<{
+    sourceId: string;
+    fileId: string;
+    jobId: string;
+    chunkIndex: number;
+    text: string;
+    quoteText: string;
+    pageNumber: number;
+    sectionHeading: string | null;
+    textSpanStart: number;
+    textSpanEnd: number;
+  }>[],
+): Promise<number> {
+  if (chunks.length === 0) return 0;
+
+  const BATCH_SIZE = 25;
+  let totalInserted = 0;
+
+  for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+    const batch = chunks.slice(i, i + BATCH_SIZE);
+
+    const valueGroups: string[] = [];
+    const params: unknown[] = [];
+
+    for (let j = 0; j < batch.length; j++) {
+      const chunk = batch[j];
+      const base = j * 10;
+      valueGroups.push(
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10})`,
+      );
+      params.push(
+        chunk.sourceId,
+        chunk.fileId,
+        chunk.jobId,
+        chunk.chunkIndex,
+        chunk.text,
+        chunk.quoteText,
+        chunk.sectionHeading,
+        chunk.pageNumber,
+        chunk.textSpanStart,
+        chunk.textSpanEnd,
+      );
+    }
+
+    const sql = `INSERT INTO chunks (
+          source_id, file_id, ingestion_job_id, chunk_index,
+          text, quote_text, section_heading, page_number,
+          text_span_start, text_span_end
+        ) VALUES ${valueGroups.join(", ")}
+        ON CONFLICT (file_id, chunk_index) DO UPDATE SET
+          source_id = EXCLUDED.source_id,
+          ingestion_job_id = EXCLUDED.ingestion_job_id,
+          text = EXCLUDED.text,
+          quote_text = EXCLUDED.quote_text,
+          section_heading = EXCLUDED.section_heading,
+          page_number = EXCLUDED.page_number,
+          text_span_start = EXCLUDED.text_span_start,
+          text_span_end = EXCLUDED.text_span_end`;
+
+    await query(sql, params);
+    totalInserted += batch.length;
+  }
+
+  return totalInserted;
+}
+
+/**
  * Persists page records into the pages table.
  */
 export async function persistPages(

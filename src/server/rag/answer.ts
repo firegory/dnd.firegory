@@ -146,7 +146,9 @@ export async function generateAnswer(
   let result: Awaited<ReturnType<typeof chatCompletion>>;
   try {
     result = await chatCompletion(messages, llmConfig);
-  } catch {
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error("[rag] LLM generation failed:", msg);
     return {
       answer: buildAnswerGenerationUnavailableAnswer(answerLanguage, chunks),
       retrieval,
