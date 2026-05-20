@@ -6,7 +6,7 @@ export default async function SearchPage() {
   const user = await requireUser();
 
   return (
-    <AppLayout>
+    <AppLayout userRole={user.role}>
       <div className="space-y-8">
         <section className="rounded-2xl border border-border bg-surface p-6">
           <p className="mb-2 text-sm font-semibold tracking-widest text-accent uppercase">

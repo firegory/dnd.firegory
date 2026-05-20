@@ -44,7 +44,7 @@ export default async function SourceDetailPage({ params }: PageProps) {
   const chunks = await listSourceChunkPreviews(source.id);
 
   return (
-    <AppLayout>
+    <AppLayout userRole="admin">
       <div className="space-y-8">
         <nav className="flex items-center gap-2 text-sm text-text-muted">
           <Link href="/search" className="hover:text-accent">Поиск</Link>
