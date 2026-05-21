@@ -68,7 +68,6 @@ export function Sidebar({ userRole }: { userRole?: AppLayoutRole }) {
           ]}
           onChange={setSiteLanguage}
         />
-        <p className="mt-3 text-xs text-text-muted">Палитра firegory.site</p>
       </div>
     </aside>
   );

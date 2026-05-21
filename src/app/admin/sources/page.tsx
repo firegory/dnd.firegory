@@ -29,16 +29,6 @@ export default async function SourcesPage() {
           <span className="text-text-secondary">Источники</span>
         </nav>
 
-        <section className="rounded-2xl border border-border bg-surface p-6">
-          <p className="mb-2 text-sm font-semibold tracking-widest text-accent uppercase">
-            Source library
-          </p>
-          <h1 className="mb-2 text-2xl font-bold text-text-primary">Источники</h1>
-          <p className="max-w-2xl text-sm leading-relaxed text-text-muted">
-            Общий каталог загруженных источников. Карточка показывает тип, язык,
-            количество чанков и ведёт на детальную страницу с редактированием.
-          </p>
-        </section>
 
         {sources.length === 0 ? (
           <section className="rounded-xl border border-border bg-surface p-6 text-text-muted">

@@ -25,22 +25,6 @@ export default async function AdminUsersPage() {
           <span className="text-text-secondary">Пользователи</span>
         </nav>
 
-        <section className="rounded-2xl border border-border bg-surface p-6">
-          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <p className="mb-2 text-sm font-semibold tracking-widest text-accent uppercase">
-                User access
-              </p>
-              <h1 className="text-2xl font-bold text-text-primary">Права пользователей</h1>
-              <p className="mt-2 max-w-2xl text-sm leading-relaxed text-text-muted">
-                Управление ролями пользователей: admin, premium и user.
-              </p>
-            </div>
-            <span className="rounded-full bg-accent/15 px-3 py-1 text-xs font-semibold text-accent">
-              {users.length} пользователя
-            </span>
-          </div>
-        </section>
 
         <section>
           <div className="overflow-x-auto rounded-xl border border-border">
