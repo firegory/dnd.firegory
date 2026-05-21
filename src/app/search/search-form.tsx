@@ -1,29 +1,30 @@
 "use client";
 
+import Link from "next/link";
 import { useState, type FormEvent } from "react";
+import { AppSelect } from "../../components/ui/select";
+import { Toggle } from "../../components/ui/toggle";
 
-const EDITIONS = [
-  { value: "", label: "Any edition" },
-  { value: "5e", label: "D&D 5e" },
-  { value: "5.5e", label: "D&D 5.5e" },
+const EDITION_OPTIONS = [
+  { value: "5e", label: "5e" },
+  { value: "5.5e", label: "5.5e" },
 ] as const;
 
-const LANGUAGES = [
-  { value: "", label: "Any language" },
-  { value: "en", label: "English" },
-  { value: "ru", label: "Russian" },
+const LANGUAGE_OPTIONS = [
+  { value: "ru", label: "RU" },
+  { value: "en", label: "EN" },
 ] as const;
 
-const ANSWER_LANGUAGES = [
-  { value: "en", label: "English" },
-  { value: "ru", label: "Русский" },
+const ANSWER_LANGUAGE_OPTIONS = [
+  { value: "ru", label: "RU" },
+  { value: "en", label: "EN" },
 ] as const;
 
-const CATEGORIES = [
-  { value: "", label: "All categories" },
-  { value: "core_rules", label: "Core Rules" },
-  { value: "official_supplement", label: "Official Supplement" },
-  { value: "homebrew", label: "Homebrew" },
+const SCOPE_OPTIONS = [
+  { value: "", label: "All sources", description: "Все доступные материалы" },
+  { value: "core_rules", label: "Core rules", description: "Базовые книги" },
+  { value: "official_supplement", label: "Supplements", description: "Официальные дополнения" },
+  { value: "homebrew", label: "Homebrew", description: "Пользовательские материалы" },
 ] as const;
 
 type Citation = Readonly<{
@@ -55,9 +56,9 @@ type FetchStatus = "idle" | "loading" | "success" | "error" | "not-configured";
 
 export function SearchForm() {
   const [query, setQuery] = useState("");
-  const [edition, setEdition] = useState("");
-  const [language, setLanguage] = useState("");
-  const [answerLanguage, setAnswerLanguage] = useState<string>("en");
+  const [edition, setEdition] = useState("5.5e");
+  const [sourceLanguage, setSourceLanguage] = useState("ru");
+  const [answerLanguage, setAnswerLanguage] = useState<string>("ru");
   const [category, setCategory] = useState("");
   const [status, setStatus] = useState<FetchStatus>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -75,9 +76,9 @@ export function SearchForm() {
       const body: Record<string, unknown> = {
         query: query.trim(),
         answerLanguage,
+        edition,
+        language: sourceLanguage,
       };
-      if (edition) body.edition = edition;
-      if (language) body.language = language;
       if (category) body.category = category;
 
       const response = await fetch("/api/answer", {
@@ -112,169 +113,183 @@ export function SearchForm() {
     }
   }
 
+  const loading = status === "loading";
+
   return (
-    <div className="search-container">
-      <form onSubmit={handleSubmit} className="search-form">
-        <div className="search-input-row">
-          <input
-            type="text"
-            className="search-query-input"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Ask about D&D rules…"
-            maxLength={500}
-            required
-            disabled={status === "loading"}
-            autoFocus
-          />
-          <button
-            type="submit"
-            className="search-submit-btn"
-            disabled={!query.trim() || status === "loading"}
-          >
-            {status === "loading" ? "Searching…" : "Search"}
-          </button>
-        </div>
+    <div className="space-y-8">
+      <section className="rounded-2xl border border-border bg-surface p-6">
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <div className="flex flex-col gap-3 lg:flex-row">
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Как работает Sneak Attack?"
+              maxLength={500}
+              required
+              disabled={loading}
+              autoFocus
+              className="flex-1 rounded-xl border border-border bg-primary/60 px-5 py-3 text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:cursor-wait disabled:opacity-60"
+            />
+            <button
+              type="submit"
+              disabled={!query.trim() || loading}
+              className="rounded-xl bg-accent px-6 py-3 font-semibold text-primary transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
+            >
+              {loading ? "Поиск…" : "Искать"}
+            </button>
+          </div>
 
-        <div className="search-toggles">
-          <label className="search-toggle-label">
-            Answer in
-            <select
+          <div className="flex flex-wrap items-end gap-4">
+            <Toggle
+              label="Ответ"
               value={answerLanguage}
-              onChange={(e) => setAnswerLanguage(e.target.value)}
-              disabled={status === "loading"}
-            >
-              {ANSWER_LANGUAGES.map((l) => (
-                <option key={l.value} value={l.value}>{l.label}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="search-toggle-label">
-            Edition
-            <select
+              options={ANSWER_LANGUAGE_OPTIONS}
+              onChange={setAnswerLanguage}
+              disabled={loading}
+            />
+            <Toggle
+              label="Язык источника"
+              value={sourceLanguage}
+              options={LANGUAGE_OPTIONS}
+              onChange={setSourceLanguage}
+              disabled={loading}
+            />
+            <Toggle
+              label="Редакция"
               value={edition}
-              onChange={(e) => setEdition(e.target.value)}
-              disabled={status === "loading"}
-            >
-              {EDITIONS.map((ed) => (
-                <option key={ed.value} value={ed.value}>{ed.label}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="search-toggle-label">
-            Source lang
-            <select
-              value={language}
-              onChange={(e) => setLanguage(e.target.value)}
-              disabled={status === "loading"}
-            >
-              {LANGUAGES.map((l) => (
-                <option key={l.value} value={l.value}>{l.label}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="search-toggle-label">
-            Category
-            <select
+              options={EDITION_OPTIONS}
+              onChange={setEdition}
+              disabled={loading}
+            />
+            <AppSelect
+              label="Scope"
               value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              disabled={status === "loading"}
-            >
-              {CATEGORIES.map((c) => (
-                <option key={c.value} value={c.value}>{c.label}</option>
-              ))}
-            </select>
-          </label>
+              options={SCOPE_OPTIONS}
+              onChange={setCategory}
+              disabled={loading}
+            />
+          </div>
+        </form>
+      </section>
+
+      {loading && (
+        <div className="flex items-center justify-center gap-3 py-12">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+          <span className="text-text-muted">Ищем по источникам…</span>
         </div>
-      </form>
+      )}
 
       {status === "error" && errorMessage && (
-        <div className="search-error">
-          <p className="form-error">{errorMessage}</p>
+        <div className="rounded-xl border border-danger/30 bg-danger/10 p-4 text-danger">
+          {errorMessage}
         </div>
       )}
 
       {status === "not-configured" && errorMessage && (
-        <div className="search-error">
-          <p className="form-error">{errorMessage}</p>
-          <p className="hint">
-            Answer generation requires a configured LLM provider. Contact your admin.
+        <div className="rounded-xl border border-warning/30 bg-warning/10 p-4 text-warning">
+          <p>{errorMessage}</p>
+          <p className="mt-1 text-sm text-text-muted">
+            Answer generation requires a configured LLM provider.
           </p>
         </div>
       )}
 
-      {status === "success" && result && (
-        <SearchResultView result={result} />
-      )}
+      {status === "success" && result && <SearchResultView result={result} />}
     </div>
   );
 }
 
 function SearchResultView({ result }: { result: SearchResult }) {
   return (
-    <div className="search-result">
-      <div className="search-answer">
-        <h2>Answer</h2>
-        <p className={result.confident ? "answer-text" : "answer-text answer-low-confidence"}>
+    <div className="space-y-8">
+      <section className="rounded-2xl border border-accent/30 bg-accent/5 p-6">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="rounded-full bg-accent/15 px-2.5 py-0.5 text-xs font-semibold text-accent">
+            AI-ответ
+          </span>
+          <span className="rounded-full bg-surface px-2.5 py-0.5 text-xs font-medium text-text-muted">
+            На основе {result.citations.length} цитат
+          </span>
+          {!result.confident && (
+            <span className="rounded-full bg-warning/15 px-2.5 py-0.5 text-xs font-semibold text-warning">
+              Низкая уверенность
+            </span>
+          )}
+        </div>
+        <p className="whitespace-pre-wrap leading-relaxed text-text-primary">
           {result.answer}
         </p>
-        {!result.confident && (
-          <p className="hint confidence-hint">
-            ⚠ The system could not find a definitive answer in the available sources.
-          </p>
+      </section>
+
+      <section>
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <h2 className="text-lg font-bold text-text-primary">Цитаты из источников</h2>
+          <span className="text-sm text-text-muted">
+            Найдено: {result.meta.retrievalTotal ?? result.retrievedChunks} чанков
+          </span>
+        </div>
+        {result.citations.length === 0 ? (
+          <div className="rounded-xl border border-border bg-surface p-5 text-text-muted">
+            Цитаты не найдены.
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {result.citations.map((citation, i) => (
+              <CitationCard key={`${citation.sourceId}-${citation.fileId}-${citation.page}-${i}`} citation={citation} />
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function CitationCard({ citation }: { citation: Citation }) {
+  return (
+    <div className="rounded-xl border border-border bg-surface p-5 transition-colors hover:border-accent/30">
+      <blockquote className="mb-4 border-l-3 border-accent pl-4 text-sm leading-relaxed text-text-secondary italic">
+        «{citation.quote}»
+      </blockquote>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Link
+          href={`/admin/sources/${citation.sourceId}`}
+          className="font-semibold text-accent hover:underline"
+        >
+          {citation.sourceTitle}
+        </Link>
+        <span className="rounded-full bg-accent/15 px-2 py-0.5 text-xs font-medium text-accent">
+          {citation.edition}
+        </span>
+        <span className="rounded-full bg-surface-light px-2 py-0.5 text-xs font-medium text-text-muted">
+          {citation.language.toUpperCase()}
+        </span>
+        {citation.page !== null && <span className="text-xs text-text-muted">стр. {citation.page}</span>}
+        {citation.category && (
+          <span className="rounded-full bg-surface-light px-2 py-0.5 text-xs font-medium text-text-muted">
+            {formatCategory(citation.category)}
+          </span>
+        )}
+        {citation.section && (
+          <span className="rounded-full bg-accent/10 px-2 py-0.5 text-xs text-accent">
+            {citation.section}
+          </span>
         )}
       </div>
-
-      {result.citations.length > 0 && (
-        <div className="search-citations">
-          <h3>Sources ({result.citations.length})</h3>
-          <ul className="citations-list">
-            {result.citations.map((citation, i) => (
-              <li key={i} className="citation-item">
-                <blockquote className="citation-quote">
-                  &ldquo;{citation.quote}&rdquo;
-                </blockquote>
-                <div className="citation-meta">
-                  <span className="citation-title">{citation.sourceTitle}</span>
-                  {citation.edition && (
-                    <span className="citation-tag">{citation.edition}</span>
-                  )}
-                  {citation.language && (
-                    <span className="citation-tag">{citation.language.toUpperCase()}</span>
-                  )}
-                  {citation.page !== null && (
-                    <span className="citation-tag">p.{citation.page}</span>
-                  )}
-                  {citation.section && (
-                    <span className="citation-tag citation-section">{citation.section}</span>
-                  )}
-                  {citation.category && (
-                    <span className="citation-tag">{formatCategory(citation.category)}</span>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      <p className="hint search-meta">
-        Retrieved {result.meta.retrievalTotal ?? result.retrievedChunks} chunk{result.meta.retrievalTotal !== 1 ? "s" : ""}
-        {result.meta.retrievalHasMore ? " (more available)" : ""}
-        {result.meta.model && result.meta.model !== "none" ? ` · Model: ${result.meta.model}` : ""}
-      </p>
     </div>
   );
 }
 
 function formatCategory(category: string): string {
-  const map: Record<string, string> = {
-    core_rules: "Core Rules",
-    official_supplement: "Supplement",
-    homebrew: "Homebrew",
-  };
-  return map[category] ?? category;
+  switch (category) {
+    case "core_rules":
+      return "Core rules";
+    case "official_supplement":
+      return "Supplements";
+    case "homebrew":
+      return "Homebrew";
+    default:
+      return category;
+  }
 }

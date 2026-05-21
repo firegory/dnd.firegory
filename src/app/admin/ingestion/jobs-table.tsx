@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 type JobRecord = {
@@ -16,12 +17,20 @@ type JobRecord = {
   finishedAt: string | null;
 };
 
-const STATUS_COLORS: Record<string, string> = {
-  queued: "#fbbf24",
-  processing: "#60a5fa",
-  succeeded: "#34d399",
-  failed: "#f87171",
-  cancelled: "#94a3b8",
+const STATUS_STYLES: Record<string, string> = {
+  queued: "bg-surface-light text-text-muted",
+  processing: "bg-warning/15 text-warning",
+  succeeded: "bg-success/15 text-success",
+  failed: "bg-danger/15 text-danger",
+  cancelled: "bg-surface-light text-text-muted",
+};
+
+const STATUS_LABELS: Record<string, string> = {
+  queued: "В очереди",
+  processing: "Обработка",
+  succeeded: "Завершён",
+  failed: "Ошибка",
+  cancelled: "Отменён",
 };
 
 const REFRESH_INTERVAL_MS = 10_000;
@@ -56,39 +65,18 @@ export function JobsTable() {
 
   useEffect(() => {
     let cancelled = false;
-
-    async function initialLoad() {
-      try {
-        const res = await fetch("/api/admin/ingestion/jobs?limit=50");
-        if (res.status === 401) {
-          router.push("/login");
-          return;
-        }
-        const data = await res.json();
-        if (cancelled) return;
-        if (!res.ok) {
-          setError(data.error ?? "Failed to load jobs.");
-          return;
-        }
-        setJobs(data.jobs ?? []);
-        setError(null);
-      } catch (err) {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : "Network error.");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-
-    initialLoad();
+    const loadSoon = setTimeout(() => {
+      if (!cancelled) void load();
+    }, 0);
     const interval = setInterval(() => {
-      if (!cancelled) load();
+      if (!cancelled) void load();
     }, REFRESH_INTERVAL_MS);
     return () => {
       cancelled = true;
+      clearTimeout(loadSoon);
       clearInterval(interval);
     };
-  }, [load, router]);
+  }, [load]);
 
   async function handleRetry(jobId: string) {
     if (!confirm("Retry this failed job? A new job will be created with the same source and file.")) return;
@@ -105,23 +93,12 @@ export function JobsTable() {
     } catch (err) {
       alert(err instanceof Error ? err.message : "Network error.");
     } finally {
-      setTimeout(() => {
-        setActionStatus((prev) => {
-          const next = { ...prev };
-          delete next[jobId];
-          return next;
-        });
-      }, 3000);
+      clearAction(jobId);
     }
   }
 
   async function handleReprocess(sourceId: string, jobId: string) {
-    if (
-      !confirm(
-        "Reprocess this source? Existing chunks, pages, and documents will be removed and regenerated from the original PDF.",
-      )
-    )
-      return;
+    if (!confirm("Reprocess this source? Existing chunks, pages, and documents will be removed and regenerated from the original PDF.")) return;
     setActionStatus((prev) => ({ ...prev, [jobId]: "reprocessing" }));
     try {
       const res = await fetch(`/api/admin/ingestion/sources/${sourceId}/reprocess`, { method: "POST" });
@@ -135,24 +112,13 @@ export function JobsTable() {
     } catch (err) {
       alert(err instanceof Error ? err.message : "Network error.");
     } finally {
-      setTimeout(() => {
-        setActionStatus((prev) => {
-          const next = { ...prev };
-          delete next[jobId];
-          return next;
-        });
-      }, 3000);
+      clearAction(jobId);
     }
   }
 
   async function handleDelete(sourceId: string, jobId: string) {
-    if (
-      !confirm(
-        "⚠️ DELETE this source permanently?\n\nThis will remove the source, its files, all extracted chunks/pages/documents, and original PDF from disk. This cannot be undone.",
-      )
-    )
-      return;
-    if (!confirm("FINAL WARNING: This action is irreversible. Proceed with deletion?")) return;
+    if (!confirm("⚠️ DELETE this source permanently? This cannot be undone.")) return;
+    if (!confirm("FINAL WARNING: proceed with deletion?")) return;
     setActionStatus((prev) => ({ ...prev, [jobId]: "deleting" }));
     try {
       const res = await fetch(`/api/admin/ingestion/sources/${sourceId}/delete`, { method: "POST" });
@@ -166,64 +132,76 @@ export function JobsTable() {
     } catch (err) {
       alert(err instanceof Error ? err.message : "Network error.");
     } finally {
-      setTimeout(() => {
-        setActionStatus((prev) => {
-          const next = { ...prev };
-          delete next[jobId];
-          return next;
-        });
-      }, 3000);
+      clearAction(jobId);
     }
   }
 
+  function clearAction(jobId: string) {
+    setTimeout(() => {
+      setActionStatus((prev) => {
+        const next = { ...prev };
+        delete next[jobId];
+        return next;
+      });
+    }, 3000);
+  }
+
   if (loading) {
-    return <p className="muted">Loading jobs…</p>;
+    return <p className="text-text-muted">Loading jobs…</p>;
   }
 
   if (error) {
-    return <p className="form-error">{error}</p>;
+    return <p className="text-danger">{error}</p>;
   }
 
   if (jobs.length === 0) {
-    return <p className="muted">No ingestion jobs yet.</p>;
+    return <p className="text-text-muted">No ingestion jobs yet.</p>;
   }
 
   return (
-    <div className="table-wrap">
-      <table>
+    <div className="overflow-x-auto rounded-xl border border-border">
+      <table className="w-full text-left text-sm">
         <thead>
-          <tr>
-            <th>Job ID</th>
-            <th>Kind</th>
-            <th>Status</th>
-            <th>Progress</th>
-            <th>Source</th>
-            <th>Queued</th>
-            <th>Finished</th>
-            <th>Error</th>
-            <th>Actions</th>
+          <tr className="border-b border-border bg-surface">
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Источник</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Статус</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Прогресс</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Тип</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Дата</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Ошибка</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Действия</th>
           </tr>
         </thead>
         <tbody>
           {jobs.map((job) => (
-            <tr key={job.id}>
-              <td>
-                <code>{job.id.slice(0, 8)}</code>
+            <tr key={job.id} className="border-b border-border-light transition-colors hover:bg-surface-light/50">
+              <td className="px-4 py-3">
+                {job.sourceId ? (
+                  <Link href={`/admin/sources/${job.sourceId}`} className="font-mono text-xs text-accent hover:underline">
+                    {job.sourceId.slice(0, 8)}
+                  </Link>
+                ) : (
+                  <span className="text-text-muted">—</span>
+                )}
+                <p className="mt-1 font-mono text-[10px] text-text-muted">job {job.id.slice(0, 8)}</p>
               </td>
-              <td>{job.kind}</td>
-              <td>
-                <span style={{ color: STATUS_COLORS[job.status] ?? "inherit", fontWeight: 600 }}>
-                  {job.status}
+              <td className="px-4 py-3">
+                <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-semibold ${STATUS_STYLES[job.status] ?? "bg-surface-light text-text-muted"}`}>
+                  {STATUS_LABELS[job.status] ?? job.status}
                 </span>
               </td>
-              <td>{job.progress}%</td>
-              <td>
-                <code>{job.sourceId?.slice(0, 8) ?? "—"}</code>
+              <td className="px-4 py-3">
+                <div className="min-w-28">
+                  <div className="h-1.5 overflow-hidden rounded-full bg-primary">
+                    <div className="h-full rounded-full bg-accent" style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }} />
+                  </div>
+                  <p className="mt-1 font-mono text-xs text-text-muted">{job.progress}%</p>
+                </div>
               </td>
-              <td className="timestamp">{formatTimestamp(job.queuedAt)}</td>
-              <td className="timestamp">{formatTimestamp(job.finishedAt)}</td>
-              <td className="error-cell">{job.errorSummary ?? "—"}</td>
-              <td className="actions-cell">
+              <td className="px-4 py-3 text-xs text-text-muted">{job.kind}</td>
+              <td className="px-4 py-3 text-xs whitespace-nowrap text-text-muted">{formatTimestamp(job.queuedAt)}</td>
+              <td className="max-w-56 px-4 py-3 text-xs text-danger">{job.errorSummary ?? "—"}</td>
+              <td className="px-4 py-3">
                 <Actions
                   job={job}
                   actionStatus={actionStatus}
@@ -256,46 +234,22 @@ function Actions({
   const status = actionStatus[job.id];
 
   if (status === "retrying" || status === "reprocessing" || status === "deleting") {
-    return <span className="action-hint">{status}…</span>;
+    return <span className="text-xs text-text-muted">{status}…</span>;
   }
 
-  if (status === "retry-ok") return <span className="action-success">Retried ✓</span>;
-  if (status === "reprocess-ok") return <span className="action-success">Reprocessing ✓</span>;
-  if (status === "delete-ok") return <span className="action-success">Deleted ✓</span>;
+  if (status === "retry-ok") return <span className="text-xs font-semibold text-success">Retried ✓</span>;
+  if (status === "reprocess-ok") return <span className="text-xs font-semibold text-success">Reprocessing ✓</span>;
+  if (status === "delete-ok") return <span className="text-xs font-semibold text-success">Deleted ✓</span>;
 
   const canRetry = (job.status === "failed" || job.status === "cancelled") && job.sourceId && job.fileId;
   const canReprocess = (job.status === "succeeded" || job.status === "failed") && job.sourceId;
   const canDelete = job.sourceId;
 
   return (
-    <div className="actions-group">
-      {canRetry && (
-        <button
-          className="action-btn action-retry"
-          onClick={() => onRetry(job.id)}
-          title="Retry this failed job"
-        >
-          Retry
-        </button>
-      )}
-      {canReprocess && (
-        <button
-          className="action-btn action-reprocess"
-          onClick={() => onReprocess(job.sourceId!, job.id)}
-          title="Reprocess this source from original PDF"
-        >
-          Reprocess
-        </button>
-      )}
-      {canDelete && (
-        <button
-          className="action-btn action-delete"
-          onClick={() => onDelete(job.sourceId!, job.id)}
-          title="Delete this source and all related data"
-        >
-          Delete
-        </button>
-      )}
+    <div className="flex gap-1.5">
+      {canRetry && <button className="rounded-md border border-warning/40 px-2 py-1 text-xs font-medium text-warning hover:bg-warning/10" onClick={() => onRetry(job.id)}>Retry</button>}
+      {canReprocess && <button className="rounded-md border border-accent/40 px-2 py-1 text-xs font-medium text-accent hover:bg-accent/10" onClick={() => onReprocess(job.sourceId!, job.id)}>Reprocess</button>}
+      {canDelete && <button className="rounded-md border border-danger/40 px-2 py-1 text-xs font-medium text-danger hover:bg-danger/10" onClick={() => onDelete(job.sourceId!, job.id)}>Delete</button>}
     </div>
   );
 }
