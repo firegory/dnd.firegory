@@ -2,23 +2,25 @@
 
 import { useActionState } from "react";
 
+import { useUiLanguage } from "../../components/ui/i18n";
 import { registerAction } from "../../server/auth/actions";
 
 export function RegisterForm() {
+  const { t } = useUiLanguage();
   const [state, action, pending] = useActionState(registerAction, {});
 
   return (
     <form action={action} className="auth-form">
       <label>
-        Email
+        {t("email")}
         <input name="email" type="email" autoComplete="email" required />
       </label>
       <label>
-        Display name
+        {t("displayName")}
         <input name="displayName" type="text" autoComplete="name" />
       </label>
       <label>
-        Password
+        {t("password")}
         <input
           name="password"
           type="password"
@@ -27,10 +29,10 @@ export function RegisterForm() {
           required
         />
       </label>
-      <p className="hint">Use at least 12 characters. The first registered user becomes admin.</p>
+      <p className="hint">{t("passwordHint")}</p>
       {state.error ? <p className="form-error">{state.error}</p> : null}
       <button type="submit" disabled={pending}>
-        {pending ? "Creating account…" : "Create account"}
+        {pending ? t("creatingAccount") : t("createAccount")}
       </button>
     </form>
   );

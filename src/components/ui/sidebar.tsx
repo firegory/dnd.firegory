@@ -1,18 +1,18 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import type { AppLayoutRole } from "./app-layout";
 import { Toggle } from "./toggle";
+import { useUiLanguage, type UiLanguage } from "./i18n";
 
-const BASE_NAV_ITEMS = [{ href: "/search", label: "Поиск" }] as const;
+const BASE_NAV_ITEMS = [{ href: "/search", labelKey: "search" }] as const;
 
 const ADMIN_NAV_ITEMS = [
-  { href: "/admin/sources", label: "Источники" },
-  { href: "/admin/ingestion", label: "Загрузка" },
-  { href: "/admin/users", label: "Пользователи" },
+  { href: "/admin/sources", labelKey: "sources" },
+  { href: "/admin/ingestion", labelKey: "upload" },
+  { href: "/admin/users", labelKey: "users" },
 ] as const;
 
 function getNavItems(userRole?: AppLayoutRole) {
@@ -21,7 +21,7 @@ function getNavItems(userRole?: AppLayoutRole) {
 
 export function Sidebar({ userRole }: { userRole?: AppLayoutRole }) {
   const pathname = usePathname();
-  const [siteLanguage, setSiteLanguage] = useState("ru");
+  const { language, setLanguage, t } = useUiLanguage();
   const navItems = getNavItems(userRole);
 
   return (
@@ -31,12 +31,12 @@ export function Sidebar({ userRole }: { userRole?: AppLayoutRole }) {
           <h1 className="text-lg leading-tight font-bold text-text-primary">
             dnd<span className="text-accent">.firegory</span>
           </h1>
-          <p className="text-[11px] tracking-wider text-text-muted uppercase">Rules search</p>
+          <p className="text-[11px] tracking-wider text-text-muted uppercase">{t("rulesSearch")}</p>
         </div>
       </div>
       <nav className="flex-1 overflow-y-auto px-3 py-4">
         <p className="mb-2 px-3 text-[11px] font-semibold tracking-widest text-text-muted uppercase">
-          Навигация
+          {t("nav")}
         </p>
         <ul className="space-y-1">
           {navItems.map((item) => {
@@ -51,7 +51,7 @@ export function Sidebar({ userRole }: { userRole?: AppLayoutRole }) {
                       : "text-text-secondary hover:bg-surface-light hover:text-text-primary"
                   }`}
                 >
-                  {item.label}
+                  {t(item.labelKey)}
                 </Link>
               </li>
             );
@@ -60,13 +60,13 @@ export function Sidebar({ userRole }: { userRole?: AppLayoutRole }) {
       </nav>
       <div className="border-t border-border px-5 py-4">
         <Toggle
-          label="Язык сайта"
-          value={siteLanguage}
+          label={t("siteLanguage")}
+          value={language}
           options={[
             { value: "ru", label: "RU" },
             { value: "en", label: "EN" },
           ]}
-          onChange={setSiteLanguage}
+          onChange={(value) => setLanguage(value as UiLanguage)}
         />
       </div>
     </aside>
@@ -75,6 +75,7 @@ export function Sidebar({ userRole }: { userRole?: AppLayoutRole }) {
 
 export function MobileHeader({ userRole }: { userRole?: AppLayoutRole }) {
   const pathname = usePathname();
+  const { t } = useUiLanguage();
   const navItems = getNavItems(userRole);
 
   return (
@@ -93,7 +94,7 @@ export function MobileHeader({ userRole }: { userRole?: AppLayoutRole }) {
                 active ? "bg-accent/15 text-accent" : "text-text-secondary hover:text-text-primary"
               }`}
             >
-              {item.label}
+              {t(item.labelKey)}
             </Link>
           );
         })}
