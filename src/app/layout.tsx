@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { UiLanguageProvider } from "../components/ui/i18n";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -12,8 +13,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body>{children}</body>
+    <html lang="ru">
+      <body><UiLanguageProvider>{children}</UiLanguageProvider></body>
     </html>
   );
 }

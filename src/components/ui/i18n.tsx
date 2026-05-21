@@ -1,0 +1,389 @@
+"use client";
+
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
+
+export type UiLanguage = "ru" | "en";
+
+type TranslationKey = keyof typeof translations.ru;
+
+const STORAGE_KEY = "dnd.firegory.uiLanguage";
+
+const translations = {
+  ru: {
+    nav: "Навигация",
+    search: "Поиск",
+    sources: "Источники",
+    upload: "Загрузка",
+    users: "Пользователи",
+    siteLanguage: "Язык сайта",
+    rulesSearch: "Поиск правил",
+    searchPlaceholder: "Как работает Sneak Attack?",
+    searchButton: "Искать",
+    searchingButton: "Поиск…",
+    sourceLanguage: "Язык источника",
+    edition: "Редакция",
+    scope: "Scope",
+    allSources: "Все источники",
+    allSourcesDescription: "Все доступные материалы",
+    coreRules: "Core rules",
+    coreRulesDescription: "Базовые книги",
+    supplements: "Supplements",
+    supplementsDescription: "Официальные дополнения",
+    homebrew: "Homebrew",
+    homebrewDescription: "Пользовательские материалы",
+    searchingSources: "Ищем по источникам…",
+    sessionExpired: "Сессия истекла. Войдите снова.",
+    answerUnavailable: "Генерация ответа недоступна.",
+    requestFailed: "Запрос не удался.",
+    networkError: "Ошибка сети.",
+    answerProviderRequired: "Для генерации ответа нужен настроенный LLM-провайдер.",
+    aiAnswer: "AI-ответ",
+    basedOnCitations: "На основе {count} цитат",
+    lowConfidence: "Низкая уверенность",
+    sourceCitations: "Цитаты из источников",
+    foundChunks: "Найдено: {count} чанков",
+    noCitations: "Цитаты не найдены.",
+    pageShort: "стр.",
+    russian: "Русский",
+    english: "English",
+    adminUploadBreadcrumb: "Админ · Загрузка",
+    admin: "Admin",
+    uploadPdf: "Загрузка PDF",
+    processingJobs: "Задачи обработки",
+    refreshesEvery10Sec: "Обновляется каждые 10 сек",
+    pdfFile: "PDF файл",
+    clickOrDropFile: "Нажмите или перетащите файл",
+    pdfLimit: "PDF, до 200 MB",
+    selected: "Выбран",
+    titleRequired: "Название *",
+    category: "Категория",
+    language: "Язык",
+    accessLevel: "Уровень доступа",
+    uploadAndProcess: "Загрузить и обработать",
+    uploading: "Загрузка…",
+    sourceReady: "Готово: source {source}, job {job}",
+    selectPdfError: "Выберите PDF-файл.",
+    enterTitleError: "Введите название источника.",
+    uploadUnexpected: "Файл загружен, но сервер вернул неожиданный ответ.",
+    uploadFailedHttp: "Загрузка завершилась ошибкой HTTP {status}.",
+    open: "Open",
+    premium: "Premium",
+    personal: "Personal",
+    allUsers: "Все пользователи",
+    subscribers: "Подписчики",
+    ownerOnly: "Только владелец",
+    officialSupplement: "Official Supplement",
+    dnd2024Rules: "Правила 2024",
+    loadingJobs: "Загружаем задачи…",
+    failedToLoadJobs: "Не удалось загрузить задачи.",
+    noJobs: "Задач обработки пока нет.",
+    source: "Источник",
+    status: "Статус",
+    progress: "Прогресс",
+    type: "Тип",
+    date: "Дата",
+    error: "Ошибка",
+    actions: "Действия",
+    job: "job",
+    queued: "В очереди",
+    processing: "Обработка",
+    succeeded: "Завершён",
+    failed: "Ошибка",
+    cancelled: "Отменён",
+    retryConfirm: "Повторить эту неуспешную задачу? Будет создана новая задача с тем же источником и файлом.",
+    retryFailed: "Повтор не удался.",
+    reprocessConfirm: "Переобработать этот источник? Текущие чанки, страницы и документы будут удалены и созданы заново из исходного PDF.",
+    reprocessFailed: "Переобработка не удалась.",
+    deleteConfirm: "⚠️ УДАЛИТЬ этот источник навсегда? Это нельзя отменить.",
+    finalDeleteConfirm: "ФИНАЛЬНОЕ ПРЕДУПРЕЖДЕНИЕ: продолжить удаление?",
+    deleteFailed: "Удаление не удалось.",
+    retrying: "Повторяем",
+    reprocessing: "Переобрабатываем",
+    deleting: "Удаляем",
+    retried: "Повторено ✓",
+    reprocessingDone: "Переобработка ✓",
+    deleted: "Удалено ✓",
+    retry: "Повторить",
+    reprocess: "Переобработать",
+    delete: "Удалить",
+    noSources: "Источники пока не загружены. Перейдите в ",
+    uploadPdfLink: "загрузку PDF",
+    added: "Добавлен",
+    chunks: "Чанков",
+    files: "Файлов",
+    sourceDetails: "Источник",
+    noJobsStatus: "Нет задач",
+    latestProcessing: "Последняя обработка",
+    pages: "Страниц",
+    embeddings: "Embeddings",
+    skipped: "skipped",
+    latestJob: "Последняя задача",
+    jobId: "ID задачи",
+    started: "Начало",
+    finished: "Завершение",
+    chunksAndCitations: "Чанки и цитаты",
+    shownChunks: "Показано {shown} из {total}",
+    noChunks: "Чанки пока не созданы.",
+    chars: "символов",
+    sourceMetadata: "Метаданные источника",
+    sourceMetadataDescription: "Редактирование реальной записи sources.",
+    title: "Название",
+    access: "Доступ",
+    save: "Сохранить",
+    saving: "Сохраняем…",
+    reset: "Сбросить",
+    saveFailed: "Не удалось сохранить изменения.",
+    saved: "Изменения сохранены",
+    currentRole: "Текущая роль",
+    changeRole: "Изменить роль",
+    activity: "Активность",
+    user: "Пользователь",
+    roleFor: "Роль для {email}",
+    saveRole: "Сохранить",
+    privateAccess: "Приватный доступ",
+    signIn: "Войти",
+    loginLede: "Используйте аккаунт dnd.firegory для доступа к поиску.",
+    email: "Email",
+    password: "Пароль",
+    signingIn: "Входим…",
+    noAccount: "Нет аккаунта?",
+    register: "Зарегистрироваться",
+    requiredRegistration: "Регистрация обязательна",
+    createAccount: "Создать аккаунт",
+    registerLede: "Зарегистрируйтесь, чтобы использовать приватный поиск по D&D.",
+    displayName: "Отображаемое имя",
+    passwordHint: "Минимум 12 символов. Первый зарегистрированный пользователь становится админом.",
+    creatingAccount: "Создаём аккаунт…",
+    alreadyHaveAccount: "Уже есть аккаунт?",
+  },
+  en: {
+    nav: "Navigation",
+    search: "Search",
+    sources: "Sources",
+    upload: "Upload",
+    users: "Users",
+    siteLanguage: "Site language",
+    rulesSearch: "Rules search",
+    searchPlaceholder: "How does Sneak Attack work?",
+    searchButton: "Search",
+    searchingButton: "Searching…",
+    sourceLanguage: "Source language",
+    edition: "Edition",
+    scope: "Scope",
+    allSources: "All sources",
+    allSourcesDescription: "All accessible materials",
+    coreRules: "Core rules",
+    coreRulesDescription: "Core books",
+    supplements: "Supplements",
+    supplementsDescription: "Official supplements",
+    homebrew: "Homebrew",
+    homebrewDescription: "User-created materials",
+    searchingSources: "Searching sources…",
+    sessionExpired: "Session expired. Please sign in again.",
+    answerUnavailable: "Answer generation is not available.",
+    requestFailed: "Request failed.",
+    networkError: "Network error.",
+    answerProviderRequired: "Answer generation requires a configured LLM provider.",
+    aiAnswer: "AI answer",
+    basedOnCitations: "Based on {count} citations",
+    lowConfidence: "Low confidence",
+    sourceCitations: "Source citations",
+    foundChunks: "Found: {count} chunks",
+    noCitations: "No citations found.",
+    pageShort: "p.",
+    russian: "Russian",
+    english: "English",
+    adminUploadBreadcrumb: "Admin · Upload",
+    admin: "Admin",
+    uploadPdf: "PDF upload",
+    processingJobs: "Processing jobs",
+    refreshesEvery10Sec: "Refreshes every 10 sec",
+    pdfFile: "PDF file",
+    clickOrDropFile: "Click or drop a file",
+    pdfLimit: "PDF, up to 200 MB",
+    selected: "Selected",
+    titleRequired: "Title *",
+    category: "Category",
+    language: "Language",
+    accessLevel: "Access level",
+    uploadAndProcess: "Upload and process",
+    uploading: "Uploading…",
+    sourceReady: "Done: source {source}, job {job}",
+    selectPdfError: "Please select a PDF file.",
+    enterTitleError: "Please enter a source title.",
+    uploadUnexpected: "Upload succeeded, but the server returned an unexpected response.",
+    uploadFailedHttp: "Upload failed with HTTP {status}.",
+    open: "Open",
+    premium: "Premium",
+    personal: "Personal",
+    allUsers: "All users",
+    subscribers: "Subscribers",
+    ownerOnly: "Owner only",
+    officialSupplement: "Official Supplement",
+    dnd2024Rules: "2024 rules",
+    loadingJobs: "Loading jobs…",
+    failedToLoadJobs: "Failed to load jobs.",
+    noJobs: "No ingestion jobs yet.",
+    source: "Source",
+    status: "Status",
+    progress: "Progress",
+    type: "Type",
+    date: "Date",
+    error: "Error",
+    actions: "Actions",
+    job: "job",
+    queued: "Queued",
+    processing: "Processing",
+    succeeded: "Succeeded",
+    failed: "Failed",
+    cancelled: "Cancelled",
+    retryConfirm: "Retry this failed job? A new job will be created with the same source and file.",
+    retryFailed: "Retry failed.",
+    reprocessConfirm: "Reprocess this source? Existing chunks, pages, and documents will be removed and regenerated from the original PDF.",
+    reprocessFailed: "Reprocess failed.",
+    deleteConfirm: "⚠️ DELETE this source permanently? This cannot be undone.",
+    finalDeleteConfirm: "FINAL WARNING: proceed with deletion?",
+    deleteFailed: "Delete failed.",
+    retrying: "Retrying",
+    reprocessing: "Reprocessing",
+    deleting: "Deleting",
+    retried: "Retried ✓",
+    reprocessingDone: "Reprocessing ✓",
+    deleted: "Deleted ✓",
+    retry: "Retry",
+    reprocess: "Reprocess",
+    delete: "Delete",
+    noSources: "No sources have been uploaded yet. Go to ",
+    uploadPdfLink: "PDF upload",
+    added: "Added",
+    chunks: "Chunks",
+    files: "Files",
+    sourceDetails: "Source",
+    noJobsStatus: "No jobs",
+    latestProcessing: "Latest processing",
+    pages: "Pages",
+    embeddings: "Embeddings",
+    skipped: "skipped",
+    latestJob: "Latest job",
+    jobId: "Job ID",
+    started: "Started",
+    finished: "Finished",
+    chunksAndCitations: "Chunks and citations",
+    shownChunks: "Showing {shown} of {total}",
+    noChunks: "No chunks have been created yet.",
+    chars: "characters",
+    sourceMetadata: "Source metadata",
+    sourceMetadataDescription: "Edit the real sources record.",
+    title: "Title",
+    access: "Access",
+    save: "Save",
+    saving: "Saving…",
+    reset: "Reset",
+    saveFailed: "Failed to save changes.",
+    saved: "Changes saved",
+    currentRole: "Current role",
+    changeRole: "Change role",
+    activity: "Activity",
+    user: "User",
+    roleFor: "Role for {email}",
+    saveRole: "Save",
+    privateAccess: "Private access",
+    signIn: "Sign in",
+    loginLede: "Use your dnd.firegory account to access the search workspace.",
+    email: "Email",
+    password: "Password",
+    signingIn: "Signing in…",
+    noAccount: "No account yet?",
+    register: "Register",
+    requiredRegistration: "Required registration",
+    createAccount: "Create account",
+    registerLede: "Register to use the private D&D search workspace.",
+    displayName: "Display name",
+    passwordHint: "Use at least 12 characters. The first registered user becomes admin.",
+    creatingAccount: "Creating account…",
+    alreadyHaveAccount: "Already have an account?",
+  },
+} as const;
+
+type UiLanguageContextValue = {
+  language: UiLanguage;
+  setLanguage: (language: UiLanguage) => void;
+  t: (key: TranslationKey, vars?: Record<string, string | number>) => string;
+};
+
+const UiLanguageContext = createContext<UiLanguageContextValue | null>(null);
+
+function isUiLanguage(value: string | null): value is UiLanguage {
+  return value === "ru" || value === "en";
+}
+
+function translate(language: UiLanguage, key: TranslationKey, vars?: Record<string, string | number>) {
+  let value: string = translations[language][key];
+  if (!vars) return value;
+  for (const [name, replacement] of Object.entries(vars)) {
+    value = value.replaceAll(`{${name}}`, String(replacement));
+  }
+  return value;
+}
+
+export function UiLanguageProvider({ children }: { children: React.ReactNode }) {
+  const [language, setLanguageState] = useState<UiLanguage>("ru");
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    if (isUiLanguage(stored)) queueMicrotask(() => setLanguageState(stored));
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(STORAGE_KEY, language);
+    document.documentElement.lang = language;
+  }, [language]);
+
+  const value = useMemo<UiLanguageContextValue>(
+    () => ({
+      language,
+      setLanguage: setLanguageState,
+      t: (key, vars) => translate(language, key, vars),
+    }),
+    [language],
+  );
+
+  return <UiLanguageContext.Provider value={value}>{children}</UiLanguageContext.Provider>;
+}
+
+export function useUiLanguage() {
+  const value = useContext(UiLanguageContext);
+  if (!value) throw new Error("useUiLanguage must be used within UiLanguageProvider");
+  return value;
+}
+
+export function T({ k, vars }: { k: TranslationKey; vars?: Record<string, string | number> }) {
+  const { t } = useUiLanguage();
+  return <>{t(k, vars)}</>;
+}
+
+export function languageLabel(value: string, uiLanguage: UiLanguage) {
+  if (value === "ru") return translations[uiLanguage].russian;
+  if (value === "en") return translations[uiLanguage].english;
+  return value;
+}
+
+export function categoryLabel(value: string, uiLanguage: UiLanguage) {
+  if (value === "core_rules") return translations[uiLanguage].coreRules;
+  if (value === "official_supplement") return translations[uiLanguage].supplements;
+  if (value === "homebrew") return translations[uiLanguage].homebrew;
+  return value;
+}
+
+export function accessTierLabel(value: string, uiLanguage: UiLanguage) {
+  if (value === "open") return translations[uiLanguage].open;
+  if (value === "premium") return translations[uiLanguage].premium;
+  if (value === "personal") return translations[uiLanguage].personal;
+  return value;
+}
+
+export function jobStatusLabel(value: string, uiLanguage: UiLanguage) {
+  const key = value as keyof Pick<typeof translations.ru, "queued" | "processing" | "succeeded" | "failed" | "cancelled">;
+  if (key in translations[uiLanguage]) return translations[uiLanguage][key];
+  return value;
+}

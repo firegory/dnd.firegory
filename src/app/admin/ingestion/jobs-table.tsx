@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { jobStatusLabel, useUiLanguage } from "../../../components/ui/i18n";
 
 type JobRecord = {
   id: string;
@@ -25,17 +26,10 @@ const STATUS_STYLES: Record<string, string> = {
   cancelled: "bg-surface-light text-text-muted",
 };
 
-const STATUS_LABELS: Record<string, string> = {
-  queued: "В очереди",
-  processing: "Обработка",
-  succeeded: "Завершён",
-  failed: "Ошибка",
-  cancelled: "Отменён",
-};
-
 const REFRESH_INTERVAL_MS = 10_000;
 
 export function JobsTable() {
+  const { language: uiLanguage, t } = useUiLanguage();
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -51,17 +45,17 @@ export function JobsTable() {
       }
       const data = await res.json();
       if (!res.ok) {
-        setError(data.error ?? "Failed to load jobs.");
+        setError(data.error ?? t("failedToLoadJobs"));
         return;
       }
       setJobs(data.jobs ?? []);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Network error.");
+      setError(err instanceof Error ? err.message : t("networkError"));
     } finally {
       setLoading(false);
     }
-  }, [router]);
+  }, [router, t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,58 +73,58 @@ export function JobsTable() {
   }, [load]);
 
   async function handleRetry(jobId: string) {
-    if (!confirm("Retry this failed job? A new job will be created with the same source and file.")) return;
+    if (!confirm(t("retryConfirm"))) return;
     setActionStatus((prev) => ({ ...prev, [jobId]: "retrying" }));
     try {
       const res = await fetch(`/api/admin/ingestion/jobs/${jobId}/retry`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) {
-        alert(data.error ?? "Retry failed.");
+        alert(data.error ?? t("retryFailed"));
         return;
       }
       setActionStatus((prev) => ({ ...prev, [jobId]: "retry-ok" }));
       await load();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Network error.");
+      alert(err instanceof Error ? err.message : t("networkError"));
     } finally {
       clearAction(jobId);
     }
   }
 
   async function handleReprocess(sourceId: string, jobId: string) {
-    if (!confirm("Reprocess this source? Existing chunks, pages, and documents will be removed and regenerated from the original PDF.")) return;
+    if (!confirm(t("reprocessConfirm"))) return;
     setActionStatus((prev) => ({ ...prev, [jobId]: "reprocessing" }));
     try {
       const res = await fetch(`/api/admin/ingestion/sources/${sourceId}/reprocess`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) {
-        alert(data.error ?? "Reprocess failed.");
+        alert(data.error ?? t("reprocessFailed"));
         return;
       }
       setActionStatus((prev) => ({ ...prev, [jobId]: "reprocess-ok" }));
       await load();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Network error.");
+      alert(err instanceof Error ? err.message : t("networkError"));
     } finally {
       clearAction(jobId);
     }
   }
 
   async function handleDelete(sourceId: string, jobId: string) {
-    if (!confirm("⚠️ DELETE this source permanently? This cannot be undone.")) return;
-    if (!confirm("FINAL WARNING: proceed with deletion?")) return;
+    if (!confirm(t("deleteConfirm"))) return;
+    if (!confirm(t("finalDeleteConfirm"))) return;
     setActionStatus((prev) => ({ ...prev, [jobId]: "deleting" }));
     try {
       const res = await fetch(`/api/admin/ingestion/sources/${sourceId}/delete`, { method: "POST" });
       const data = await res.json();
       if (!res.ok) {
-        alert(data.error ?? "Delete failed.");
+        alert(data.error ?? t("deleteFailed"));
         return;
       }
       setActionStatus((prev) => ({ ...prev, [jobId]: "delete-ok" }));
       await load();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Network error.");
+      alert(err instanceof Error ? err.message : t("networkError"));
     } finally {
       clearAction(jobId);
     }
@@ -147,7 +141,7 @@ export function JobsTable() {
   }
 
   if (loading) {
-    return <p className="text-text-muted">Loading jobs…</p>;
+    return <p className="text-text-muted">{t("loadingJobs")}</p>;
   }
 
   if (error) {
@@ -155,7 +149,7 @@ export function JobsTable() {
   }
 
   if (jobs.length === 0) {
-    return <p className="text-text-muted">No ingestion jobs yet.</p>;
+    return <p className="text-text-muted">{t("noJobs")}</p>;
   }
 
   return (
@@ -163,13 +157,13 @@ export function JobsTable() {
       <table className="w-full text-left text-sm">
         <thead>
           <tr className="border-b border-border bg-surface">
-            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Источник</th>
-            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Статус</th>
-            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Прогресс</th>
-            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Тип</th>
-            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Дата</th>
-            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Ошибка</th>
-            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Действия</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">{t("source")}</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">{t("status")}</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">{t("progress")}</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">{t("type")}</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">{t("date")}</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">{t("error")}</th>
+            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">{t("actions")}</th>
           </tr>
         </thead>
         <tbody>
@@ -183,11 +177,11 @@ export function JobsTable() {
                 ) : (
                   <span className="text-text-muted">—</span>
                 )}
-                <p className="mt-1 font-mono text-[10px] text-text-muted">job {job.id.slice(0, 8)}</p>
+                <p className="mt-1 font-mono text-[10px] text-text-muted">{t("job")} {job.id.slice(0, 8)}</p>
               </td>
               <td className="px-4 py-3">
                 <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-semibold ${STATUS_STYLES[job.status] ?? "bg-surface-light text-text-muted"}`}>
-                  {STATUS_LABELS[job.status] ?? job.status}
+                  {jobStatusLabel(job.status, uiLanguage)}
                 </span>
               </td>
               <td className="px-4 py-3">
@@ -205,6 +199,7 @@ export function JobsTable() {
                 <Actions
                   job={job}
                   actionStatus={actionStatus}
+                  t={t}
                   onRetry={handleRetry}
                   onReprocess={handleReprocess}
                   onDelete={handleDelete}
@@ -221,12 +216,14 @@ export function JobsTable() {
 function Actions({
   job,
   actionStatus,
+  t,
   onRetry,
   onReprocess,
   onDelete,
 }: {
   job: JobRecord;
   actionStatus: Record<string, string>;
+  t: ReturnType<typeof useUiLanguage>["t"];
   onRetry: (jobId: string) => void;
   onReprocess: (sourceId: string, jobId: string) => void;
   onDelete: (sourceId: string, jobId: string) => void;
@@ -234,12 +231,12 @@ function Actions({
   const status = actionStatus[job.id];
 
   if (status === "retrying" || status === "reprocessing" || status === "deleting") {
-    return <span className="text-xs text-text-muted">{status}…</span>;
+    return <span className="text-xs text-text-muted">{formatActionStatus(status, t)}…</span>;
   }
 
-  if (status === "retry-ok") return <span className="text-xs font-semibold text-success">Retried ✓</span>;
-  if (status === "reprocess-ok") return <span className="text-xs font-semibold text-success">Reprocessing ✓</span>;
-  if (status === "delete-ok") return <span className="text-xs font-semibold text-success">Deleted ✓</span>;
+  if (status === "retry-ok") return <span className="text-xs font-semibold text-success">{t("retried")}</span>;
+  if (status === "reprocess-ok") return <span className="text-xs font-semibold text-success">{t("reprocessingDone")}</span>;
+  if (status === "delete-ok") return <span className="text-xs font-semibold text-success">{t("deleted")}</span>;
 
   const canRetry = (job.status === "failed" || job.status === "cancelled") && job.sourceId && job.fileId;
   const canReprocess = (job.status === "succeeded" || job.status === "failed") && job.sourceId;
@@ -247,11 +244,18 @@ function Actions({
 
   return (
     <div className="flex gap-1.5">
-      {canRetry && <button className="rounded-md border border-warning/40 px-2 py-1 text-xs font-medium text-warning hover:bg-warning/10" onClick={() => onRetry(job.id)}>Retry</button>}
-      {canReprocess && <button className="rounded-md border border-accent/40 px-2 py-1 text-xs font-medium text-accent hover:bg-accent/10" onClick={() => onReprocess(job.sourceId!, job.id)}>Reprocess</button>}
-      {canDelete && <button className="rounded-md border border-danger/40 px-2 py-1 text-xs font-medium text-danger hover:bg-danger/10" onClick={() => onDelete(job.sourceId!, job.id)}>Delete</button>}
+      {canRetry && <button className="rounded-md border border-warning/40 px-2 py-1 text-xs font-medium text-warning hover:bg-warning/10" onClick={() => onRetry(job.id)}>{t("retry")}</button>}
+      {canReprocess && <button className="rounded-md border border-accent/40 px-2 py-1 text-xs font-medium text-accent hover:bg-accent/10" onClick={() => onReprocess(job.sourceId!, job.id)}>{t("reprocess")}</button>}
+      {canDelete && <button className="rounded-md border border-danger/40 px-2 py-1 text-xs font-medium text-danger hover:bg-danger/10" onClick={() => onDelete(job.sourceId!, job.id)}>{t("delete")}</button>}
     </div>
   );
+}
+
+function formatActionStatus(status: string, t: ReturnType<typeof useUiLanguage>["t"]) {
+  if (status === "retrying") return t("retrying");
+  if (status === "reprocessing") return t("reprocessing");
+  if (status === "deleting") return t("deleting");
+  return status;
 }
 
 function formatTimestamp(value: string | null): string {

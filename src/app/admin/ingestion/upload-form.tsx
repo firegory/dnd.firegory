@@ -1,30 +1,19 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { AppSelect } from "../../../components/ui/select";
-
-const CATEGORIES = [
-  { value: "core_rules", label: "Core Rules", description: "Базовые правила" },
-  { value: "official_supplement", label: "Official Supplement" },
-  { value: "homebrew", label: "Homebrew" },
-] as const;
-
-const EDITIONS = [
-  { value: "5.5e", label: "D&D 5.5e", description: "Правила 2024" },
-  { value: "5e", label: "D&D 5e" },
-] as const;
+import { useUiLanguage } from "../../../components/ui/i18n";
 
 const LANGUAGES = [
-  { value: "ru", label: "Русский" },
-  { value: "en", label: "English" },
+  { value: "ru", label: "RU" },
+  { value: "en", label: "EN" },
 ] as const;
 
-const ACCESS_TIERS = [
-  { value: "open", label: "Open", description: "Все пользователи" },
-  { value: "premium", label: "Premium", description: "Подписчики" },
-  { value: "personal", label: "Personal", description: "Только владелец" },
-] as const;
+const STORAGE_KEYS = {
+  edition: "dnd.firegory.upload.edition",
+  language: "dnd.firegory.upload.language",
+} as const;
 
 type FormStatus = "idle" | "uploading" | "success" | "error";
 
@@ -46,6 +35,7 @@ async function readUploadResponse(response: Response): Promise<UploadResponse> {
 }
 
 export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
+  const { t } = useUiLanguage();
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
   const [category, setCategory] = useState<string>("core_rules");
@@ -59,17 +49,47 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
 
   const isUploading = formStatus === "uploading";
 
+  useEffect(() => {
+    const storedEdition = window.localStorage.getItem(STORAGE_KEYS.edition);
+    const storedLanguage = window.localStorage.getItem(STORAGE_KEYS.language);
+    if (storedEdition) queueMicrotask(() => setEdition(storedEdition));
+    if (storedLanguage) queueMicrotask(() => setLanguage(storedLanguage));
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(STORAGE_KEYS.edition, edition);
+  }, [edition]);
+
+  useEffect(() => {
+    window.localStorage.setItem(STORAGE_KEYS.language, language);
+  }, [language]);
+
+  const categories = [
+    { value: "core_rules", label: t("coreRules"), description: t("coreRulesDescription") },
+    { value: "official_supplement", label: t("officialSupplement"), description: t("supplementsDescription") },
+    { value: "homebrew", label: t("homebrew"), description: t("homebrewDescription") },
+  ] as const;
+  const editions = [
+    { value: "5.5e", label: "D&D 5.5e", description: t("dnd2024Rules") },
+    { value: "5e", label: "D&D 5e" },
+  ] as const;
+  const accessTiers = [
+    { value: "open", label: t("open"), description: t("allUsers") },
+    { value: "premium", label: t("premium"), description: t("subscribers") },
+    { value: "personal", label: t("personal"), description: t("ownerOnly") },
+  ] as const;
+
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
 
     if (!file) {
       setFormStatus("error");
-      setErrorMessage("Please select a PDF file.");
+      setErrorMessage(t("selectPdfError"));
       return;
     }
     if (!title.trim()) {
       setFormStatus("error");
-      setErrorMessage("Please enter a source title.");
+      setErrorMessage(t("enterTitleError"));
       return;
     }
 
@@ -106,13 +126,13 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
 
       if (!response.ok) {
         setFormStatus("error");
-        setErrorMessage(data.error ?? `Upload failed with HTTP ${response.status}.`);
+        setErrorMessage(data.error ?? t("uploadFailedHttp", { status: response.status }));
         return;
       }
 
       if (!data.sourceId || !data.jobId) {
         setFormStatus("error");
-        setErrorMessage("Upload succeeded, but the server returned an unexpected response.");
+        setErrorMessage(t("uploadUnexpected"));
         return;
       }
 
@@ -125,7 +145,7 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
       onSuccess?.();
     } catch (err) {
       setFormStatus("error");
-      setErrorMessage(err instanceof Error ? err.message : "Network error.");
+      setErrorMessage(err instanceof Error ? err.message : t("networkError"));
     }
   }
 
@@ -133,7 +153,7 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
     <form onSubmit={handleSubmit} className="space-y-5">
       <div>
         <label className="mb-2 block text-sm font-semibold text-text-secondary" htmlFor="pdf-file-input">
-          PDF файл
+          {t("pdfFile")}
         </label>
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
           <label className="cursor-pointer rounded-xl border border-dashed border-border bg-primary/40 px-6 py-4 text-center transition-colors hover:border-accent/40 hover:bg-primary/60">
@@ -153,12 +173,12 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
             <span className="block font-mono text-xs font-bold tracking-widest text-accent uppercase">
               PDF
             </span>
-            <p className="mt-2 text-sm text-text-muted">Нажмите или перетащите файл</p>
-            <p className="mt-1 text-xs text-text-muted">PDF, до 200 MB</p>
+            <p className="mt-2 text-sm text-text-muted">{t("clickOrDropFile")}</p>
+            <p className="mt-1 text-xs text-text-muted">{t("pdfLimit")}</p>
           </label>
           <div className="text-sm text-text-muted">
             <p>
-              Выбран: <span className="text-text-secondary">{file ? `${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)` : "—"}</span>
+              {t("selected")}: <span className="text-text-secondary">{file ? `${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)` : "—"}</span>
             </p>
           </div>
         </div>
@@ -166,7 +186,7 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
 
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="flex flex-col gap-1.5">
-          <span className="text-sm font-semibold text-text-secondary">Название *</span>
+          <span className="text-sm font-semibold text-text-secondary">{t("titleRequired")}</span>
           <input
             type="text"
             value={title}
@@ -181,10 +201,10 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
             className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
           />
         </label>
-        <AppSelect label="Категория" value={category} options={CATEGORIES} onChange={setCategory} disabled={isUploading} />
-        <AppSelect label="Редакция" value={edition} options={EDITIONS} onChange={setEdition} disabled={isUploading} />
-        <AppSelect label="Язык" value={language} options={LANGUAGES} onChange={setLanguage} disabled={isUploading} />
-        <AppSelect label="Уровень доступа" value={accessTier} options={ACCESS_TIERS} onChange={setAccessTier} disabled={isUploading} />
+        <AppSelect label={t("category")} value={category} options={categories} onChange={setCategory} disabled={isUploading} />
+        <AppSelect label={t("edition")} value={edition} options={editions} onChange={setEdition} disabled={isUploading} />
+        <AppSelect label={t("language")} value={language} options={LANGUAGES} onChange={setLanguage} disabled={isUploading} />
+        <AppSelect label={t("accessLevel")} value={accessTier} options={accessTiers} onChange={setAccessTier} disabled={isUploading} />
       </div>
 
       <div className="flex flex-wrap items-center gap-4">
@@ -193,11 +213,11 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
           className="rounded-xl bg-accent px-6 py-3 font-semibold text-primary transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
           disabled={isUploading}
         >
-          {isUploading ? "Загрузка…" : "Загрузить и обработать"}
+          {isUploading ? t("uploading") : t("uploadAndProcess")}
         </button>
         {formStatus === "success" && result && (
           <span className="text-sm font-semibold text-success">
-            Готово: source {result.sourceId.slice(0, 8)}, job {result.jobId.slice(0, 8)}
+            {t("sourceReady", { source: result.sourceId.slice(0, 8), job: result.jobId.slice(0, 8) })}
           </span>
         )}
         {formStatus === "error" && errorMessage && (

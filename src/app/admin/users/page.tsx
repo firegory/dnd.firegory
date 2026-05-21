@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { AppLayout } from "../../../components/ui/app-layout";
+import { T } from "../../../components/ui/i18n";
 import { updateUserRoleAction } from "../../../server/auth/actions";
 import { requireAdmin } from "../../../server/auth/session";
 import { listUsers } from "../../../server/auth/users";
@@ -20,21 +21,20 @@ export default async function AdminUsersPage() {
     <AppLayout userRole="admin">
       <div className="space-y-8">
         <nav className="flex items-center gap-2 text-sm text-text-muted">
-          <Link href="/search" className="hover:text-accent">Поиск</Link>
+          <Link href="/search" className="hover:text-accent"><T k="search" /></Link>
           <span>/</span>
-          <span className="text-text-secondary">Пользователи</span>
+          <span className="text-text-secondary"><T k="users" /></span>
         </nav>
-
 
         <section>
           <div className="overflow-x-auto rounded-xl border border-border">
             <table className="w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-border bg-surface">
-                  <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Пользователь</th>
-                  <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Текущая роль</th>
-                  <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Изменить роль</th>
-                  <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">Активность</th>
+                  <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase"><T k="user" /></th>
+                  <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase"><T k="currentRole" /></th>
+                  <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase"><T k="changeRole" /></th>
+                  <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase"><T k="activity" /></th>
                 </tr>
               </thead>
               <tbody>
@@ -63,7 +63,7 @@ export default async function AdminUsersPage() {
                           ))}
                         </select>
                         <button type="submit" className="rounded-lg bg-accent px-3 py-2 text-sm font-semibold text-primary hover:opacity-90">
-                          Save
+                          <T k="saveRole" />
                         </button>
                       </form>
                     </td>
