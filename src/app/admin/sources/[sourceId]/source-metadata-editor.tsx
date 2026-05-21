@@ -10,6 +10,9 @@ const LANGUAGE_OPTIONS = [
   { value: "en", label: "EN" },
 ];
 
+const EDITION_VALUES = new Set(["5.5e", "5e"]);
+const LANGUAGE_VALUES = new Set(["ru", "en"]);
+
 const STORAGE_KEYS = {
   edition: "dnd.firegory.sourceMetadata.edition",
   language: "dnd.firegory.sourceMetadata.language",
@@ -24,6 +27,17 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
   const [accessTier, setAccessTier] = useState(source.accessTier);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    const storedEdition = window.localStorage.getItem(STORAGE_KEYS.edition);
+    const storedLanguage = window.localStorage.getItem(STORAGE_KEYS.language);
+    if (storedEdition && EDITION_VALUES.has(storedEdition)) {
+      queueMicrotask(() => setEdition(storedEdition as typeof edition));
+    }
+    if (storedLanguage && LANGUAGE_VALUES.has(storedLanguage)) {
+      queueMicrotask(() => setLanguage(storedLanguage as typeof language));
+    }
+  }, []);
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEYS.edition, edition);
