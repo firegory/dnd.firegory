@@ -218,20 +218,30 @@ export function mapCitations(
   for (const raw of rawCitations) {
     if (!raw.quote) continue;
 
-    // Try to match by source title first, then by quote overlap
     let matchedChunk: RetrievalCandidate | undefined;
 
+    const quoteLower = raw.quote.toLowerCase();
+
     if (raw.sourceTitle) {
-      matchedChunk = chunks.find(
+      const titleMatches = chunks.filter(
         (c) =>
           c.sourceTitle.toLowerCase() === raw.sourceTitle!.toLowerCase(),
       );
+
+      if (titleMatches.length === 1) {
+        matchedChunk = titleMatches[0];
+      } else if (titleMatches.length > 1 && raw.quote) {
+        matchedChunk = titleMatches.find((c) => {
+          const chunkQuoteLower = c.quoteText.toLowerCase();
+          return (
+            chunkQuoteLower.includes(quoteLower.slice(0, 30)) ||
+            quoteLower.includes(chunkQuoteLower.slice(0, 30))
+          );
+        }) ?? titleMatches[0];
+      }
     }
 
     if (!matchedChunk && raw.quote) {
-      // Fuzzy match: find chunk whose quoteText contains a significant
-      // portion of the LLM's quote or vice versa
-      const quoteLower = raw.quote.toLowerCase();
       matchedChunk = chunks.find((c) => {
         const chunkQuoteLower = c.quoteText.toLowerCase();
         return (
