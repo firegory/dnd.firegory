@@ -15,9 +15,9 @@ export type LlmConfig = Readonly<{
 
 const DEFAULT_LLM_CONFIG: LlmConfig = {
   apiKey: "",
-  baseUrl: "https://api.z.ai/v1",
+  baseUrl: "https://api.z.ai/api/paas/v4",
   model: "z-llm",
-  maxTokens: 1024,
+  maxTokens: 4096,
   temperature: 0.2,
 };
 
@@ -30,7 +30,7 @@ export function getLlmConfig(): LlmConfig {
     apiKey: process.env.ZAI_API_KEY ?? "",
     baseUrl: process.env.ZAI_LLM_BASE_URL ?? DEFAULT_LLM_CONFIG.baseUrl,
     model: process.env.ZAI_LLM_MODEL ?? DEFAULT_LLM_CONFIG.model,
-    maxTokens: parseInt(process.env.ZAI_LLM_MAX_TOKENS ?? "1024", 10),
+    maxTokens: parseInt(process.env.ZAI_LLM_MAX_TOKENS ?? String(DEFAULT_LLM_CONFIG.maxTokens), 10),
     temperature: parseFloat(process.env.ZAI_LLM_TEMPERATURE ?? "0.2"),
   };
 }
