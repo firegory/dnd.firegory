@@ -15,9 +15,9 @@ export type LlmConfig = Readonly<{
 
 const DEFAULT_LLM_CONFIG: LlmConfig = {
   apiKey: "",
-  baseUrl: "https://api.z.ai/v1",
+  baseUrl: "https://api.z.ai/api/paas/v4",
   model: "z-llm",
-  maxTokens: 1024,
+  maxTokens: 4096,
   temperature: 0.2,
 };
 

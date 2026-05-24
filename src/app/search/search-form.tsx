@@ -68,7 +68,7 @@ export function SearchForm() {
   const { language: uiLanguage, t } = useUiLanguage();
   const [query, setQuery] = useState("");
   const [edition, setEdition] = usePersistentState(STORAGE_KEYS.edition, "5.5e");
-  const [sourceLanguage, setSourceLanguage] = usePersistentState(STORAGE_KEYS.sourceLanguage, "ru");
+  const [sourceLanguage, setSourceLanguage] = usePersistentState(STORAGE_KEYS.sourceLanguage, "");
   const [category, setCategory] = usePersistentState(STORAGE_KEYS.category, "");
   const [status, setStatus] = useState<FetchStatus>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -94,7 +94,7 @@ export function SearchForm() {
         query: query.trim(),
         answerLanguage: uiLanguage,
         edition,
-        language: sourceLanguage,
+        ...(sourceLanguage ? { language: sourceLanguage } : {}),
       };
       if (category) body.category = category;
 

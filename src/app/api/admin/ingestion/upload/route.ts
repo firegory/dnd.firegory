@@ -18,7 +18,7 @@ const VALID_EDITIONS = new Set<string>(SOURCE_EDITIONS);
 const VALID_LANGUAGES = new Set<string>(SOURCE_LANGUAGES);
 const VALID_TIERS = new Set<string>(ACCESS_TIERS);
 
-const MAX_PDF_SIZE = 200 * 1024 * 1024; // 200 MB
+const MAX_PDF_SIZE = 1024 * 1024 * 1024; // 1 GB
 
 export async function POST(request: Request) {
   let user;

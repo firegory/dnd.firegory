@@ -7,10 +7,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 
 export function getStorageRoot(): string {
-  const root = process.env.STORAGE_ROOT;
-  if (!root) {
-    throw new Error("STORAGE_ROOT is required for ingestion storage operations.");
-  }
+  const root = process.env.STORAGE_ROOT || "./storage";
   return root;
 }
 

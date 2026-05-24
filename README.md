@@ -21,25 +21,63 @@ Key features:
 ### Prerequisites
 
 - Node.js 22+
-- Docker and Docker Compose (for full stack)
-- PostgreSQL 16+ with pgvector (or use the Docker stack)
+- PostgreSQL 16+ with pgvector extension
+- Redis 7+
+- Docker and Docker Compose (for full stack, alternative)
+- poppler-utils (for PDF text extraction and citation previews)
 
 ### Local development (bare metal)
 
+1. Install system dependencies:
+
+```bash
+sudo apt-get update && sudo apt-get install -y poppler-utils
+```
+
+2. Set up PostgreSQL with pgvector and Redis. Ensure both are running.
+
+3. Copy the environment config and edit with your values:
+
+```bash
+cp .env.example .env.local
+```
+
+Minimal `.env.local` for bare-metal:
+
+```bash
+DATABASE_URL=postgres://<user>:<password>@localhost:5432/dnd_firegory
+REDIS_URL=redis://127.0.0.1:6379
+ZAI_API_KEY=your-zai-api-key
+
+# Optional: use Ollama for embeddings instead of z.ai
+# EMBEDDING_PROVIDER=ollama
+# OLLAMA_BASE_URL=http://127.0.0.1:11434
+# OLLAMA_EMBEDDING_MODEL=bge-m3
+# OLLAMA_EMBEDDING_DIMENSIONS=1024
+```
+
+4. Install dependencies and run migrations:
+
 ```bash
 npm install
-npm run dev
+npm run db:migrate
 ```
 
-The app starts at http://localhost:3000. Run database migrations before registering or signing in:
+5. Start the dev server:
 
 ```bash
-export DATABASE_URL="postgres://dnd:dnd_dev_password@localhost:5432/dnd_firegory"
-npm run db:migrate
 npm run dev
 ```
 
-The first registered account is promoted to `admin`; later accounts start as `user`. Admins can manage roles at `/admin/users`.
+The app starts at http://localhost:3000. The first registered account is promoted to `admin`; later accounts start as `user`. Admins can manage roles at `/admin/users`.
+
+To expose the dev server on your local network, start with:
+
+```bash
+npm run dev -- --hostname 0.0.0.0
+```
+
+If you access the app via a LAN IP, add it to `allowedDevOrigins` in `next.config.ts`.
 
 ### Docker Compose (full stack)
 
@@ -128,9 +166,9 @@ npm run ingest -- \
 
 ### Worker system dependencies
 
-The ingestion worker depends on system PDF tools. The Docker image installs them automatically for both `app` and `worker` services.
+The ingestion worker and citation preview feature depend on system PDF tools. The Docker image installs them automatically for both `app` and `worker` services.
 
-For bare-metal Debian/Ubuntu worker runs, install at least Poppler before processing PDFs:
+For bare-metal Debian/Ubuntu, install at least Poppler (required for both the worker and citation previews on the app server):
 
 ```bash
 sudo apt-get update && sudo apt-get install -y poppler-utils
@@ -176,7 +214,7 @@ cp .env.example .env.local
 | `APP_URL` | no | Public app URL (default: `http://localhost:3000`) |
 | `NEXT_PUBLIC_APP_URL` | no | Public app URL exposed to the browser |
 | `AUTH_SECRET` | no | Reserved for future session secret hardening |
-| `ZAI_API_KEY` | no | z.ai API key for LLM calls and optional z.ai embeddings |
+| `ZAI_API_KEY` | no | z.ai API key for LLM calls and optional z.ai embeddings (required for answer generation) |
 | `STORAGE_ROOT` | no | Root directory for file storage (default: `./storage`) |
 | `APP_PORT` | no | Host port for the app in Docker Compose (default: `3000`) |
 | `POSTGRES_DB` | no | PostgreSQL database name (default: `dnd_firegory`) |

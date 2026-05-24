@@ -21,7 +21,7 @@ export type EmbeddingConfig = Readonly<{
 const DEFAULT_ZAI_EMBEDDING_CONFIG: EmbeddingConfig = {
   provider: "zai",
   apiKey: "",
-  baseUrl: "https://api.z.ai/v1",
+  baseUrl: "https://api.z.ai/api/paas/v4",
   model: "z-embedding",
   dimensions: 1024,
   keepAlive: "",

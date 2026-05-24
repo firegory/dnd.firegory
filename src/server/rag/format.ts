@@ -164,6 +164,37 @@ export function parseLlmResponse(raw: string): RawLlmResponse {
   try {
     return JSON.parse(text) as RawLlmResponse;
   } catch {
+    const braceStart = text.indexOf("{");
+    if (braceStart !== -1) {
+      let depth = 0;
+      for (let i = braceStart; i < text.length; i++) {
+        if (text[i] === "{") depth++;
+        else if (text[i] === "}") depth--;
+        if (depth === 0) {
+          try {
+            return JSON.parse(text.slice(braceStart, i + 1)) as RawLlmResponse;
+          } catch {
+            break;
+          }
+        }
+      }
+      const fixed = text.slice(braceStart) + "]}";
+      try {
+        return JSON.parse(fixed) as RawLlmResponse;
+      } catch {
+        const partial = text.slice(braceStart) + "]";
+        try {
+          const inner = JSON.parse(partial) as RawLlmResponse;
+          return inner;
+        } catch {
+          const quotesMatch = text.match(/"answer"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+          const answer = quotesMatch?.[1]
+            ? JSON.parse(`"${quotesMatch[1]}"`)
+            : raw;
+          return { answer, confident: false, citations: [] };
+        }
+      }
+    }
     return { answer: raw, confident: false, citations: [] };
   }
 }
