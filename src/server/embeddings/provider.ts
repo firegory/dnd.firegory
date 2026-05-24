@@ -6,6 +6,7 @@
  */
 
 import { query } from "../../server/db/client.ts";
+import type { ChunkBbox } from "../../worker/ingestion/bbox.ts";
 
 export type EmbeddingProvider = "zai" | "ollama";
 
@@ -383,7 +384,7 @@ export async function persistChunksWithEmbeddings(
     charCount: number;
     embedding: readonly number[];
     embeddingModel: string;
-    bbox?: Readonly<{ x1: number; y1: number; x2: number; y2: number }> | null;
+    bbox?: ChunkBbox | null;
   }>[],
 ): Promise<number> {
   if (chunks.length === 0) return 0;
@@ -464,7 +465,7 @@ export async function persistChunksWithoutEmbeddings(
     sectionHeading: string | null;
     textSpanStart: number;
     textSpanEnd: number;
-    bbox?: Readonly<{ x1: number; y1: number; x2: number; y2: number }> | null;
+    bbox?: ChunkBbox | null;
   }>[],
 ): Promise<number> {
   if (chunks.length === 0) return 0;

@@ -7,7 +7,7 @@
 
 import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir, readFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
@@ -15,6 +15,7 @@ import { buildSourceAccessSql } from "../access/access-sql.ts";
 import { buildRetrievalAuthorizationFilter, type RetrievalUser } from "../access/retrieval-filter.ts";
 import { query } from "../db/client.ts";
 import { artifactsRootPath } from "../ingestion/paths.ts";
+import type { ChunkBbox } from "../../worker/ingestion/bbox.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -35,13 +36,6 @@ export type CitationPreviewFile = Readonly<{
   fileId: string;
   storagePath: string;
   artifactsRoot: string | null;
-}>;
-
-export type ChunkBboxData = Readonly<{
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
 }>;
 
 export function parseCitationPreviewRequest(url: URL): CitationPreviewRequest {
@@ -175,7 +169,7 @@ export async function renderPdfPageToPng(input: Readonly<{ pdfPath: string; outp
 export async function lookupChunkBbox(
   user: RetrievalUser,
   chunkId: string,
-): Promise<(CitationPreviewRequest & { bbox: ChunkBboxData }) | null> {
+): Promise<(CitationPreviewRequest & { bbox: ChunkBbox }) | null> {
   const filter = buildRetrievalAuthorizationFilter(user);
   const accessFilter = buildSourceAccessSql(filter);
   const params = [...accessFilter.params, chunkId];
@@ -185,12 +179,14 @@ export async function lookupChunkBbox(
     source_id: string;
     file_id: string;
     page_number: number | null;
-    bbox: ChunkBboxData | null;
+    bbox: ChunkBbox | null;
   }>(
     `SELECT c.source_id, c.file_id, c.page_number, c.bbox
      FROM chunks c
      JOIN sources s ON s.id = c.source_id
+     JOIN files f ON f.id = c.file_id
      WHERE s.deleted_at IS NULL
+       AND f.deleted_at IS NULL
        AND ${accessFilter.sql}
        AND c.id = $${chunkParam}
      LIMIT 1`,
@@ -198,7 +194,7 @@ export async function lookupChunkBbox(
   );
 
   const row = result.rows[0];
-  if (!row || !row.page_number || !row.bbox) return null;
+  if (!row || row.page_number == null || !row.bbox) return null;
 
   return {
     sourceId: row.source_id,
@@ -214,32 +210,36 @@ export async function renderCroppedPdfRegionToPng(input: Readonly<{
   pdfPath: string;
   outputPath: string;
   page: number;
-  bbox: ChunkBboxData;
+  bbox: ChunkBbox;
   paddingPx?: number;
 }>): Promise<void> {
   await access(input.pdfPath, fsConstants.R_OK);
   await mkdir(dirname(input.outputPath), { recursive: true });
 
+  const { bbox } = input;
+  if (bbox.x1 >= bbox.x2 || bbox.y1 >= bbox.y2) {
+    throw new Error(`Invalid bbox: x1=${bbox.x1} >= x2=${bbox.x2} or y1=${bbox.y1} >= y2=${bbox.y2}`);
+  }
+
   const padding = input.paddingPx ?? 10;
   const scale = CROP_DPI / 72;
 
-  const rawX = input.bbox.x1 * scale - padding;
-  const rawY = input.bbox.y1 * scale - padding;
-  const rawW = (input.bbox.x2 - input.bbox.x1) * scale + padding * 2;
-  const rawH = (input.bbox.y2 - input.bbox.y1) * scale + padding * 2;
+  const rawX = bbox.x1 * scale - padding;
+  const rawY = bbox.y1 * scale - padding;
+  const rawW = (bbox.x2 - bbox.x1) * scale + padding * 2;
+  const rawH = (bbox.y2 - bbox.y1) * scale + padding * 2;
 
   const x = Math.max(0, Math.round(rawX));
   const y = Math.max(0, Math.round(rawY));
-  const w = Math.round(rawW);
-  const h = Math.round(rawH);
+  const w = Math.max(1, Math.round(rawW));
+  const h = Math.max(1, Math.round(rawH));
 
-  const outputPrefix = input.outputPath.endsWith(".png")
-    ? input.outputPath.slice(0, -".png".length)
-    : input.outputPath;
+  const tmpPath = input.outputPath + ".tmp";
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
   try {
+    await unlink(tmpPath).catch(() => {});
     await execFileAsync(
       "pdftocairo",
       [
@@ -253,17 +253,21 @@ export async function renderCroppedPdfRegionToPng(input: Readonly<{
         "-H", String(h),
         "-png",
         input.pdfPath,
-        outputPrefix,
+        tmpPath.replace(/\.tmp$/, ""),
       ],
       { signal: controller.signal, timeout: RENDER_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
     );
+    await rename(tmpPath, input.outputPath);
+  } catch (err) {
+    await unlink(tmpPath).catch(() => {});
+    throw err;
   } finally {
     clearTimeout(timeout);
   }
 }
 
 export function croppedPreviewCachePath(
-  input: CitationPreviewRequest & { bbox: ChunkBboxData; artifactsRoot?: string | null },
+  input: CitationPreviewRequest & { bbox: ChunkBbox; artifactsRoot?: string | null },
 ): string {
   const root = input.artifactsRoot ?? artifactsRootPath(input.sourceId, input.fileId);
   const bboxSlug = `${Math.round(input.bbox.x1)}-${Math.round(input.bbox.y1)}-${Math.round(input.bbox.x2)}-${Math.round(input.bbox.y2)}`;

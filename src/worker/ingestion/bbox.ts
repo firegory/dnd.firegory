@@ -157,15 +157,13 @@ export function computeChunkBboxes(
     return result;
   }
 
+  const allWordsText = pageBboxes.words.map((w) => w.text.toLowerCase());
+
   for (const chunk of chunksOnPage) {
     const chunkText = chunk.text.trim();
     if (!chunkText) continue;
 
-    const bbox = matchChunkToWords(
-      pageBboxes.words,
-      chunk.textSpanStart,
-      chunk.textSpanEnd,
-    );
+    const bbox = matchChunkByText(pageBboxes.words, allWordsText, chunkText);
 
     if (bbox) {
       result.set(chunk.chunkIndex, bbox);
@@ -175,45 +173,78 @@ export function computeChunkBboxes(
   return result;
 }
 
-/**
- * Given the full concatenated page text and word positions, find the words
- * that fall within [spanStart, spanEnd] and compute their bounding box.
- */
-function matchChunkToWords(
+function matchChunkByText(
   words: readonly WordBbox[],
-  spanStart: number,
-  spanEnd: number,
+  allWordsText: readonly string[],
+  chunkText: string,
 ): ChunkBbox | null {
-  // Build character offsets for each word in the concatenated text
-  let charPos = 0;
-  const wordPositions: Array<{ start: number; end: number; bbox: WordBbox }> = [];
+  const chunkLower = chunkText.toLowerCase();
+  const chunkTokens = chunkLower.split(/\s+/).filter(Boolean);
+  if (chunkTokens.length === 0) return null;
 
-  for (const word of words) {
-    const start = charPos;
-    const end = charPos + word.text.length;
-    wordPositions.push({ start, end, bbox: word });
-    charPos = end + 1; // +1 for the space between words
+  const probeLen = Math.min(chunkTokens.length, 4);
+  const probe = chunkTokens.slice(0, probeLen);
+
+  let bestStart = -1;
+
+  for (let i = 0; i <= allWordsText.length - probeLen; i++) {
+    let match = true;
+    for (let j = 0; j < probeLen; j++) {
+      if (allWordsText[i + j] !== probe[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      bestStart = i;
+      break;
+    }
   }
 
-  // Find words that overlap with the chunk's span
+  if (bestStart === -1) {
+    for (let i = 0; i <= allWordsText.length - probeLen; i++) {
+      let match = true;
+      for (let j = 0; j < probeLen; j++) {
+        if (!allWordsText[i + j].includes(probe[j]) && !probe[j].includes(allWordsText[i + j])) {
+          match = false;
+          break;
+        }
+      }
+      if (match) {
+        bestStart = i;
+        break;
+      }
+    }
+  }
+
+  if (bestStart === -1) return null;
+
+  let matchEnd = bestStart + probeLen;
+  for (let i = matchEnd; i < allWordsText.length && i < bestStart + chunkTokens.length + 5; i++) {
+    const tailTokens = chunkTokens.slice(matchEnd - bestStart);
+    if (tailTokens.length === 0) break;
+    if (allWordsText[i] === tailTokens[0]) {
+      matchEnd = i + 1;
+    } else {
+      break;
+    }
+  }
+
+  matchEnd = Math.max(matchEnd, bestStart + Math.min(chunkTokens.length, allWordsText.length - bestStart));
+
   let x1 = Infinity;
   let y1 = Infinity;
   let x2 = -Infinity;
   let y2 = -Infinity;
-  let found = false;
 
-  for (const wp of wordPositions) {
-    // Check if this word overlaps with the chunk span
-    if (wp.end <= spanStart || wp.start >= spanEnd) continue;
-
-    x1 = Math.min(x1, wp.bbox.xMin);
-    y1 = Math.min(y1, wp.bbox.yMin);
-    x2 = Math.max(x2, wp.bbox.xMax);
-    y2 = Math.max(y2, wp.bbox.yMax);
-    found = true;
+  for (let i = bestStart; i < matchEnd && i < words.length; i++) {
+    x1 = Math.min(x1, words[i].xMin);
+    y1 = Math.min(y1, words[i].yMin);
+    x2 = Math.max(x2, words[i].xMax);
+    y2 = Math.max(y2, words[i].yMax);
   }
 
-  if (!found) return null;
+  if (!isFinite(x1)) return null;
 
   return { x1, y1, x2, y2 };
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { AppSelect } from "../../components/ui/select";
 import { categoryLabel, useUiLanguage } from "../../components/ui/i18n";
 
@@ -321,13 +321,20 @@ function CitationCard({ citation, onPreview }: { citation: Citation; onPreview: 
 function CitationPreviewModal({ citation, onClose }: { citation: Citation; onClose: () => void }) {
   const { t } = useUiLanguage();
   const [showFullPage, setShowFullPage] = useState(false);
+  const [imgError, setImgError] = useState(false);
 
   const hasChunkId = Boolean(citation.chunkId);
   const croppedUrl = hasChunkId
     ? `/api/citations/preview?chunkId=${encodeURIComponent(citation.chunkId)}`
     : null;
   const fullPageUrl = `/api/citations/preview?sourceId=${encodeURIComponent(citation.sourceId)}&fileId=${encodeURIComponent(citation.fileId)}&page=${citation.page}`;
-  const previewUrl = showFullPage || !croppedUrl ? fullPageUrl : croppedUrl;
+  const wantsFullPage = showFullPage || !croppedUrl || imgError;
+  const previewUrl = wantsFullPage ? fullPageUrl : croppedUrl;
+
+  const handleToggle = useCallback(() => {
+    setShowFullPage((v) => !v);
+    setImgError(false);
+  }, []);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -363,6 +370,11 @@ function CitationPreviewModal({ citation, onClose }: { citation: Citation; onClo
               src={previewUrl}
               alt={t("renderedPdfPage", { page: citation.page ?? "" })}
               className="mx-auto max-h-none w-full max-w-4xl rounded-lg border border-border bg-white object-contain"
+              onError={() => {
+                if (!imgError && previewUrl !== fullPageUrl) {
+                  setImgError(true);
+                }
+              }}
             />
           </div>
           <aside className="space-y-4 overflow-auto border-t border-border p-4 lg:border-l lg:border-t-0">
@@ -371,14 +383,19 @@ function CitationPreviewModal({ citation, onClose }: { citation: Citation; onClo
                 {t("pageLevelPreviewNotice")}
               </div>
             )}
-            {hasChunkId && (
+            {hasChunkId && !imgError && (
               <button
                 type="button"
-                onClick={() => setShowFullPage((v) => !v)}
+                onClick={handleToggle}
                 className="w-full rounded-xl border border-accent/40 px-3 py-2 text-sm font-medium text-accent transition-colors hover:bg-accent/10"
               >
                 {showFullPage ? t("showCroppedPreview") : t("showFullPage")}
               </button>
+            )}
+            {imgError && (
+              <div className="rounded-xl border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
+                {t("croppedPreviewFailed")}
+              </div>
             )}
             <div>
               <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">{t("quoteContext")}</div>
