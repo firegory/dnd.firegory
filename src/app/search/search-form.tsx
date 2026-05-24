@@ -212,6 +212,7 @@ export function SearchForm() {
 
 function SearchResultView({ result }: { result: SearchResult }) {
   const { t } = useUiLanguage();
+  const [previewCitation, setPreviewCitation] = useState<Citation | null>(null);
 
   return (
     <div className="space-y-8">
@@ -248,23 +249,38 @@ function SearchResultView({ result }: { result: SearchResult }) {
         ) : (
           <div className="space-y-4">
             {result.citations.map((citation, i) => (
-              <CitationCard key={`${citation.sourceId}-${citation.fileId}-${citation.page}-${i}`} citation={citation} />
+              <CitationCard
+                key={`${citation.sourceId}-${citation.fileId}-${citation.page}-${i}`}
+                citation={citation}
+                onPreview={setPreviewCitation}
+              />
             ))}
           </div>
         )}
       </section>
+
+      {previewCitation && (
+        <CitationPreviewModal citation={previewCitation} onClose={() => setPreviewCitation(null)} />
+      )}
     </div>
   );
 }
 
-function CitationCard({ citation }: { citation: Citation }) {
+function CitationCard({ citation, onPreview }: { citation: Citation; onPreview: (citation: Citation) => void }) {
   const { language: uiLanguage, t } = useUiLanguage();
+  const canPreview = Boolean(citation.sourceId && citation.fileId && citation.page !== null);
 
   return (
-    <div className="rounded-xl border border-border bg-surface p-5 transition-colors hover:border-accent/30">
-      <blockquote className="mb-4 border-l-3 border-accent pl-4 text-sm leading-relaxed text-text-secondary italic">
+    <article className="rounded-xl border border-border bg-surface p-5 transition-colors hover:border-accent/30">
+      <button
+        type="button"
+        disabled={!canPreview}
+        onClick={() => canPreview && onPreview(citation)}
+        className="mb-4 block w-full border-l-3 border-accent pl-4 text-left text-sm leading-relaxed text-text-secondary italic transition-colors enabled:hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-70"
+        title={canPreview ? t("openCitationPreview") : t("citationPreviewUnavailable")}
+      >
         «{citation.quote}»
-      </blockquote>
+      </button>
 
       <div className="flex flex-wrap items-center gap-2">
         <Link
@@ -290,6 +306,73 @@ function CitationCard({ citation }: { citation: Citation }) {
             {citation.section}
           </span>
         )}
+        {canPreview && (
+          <button
+            type="button"
+            onClick={() => onPreview(citation)}
+            className="rounded-full border border-accent/40 px-2 py-0.5 text-xs font-medium text-accent transition-colors hover:bg-accent/10"
+          >
+            {t("citationPreview")}
+          </button>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function CitationPreviewModal({ citation, onClose }: { citation: Citation; onClose: () => void }) {
+  const { t } = useUiLanguage();
+  const previewUrl = `/api/citations/preview?sourceId=${encodeURIComponent(citation.sourceId)}&fileId=${encodeURIComponent(citation.fileId)}&page=${citation.page}`;
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true" aria-label={t("citationPreview")}>
+      <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl">
+        <div className="flex items-start justify-between gap-4 border-b border-border p-4">
+          <div>
+            <h3 className="font-semibold text-text-primary">{citation.sourceTitle}</h3>
+            <p className="text-sm text-text-muted">
+              {citation.page !== null ? `${t("pageShort")} ${citation.page}` : t("pageUnknown")}
+              {citation.section ? ` · ${citation.section}` : ""}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg border border-border px-3 py-1 text-sm text-text-secondary hover:bg-surface-light"
+          >
+            {t("close")}
+          </button>
+        </div>
+        <div className="grid min-h-0 flex-1 gap-0 lg:grid-cols-[minmax(0,1fr)_20rem]">
+          <div className="min-h-0 overflow-auto bg-primary/70 p-4">
+            {/* MVP: page-level preview. Precise crop/highlight needs bbox ingestion. */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={previewUrl}
+              alt={t("renderedPdfPage", { page: citation.page ?? "" })}
+              className="mx-auto max-h-none w-full max-w-4xl rounded-lg border border-border bg-white object-contain"
+            />
+          </div>
+          <aside className="space-y-4 overflow-auto border-t border-border p-4 lg:border-l lg:border-t-0">
+            <div className="rounded-xl border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
+              {t("pageLevelPreviewNotice")}
+            </div>
+            <div>
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">{t("quoteContext")}</div>
+              <blockquote className="border-l-3 border-accent pl-3 text-sm leading-relaxed text-text-secondary italic">
+                «{citation.quote}»
+              </blockquote>
+            </div>
+          </aside>
+        </div>
       </div>
     </div>
   );
