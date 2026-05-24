@@ -218,6 +218,7 @@ function buildAnswerGenerationUnavailableAnswer(
       category: chunk.sourceCategory,
       fileId: chunk.fileId,
       sourceId: chunk.sourceId,
+      chunkId: chunk.chunkId,
     })),
     confident: false,
     retrievedChunks: chunks.length,

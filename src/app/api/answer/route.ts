@@ -90,6 +90,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         category: c.category,
         fileId: c.fileId,
         sourceId: c.sourceId,
+        chunkId: c.chunkId,
       })),
       confident: result.answer.confident,
       retrievedChunks: result.answer.retrievedChunks,
