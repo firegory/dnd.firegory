@@ -37,6 +37,13 @@ export type CitationPreviewFile = Readonly<{
   artifactsRoot: string | null;
 }>;
 
+export type ChunkBboxData = Readonly<{
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}>;
+
 export function parseCitationPreviewRequest(url: URL): CitationPreviewRequest {
   const sourceId = url.searchParams.get("sourceId")?.trim() ?? "";
   const fileId = url.searchParams.get("fileId")?.trim() ?? "";
@@ -54,6 +61,14 @@ export function parseCitationPreviewRequest(url: URL): CitationPreviewRequest {
   }
 
   return { sourceId, fileId, page };
+}
+
+export function parseChunkPreviewRequest(url: URL): { chunkId: string } {
+  const chunkId = url.searchParams.get("chunkId")?.trim() ?? "";
+  if (!UUID_RE.test(chunkId)) {
+    throw new CitationPreviewInputError("Invalid chunkId.");
+  }
+  return { chunkId };
 }
 
 export function citationPreviewCachePath(input: CitationPreviewRequest & { artifactsRoot?: string | null }): string {
@@ -155,6 +170,104 @@ export async function renderPdfPageToPng(input: Readonly<{ pdfPath: string; outp
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export async function lookupChunkBbox(
+  user: RetrievalUser,
+  chunkId: string,
+): Promise<(CitationPreviewRequest & { bbox: ChunkBboxData }) | null> {
+  const filter = buildRetrievalAuthorizationFilter(user);
+  const accessFilter = buildSourceAccessSql(filter);
+  const params = [...accessFilter.params, chunkId];
+  const chunkParam = params.length;
+
+  const result = await query<{
+    source_id: string;
+    file_id: string;
+    page_number: number | null;
+    bbox: ChunkBboxData | null;
+  }>(
+    `SELECT c.source_id, c.file_id, c.page_number, c.bbox
+     FROM chunks c
+     JOIN sources s ON s.id = c.source_id
+     WHERE s.deleted_at IS NULL
+       AND ${accessFilter.sql}
+       AND c.id = $${chunkParam}
+     LIMIT 1`,
+    params,
+  );
+
+  const row = result.rows[0];
+  if (!row || !row.page_number || !row.bbox) return null;
+
+  return {
+    sourceId: row.source_id,
+    fileId: row.file_id,
+    page: row.page_number,
+    bbox: row.bbox,
+  };
+}
+
+const CROP_DPI = 200;
+
+export async function renderCroppedPdfRegionToPng(input: Readonly<{
+  pdfPath: string;
+  outputPath: string;
+  page: number;
+  bbox: ChunkBboxData;
+  paddingPx?: number;
+}>): Promise<void> {
+  await access(input.pdfPath, fsConstants.R_OK);
+  await mkdir(dirname(input.outputPath), { recursive: true });
+
+  const padding = input.paddingPx ?? 10;
+  const scale = CROP_DPI / 72;
+
+  const rawX = input.bbox.x1 * scale - padding;
+  const rawY = input.bbox.y1 * scale - padding;
+  const rawW = (input.bbox.x2 - input.bbox.x1) * scale + padding * 2;
+  const rawH = (input.bbox.y2 - input.bbox.y1) * scale + padding * 2;
+
+  const x = Math.max(0, Math.round(rawX));
+  const y = Math.max(0, Math.round(rawY));
+  const w = Math.round(rawW);
+  const h = Math.round(rawH);
+
+  const outputPrefix = input.outputPath.endsWith(".png")
+    ? input.outputPath.slice(0, -".png".length)
+    : input.outputPath;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
+  try {
+    await execFileAsync(
+      "pdftocairo",
+      [
+        "-f", String(input.page),
+        "-l", String(input.page),
+        "-singlefile",
+        "-r", String(CROP_DPI),
+        "-x", String(x),
+        "-y", String(y),
+        "-W", String(w),
+        "-H", String(h),
+        "-png",
+        input.pdfPath,
+        outputPrefix,
+      ],
+      { signal: controller.signal, timeout: RENDER_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export function croppedPreviewCachePath(
+  input: CitationPreviewRequest & { bbox: ChunkBboxData; artifactsRoot?: string | null },
+): string {
+  const root = input.artifactsRoot ?? artifactsRootPath(input.sourceId, input.fileId);
+  const bboxSlug = `${Math.round(input.bbox.x1)}-${Math.round(input.bbox.y1)}-${Math.round(input.bbox.x2)}-${Math.round(input.bbox.y2)}`;
+  return join(root, "previews", `page-${input.page}-crop-${bboxSlug}.png`);
 }
 
 export class CitationPreviewInputError extends Error {}

@@ -21,6 +21,7 @@ type Citation = Readonly<{
   category: string;
   fileId: string;
   sourceId: string;
+  chunkId: string;
 }>;
 
 type SearchResult = Readonly<{
@@ -319,7 +320,14 @@ function CitationCard({ citation, onPreview }: { citation: Citation; onPreview: 
 
 function CitationPreviewModal({ citation, onClose }: { citation: Citation; onClose: () => void }) {
   const { t } = useUiLanguage();
-  const previewUrl = `/api/citations/preview?sourceId=${encodeURIComponent(citation.sourceId)}&fileId=${encodeURIComponent(citation.fileId)}&page=${citation.page}`;
+  const [showFullPage, setShowFullPage] = useState(false);
+
+  const hasChunkId = Boolean(citation.chunkId);
+  const croppedUrl = hasChunkId
+    ? `/api/citations/preview?chunkId=${encodeURIComponent(citation.chunkId)}`
+    : null;
+  const fullPageUrl = `/api/citations/preview?sourceId=${encodeURIComponent(citation.sourceId)}&fileId=${encodeURIComponent(citation.fileId)}&page=${citation.page}`;
+  const previewUrl = showFullPage || !croppedUrl ? fullPageUrl : croppedUrl;
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -350,7 +358,6 @@ function CitationPreviewModal({ citation, onClose }: { citation: Citation; onClo
         </div>
         <div className="grid min-h-0 flex-1 gap-0 lg:grid-cols-[minmax(0,1fr)_20rem]">
           <div className="min-h-0 overflow-auto bg-primary/70 p-4">
-            {/* MVP: page-level preview. Precise crop/highlight needs bbox ingestion. */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={previewUrl}
@@ -359,9 +366,20 @@ function CitationPreviewModal({ citation, onClose }: { citation: Citation; onClo
             />
           </div>
           <aside className="space-y-4 overflow-auto border-t border-border p-4 lg:border-l lg:border-t-0">
-            <div className="rounded-xl border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
-              {t("pageLevelPreviewNotice")}
-            </div>
+            {!hasChunkId && (
+              <div className="rounded-xl border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
+                {t("pageLevelPreviewNotice")}
+              </div>
+            )}
+            {hasChunkId && (
+              <button
+                type="button"
+                onClick={() => setShowFullPage((v) => !v)}
+                className="w-full rounded-xl border border-accent/40 px-3 py-2 text-sm font-medium text-accent transition-colors hover:bg-accent/10"
+              >
+                {showFullPage ? t("showCroppedPreview") : t("showFullPage")}
+              </button>
+            )}
             <div>
               <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-muted">{t("quoteContext")}</div>
               <blockquote className="border-l-3 border-accent pl-3 text-sm leading-relaxed text-text-secondary italic">

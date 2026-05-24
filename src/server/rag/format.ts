@@ -32,6 +32,8 @@ export type SourceCitation = Readonly<{
   fileId: string;
   /** Internal source ID. */
   sourceId: string;
+  /** Internal chunk ID for precise bbox preview. */
+  chunkId: string;
 }>;
 
 // ---------- Prompt construction ----------
@@ -250,6 +252,7 @@ export function mapCitations(
         category: matchedChunk.sourceCategory,
         fileId: matchedChunk.fileId,
         sourceId: matchedChunk.sourceId,
+        chunkId: matchedChunk.chunkId,
       });
     } else {
       // Unmatched citation — still include what the LLM gave us
@@ -263,6 +266,7 @@ export function mapCitations(
         category: "",
         fileId: "",
         sourceId: "",
+        chunkId: "",
       });
     }
   }

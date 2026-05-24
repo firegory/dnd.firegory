@@ -15,6 +15,7 @@ import {
 } from "./pdf-extract.ts";
 import { ocrPdf, readOcrSidecar, isOcrAvailable } from "./pdf-ocr.ts";
 import { chunkPages } from "./chunking.ts";
+import { extractPageBboxes, computeChunkBboxes, type ChunkBbox } from "./bbox.ts";
 import {
   generateEmbeddings,
   persistChunksWithEmbeddings,
@@ -171,6 +172,34 @@ export async function runPipeline(input: {
 
     const chunks = chunkPages(chunkInputs);
 
+    // === Stage 5.5: Compute per-chunk bboxes ===
+    const chunkBboxes = new Map<number, ChunkBbox>();
+    try {
+      const pageBboxes = await extractPageBboxes(
+        normalizeResult.normalizedPath,
+        extractionResult.totalPages,
+      );
+
+      const chunksByPage = new Map<number, typeof chunks>();
+      for (const c of chunks) {
+        const arr = chunksByPage.get(c.pageNumber) ?? [];
+        arr.push(c);
+        chunksByPage.set(c.pageNumber, arr);
+      }
+
+      for (const [pageNum, pageChunks] of chunksByPage) {
+        const pb = pageBboxes.get(pageNum);
+        if (!pb) continue;
+        const pageBboxMap = computeChunkBboxes(pb, pageChunks);
+        for (const [chunkIdx, bbox] of pageBboxMap) {
+          chunkBboxes.set(chunkIdx, bbox);
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[pipeline] Bbox extraction failed (non-fatal): ${msg}`);
+    }
+
     // Save chunks as JSONL
     const chunksJsonlPath = join(jobArtifactsDir, "chunks.jsonl");
     const chunksJsonl = chunks.map((c) =>
@@ -183,6 +212,7 @@ export async function runPipeline(input: {
         text_span_start: c.textSpanStart,
         text_span_end: c.textSpanEnd,
         char_count: c.charCount,
+        bbox: chunkBboxes.get(c.chunkIndex) ?? null,
       }),
     ).join("\n");
     await mkdir(jobArtifactsDir, { recursive: true });
@@ -211,6 +241,7 @@ export async function runPipeline(input: {
       charCount: number;
       embedding: readonly number[];
       embeddingModel: string;
+      bbox: ChunkBbox | null;
     }> = [];
 
     const canGenerateEmbeddings = chunks.length > 0
@@ -237,6 +268,7 @@ export async function runPipeline(input: {
               charCount: chunks[i].charCount,
               embedding: embeddingResults[i].embedding,
               embeddingModel: embeddingResults[i].model,
+              bbox: chunkBboxes.get(chunks[i].chunkIndex) ?? null,
             });
             embeddingsGenerated++;
           } else {
@@ -289,6 +321,7 @@ export async function runPipeline(input: {
         pageNumber: c.pageNumber,
         textSpanStart: c.textSpanStart,
         textSpanEnd: c.textSpanEnd,
+        bbox: chunkBboxes.get(c.chunkIndex) ?? null,
       }));
       chunksPersisted = await persistChunksWithoutEmbeddings(chunkInputs);
     }

@@ -383,6 +383,7 @@ export async function persistChunksWithEmbeddings(
     charCount: number;
     embedding: readonly number[];
     embeddingModel: string;
+    bbox?: Readonly<{ x1: number; y1: number; x2: number; y2: number }> | null;
   }>[],
 ): Promise<number> {
   if (chunks.length === 0) return 0;
@@ -393,15 +394,14 @@ export async function persistChunksWithEmbeddings(
   for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
     const batch = chunks.slice(i, i + BATCH_SIZE);
 
-    // Build multi-row INSERT with parameterized values
     const valueGroups: string[] = [];
     const params: unknown[] = [];
 
     for (let j = 0; j < batch.length; j++) {
       const chunk = batch[j];
-      const base = j * 12;
+      const base = j * 13;
       valueGroups.push(
-        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, NULL, $${base + 11}::vector, $${base + 12})`,
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, NULL, $${base + 11}::vector, $${base + 12}, $${base + 13}::jsonb)`,
       );
       params.push(
         chunk.sourceId,
@@ -416,6 +416,7 @@ export async function persistChunksWithEmbeddings(
         chunk.textSpanEnd,
         `[${chunk.embedding.join(",")}]`,
         chunk.embeddingModel,
+        chunk.bbox ? JSON.stringify(chunk.bbox) : null,
       );
     }
 
@@ -423,7 +424,7 @@ export async function persistChunksWithEmbeddings(
           source_id, file_id, ingestion_job_id, chunk_index,
           text, quote_text, section_heading, page_number,
           text_span_start, text_span_end,
-          token_count, embedding, embedding_model
+          token_count, embedding, embedding_model, bbox
         ) VALUES ${valueGroups.join(", ")}
         ON CONFLICT (file_id, chunk_index) DO UPDATE SET
           source_id = EXCLUDED.source_id,
@@ -435,7 +436,8 @@ export async function persistChunksWithEmbeddings(
           text_span_start = EXCLUDED.text_span_start,
           text_span_end = EXCLUDED.text_span_end,
           embedding = EXCLUDED.embedding,
-          embedding_model = EXCLUDED.embedding_model`;
+          embedding_model = EXCLUDED.embedding_model,
+          bbox = EXCLUDED.bbox`;
 
     await query(sql, params);
     totalInserted += batch.length;
@@ -462,6 +464,7 @@ export async function persistChunksWithoutEmbeddings(
     sectionHeading: string | null;
     textSpanStart: number;
     textSpanEnd: number;
+    bbox?: Readonly<{ x1: number; y1: number; x2: number; y2: number }> | null;
   }>[],
 ): Promise<number> {
   if (chunks.length === 0) return 0;
@@ -477,9 +480,9 @@ export async function persistChunksWithoutEmbeddings(
 
     for (let j = 0; j < batch.length; j++) {
       const chunk = batch[j];
-      const base = j * 10;
+      const base = j * 11;
       valueGroups.push(
-        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10})`,
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}::jsonb)`,
       );
       params.push(
         chunk.sourceId,
@@ -492,13 +495,14 @@ export async function persistChunksWithoutEmbeddings(
         chunk.pageNumber,
         chunk.textSpanStart,
         chunk.textSpanEnd,
+        chunk.bbox ? JSON.stringify(chunk.bbox) : null,
       );
     }
 
     const sql = `INSERT INTO chunks (
           source_id, file_id, ingestion_job_id, chunk_index,
           text, quote_text, section_heading, page_number,
-          text_span_start, text_span_end
+          text_span_start, text_span_end, bbox
         ) VALUES ${valueGroups.join(", ")}
         ON CONFLICT (file_id, chunk_index) DO UPDATE SET
           source_id = EXCLUDED.source_id,
@@ -508,7 +512,8 @@ export async function persistChunksWithoutEmbeddings(
           section_heading = EXCLUDED.section_heading,
           page_number = EXCLUDED.page_number,
           text_span_start = EXCLUDED.text_span_start,
-          text_span_end = EXCLUDED.text_span_end`;
+          text_span_end = EXCLUDED.text_span_end,
+          bbox = EXCLUDED.bbox`;
 
     await query(sql, params);
     totalInserted += batch.length;
