@@ -230,8 +230,6 @@ function matchChunkByText(
     }
   }
 
-  matchEnd = Math.max(matchEnd, bestStart + Math.min(chunkTokens.length, allWordsText.length - bestStart));
-
   let x1 = Infinity;
   let y1 = Infinity;
   let x2 = -Infinity;

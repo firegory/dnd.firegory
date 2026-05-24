@@ -234,12 +234,15 @@ export async function renderCroppedPdfRegionToPng(input: Readonly<{
   const w = Math.max(1, Math.round(rawW));
   const h = Math.max(1, Math.round(rawH));
 
-  const tmpPath = input.outputPath + ".tmp";
+  const outputPrefix = input.outputPath.endsWith(".png")
+    ? input.outputPath.slice(0, -".png".length)
+    : input.outputPath;
+  const tmpPrefix = outputPrefix + ".tmp";
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
   try {
-    await unlink(tmpPath).catch(() => {});
+    await unlink(tmpPrefix + ".png").catch(() => {});
     await execFileAsync(
       "pdftocairo",
       [
@@ -253,13 +256,13 @@ export async function renderCroppedPdfRegionToPng(input: Readonly<{
         "-H", String(h),
         "-png",
         input.pdfPath,
-        tmpPath.replace(/\.tmp$/, ""),
+        tmpPrefix,
       ],
       { signal: controller.signal, timeout: RENDER_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
     );
-    await rename(tmpPath, input.outputPath);
+    await rename(tmpPrefix + ".png", input.outputPath);
   } catch (err) {
-    await unlink(tmpPath).catch(() => {});
+    await unlink(tmpPrefix + ".png").catch(() => {});
     throw err;
   } finally {
     clearTimeout(timeout);
