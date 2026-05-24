@@ -3,18 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 import { AppSelect } from "../../components/ui/select";
-import { Toggle } from "../../components/ui/toggle";
 import { categoryLabel, useUiLanguage } from "../../components/ui/i18n";
-
-const EDITION_OPTIONS = [
-  { value: "5e", label: "5e" },
-  { value: "5.5e", label: "5.5e" },
-] as const;
-
-const LANGUAGE_OPTIONS = [
-  { value: "ru", label: "RU" },
-  { value: "en", label: "EN" },
-] as const;
 
 const STORAGE_KEYS = {
   edition: "dnd.firegory.search.edition",
@@ -67,7 +56,7 @@ function usePersistentState(key: string, initialValue: string) {
 export function SearchForm() {
   const { language: uiLanguage, t } = useUiLanguage();
   const [query, setQuery] = useState("");
-  const [edition, setEdition] = usePersistentState(STORAGE_KEYS.edition, "5.5e");
+  const [edition, setEdition] = usePersistentState(STORAGE_KEYS.edition, "");
   const [sourceLanguage, setSourceLanguage] = usePersistentState(STORAGE_KEYS.sourceLanguage, "");
   const [category, setCategory] = usePersistentState(STORAGE_KEYS.category, "");
   const [status, setStatus] = useState<FetchStatus>("idle");
@@ -93,7 +82,7 @@ export function SearchForm() {
       const body: Record<string, unknown> = {
         query: query.trim(),
         answerLanguage: uiLanguage,
-        edition,
+        ...(edition ? { edition } : {}),
         ...(sourceLanguage ? { language: sourceLanguage } : {}),
       };
       if (category) body.category = category;
@@ -158,18 +147,26 @@ export function SearchForm() {
           </div>
 
           <div className="flex flex-wrap items-end gap-4">
-            <Toggle
-              label={t("sourceLanguage")}
-              value={sourceLanguage}
-              options={LANGUAGE_OPTIONS}
-              onChange={setSourceLanguage}
-              disabled={loading}
-            />
-            <Toggle
+            <AppSelect
               label={t("edition")}
               value={edition}
-              options={EDITION_OPTIONS}
+              options={[
+                { value: "", label: t("allEditions"), description: t("allEditionsDescription") },
+                { value: "5e", label: "5e" },
+                { value: "5.5e", label: "5.5e" },
+              ]}
               onChange={setEdition}
+              disabled={loading}
+            />
+            <AppSelect
+              label={t("sourceLanguage")}
+              value={sourceLanguage}
+              options={[
+                { value: "", label: t("allLanguages"), description: t("allLanguagesDescription") },
+                { value: "ru", label: "RU" },
+                { value: "en", label: "EN" },
+              ]}
+              onChange={setSourceLanguage}
               disabled={loading}
             />
             <AppSelect

@@ -10,17 +10,17 @@ export function LoginForm() {
   const [state, action, pending] = useActionState(loginAction, {});
 
   return (
-    <form action={action} className="auth-form">
-      <label>
-        {t("email")}
-        <input name="email" type="email" autoComplete="email" required />
-      </label>
-      <label>
-        {t("password")}
-        <input name="password" type="password" autoComplete="current-password" required />
-      </label>
-      {state.error ? <p className="form-error">{state.error}</p> : null}
-      <button type="submit" disabled={pending}>
+    <form action={action} className="space-y-4">
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="login-email" className="text-xs font-semibold uppercase tracking-wide text-text-muted">{t("email")}</label>
+        <input id="login-email" name="email" type="email" autoComplete="email" required className="rounded-xl border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none transition-colors placeholder:text-text-muted focus:border-accent focus:ring-2 focus:ring-accent/20" />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="login-password" className="text-xs font-semibold uppercase tracking-wide text-text-muted">{t("password")}</label>
+        <input id="login-password" name="password" type="password" autoComplete="current-password" required className="rounded-xl border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none transition-colors placeholder:text-text-muted focus:border-accent focus:ring-2 focus:ring-accent/20" />
+      </div>
+      {state.error ? <p className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{state.error}</p> : null}
+      <button type="submit" disabled={pending} className="w-full rounded-xl bg-accent px-4 py-2.5 text-sm font-semibold text-primary transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60">
         {pending ? t("signingIn") : t("signIn")}
       </button>
     </form>

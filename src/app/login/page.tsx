@@ -10,16 +10,23 @@ export default async function LoginPage() {
   if (user) redirect("/");
 
   return (
-    <main className="page-shell">
-      <section className="hero-card auth-card" aria-labelledby="login-title">
-        <p className="eyebrow"><T k="privateAccess" /></p>
-        <h1 id="login-title"><T k="signIn" /></h1>
-        <p className="lede"><T k="loginLede" /></p>
-        <LoginForm />
-        <p className="muted">
-          <T k="noAccount" /> <Link href="/register"><T k="register" /></Link>
+    <div className="flex min-h-screen items-center justify-center bg-primary px-4">
+      <div className="w-full max-w-md space-y-6">
+        <div className="text-center">
+          <p className="text-xs font-semibold uppercase tracking-widest text-accent"><T k="privateAccess" /></p>
+          <h1 id="login-title" className="mt-2 text-2xl font-bold text-text-primary"><T k="signIn" /></h1>
+          <p className="mt-1 text-sm text-text-muted"><T k="loginLede" /></p>
+        </div>
+        <section className="rounded-2xl border border-border bg-surface p-6" aria-labelledby="login-title">
+          <LoginForm />
+        </section>
+        <p className="text-center text-sm text-text-muted">
+          <T k="noAccount" />{" "}
+          <Link href="/register" className="font-medium text-accent hover:underline">
+            <T k="register" />
+          </Link>
         </p>
-      </section>
-    </main>
+      </div>
+    </div>
   );
 }
