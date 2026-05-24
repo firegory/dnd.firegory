@@ -214,7 +214,7 @@ cp .env.example .env.local
 | `APP_URL` | no | Public app URL (default: `http://localhost:3000`) |
 | `NEXT_PUBLIC_APP_URL` | no | Public app URL exposed to the browser |
 | `AUTH_SECRET` | no | Reserved for future session secret hardening |
-| `ZAI_API_KEY` | no | z.ai API key for LLM calls and optional z.ai embeddings (required for answer generation) |
+| `ZAI_API_KEY` | yes* | z.ai API key for LLM answer generation and optional z.ai embeddings (*required for answer generation) |
 | `STORAGE_ROOT` | no | Root directory for file storage (default: `./storage`) |
 | `APP_PORT` | no | Host port for the app in Docker Compose (default: `3000`) |
 | `POSTGRES_DB` | no | PostgreSQL database name (default: `dnd_firegory`) |
