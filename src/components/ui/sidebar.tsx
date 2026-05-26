@@ -7,7 +7,10 @@ import type { AppLayoutRole } from "./app-layout";
 import { Toggle } from "./toggle";
 import { useUiLanguage, type UiLanguage } from "./i18n";
 
-const BASE_NAV_ITEMS = [{ href: "/search", labelKey: "search" }] as const;
+const BASE_NAV_ITEMS = [
+  { href: "/search", labelKey: "search" },
+  { href: "/browse", labelKey: "browse" },
+] as const;
 
 const ADMIN_NAV_ITEMS = [
   { href: "/admin/sources", labelKey: "sources" },

@@ -9,6 +9,7 @@ import { requireAdmin } from "../../../../server/auth/session";
 import { ContentMetadataNotFoundError } from "../../../../server/content/metadata";
 import { getSourceWithStats, listSourceChunkPreviews } from "../../../../server/admin/source-view";
 import { SourceMetadataEditor } from "./source-metadata-editor";
+import { ExtractEntitiesButton } from "./extract-entities-button";
 
 const STATUS_STYLES: Record<string, string> = {
   queued: "text-text-muted",
@@ -89,6 +90,8 @@ export default async function SourceDetailPage({ params }: PageProps) {
         </section>
 
         <SourceMetadataEditor source={source} />
+
+        <ExtractEntitiesButton sourceId={source.id} />
 
         <section className="rounded-xl border border-border bg-surface p-5">
           <h2 className="mb-3 text-lg font-bold text-text-primary"><T k="latestJob" /></h2>
