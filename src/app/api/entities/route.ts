@@ -19,7 +19,11 @@ export async function GET(request: Request) {
   const typeParam = searchParams.get("type");
 
   if (typeParam === "__counts") {
-    const counts = await countEntitiesByType();
+    const sourceIds = await getAccessibleSourceIds({
+      role: user.role,
+      userId: user.id,
+    });
+    const counts = await countEntitiesByType(sourceIds);
     return NextResponse.json({ counts });
   }
 

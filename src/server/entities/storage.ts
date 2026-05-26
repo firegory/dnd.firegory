@@ -52,13 +52,26 @@ export async function deleteEntitiesForFile(fileId: string): Promise<number> {
   return result.rowCount ?? 0;
 }
 
-export async function countEntitiesByType(): Promise<
-  Record<EntityType, number>
-> {
-  const result = await query<{ entity_type: EntityType; count: string }>(
-    "SELECT entity_type, COUNT(*)::text AS count FROM entities GROUP BY entity_type",
-  );
+export async function countEntitiesByType(
+  sourceIds?: readonly string[],
+): Promise<Record<EntityType, number>> {
   const counts = {} as Record<EntityType, number>;
+  for (const type of [
+    "spell", "feat", "class_feature", "monster", "magic_item",
+    "species", "subclass", "background", "other",
+  ]) {
+    counts[type as EntityType] = 0;
+  }
+
+  let sql = "SELECT entity_type, COUNT(*)::text AS count FROM entities";
+  const values: unknown[] = [];
+  if (sourceIds && sourceIds.length > 0) {
+    sql += " WHERE source_id = ANY($1)";
+    values.push(sourceIds);
+  }
+  sql += " GROUP BY entity_type";
+
+  const result = await query<{ entity_type: EntityType; count: string }>(sql, values);
   for (const row of result.rows) {
     counts[row.entity_type] = parseInt(row.count, 10);
   }

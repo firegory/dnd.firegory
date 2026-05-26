@@ -51,9 +51,29 @@ async function runWorker(): Promise<void> {
         continue;
       }
 
-      if (!job.sourceId || !job.fileId) {
-        console.error(`[worker] Job ${message.jobId} missing sourceId or fileId. Marking as failed.`);
-        await markJobFailed(job.id, "Job missing sourceId or fileId");
+      if (!job.sourceId) {
+        console.error(`[worker] Job ${message.jobId} missing sourceId. Marking as failed.`);
+        await markJobFailed(job.id, "Job missing sourceId");
+        continue;
+      }
+
+      const isEntityExtraction = job.metadata?.kind === "entity_extraction";
+
+      if (isEntityExtraction) {
+        console.log(`[worker] Running entity extraction for job ${job.id}...`);
+        try {
+          await runEntityExtraction(job.id);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`[worker] Entity extraction job ${job.id} failed:`, message);
+        }
+        consecutiveErrors = 0;
+        continue;
+      }
+
+      if (!job.fileId) {
+        console.error(`[worker] Job ${message.jobId} missing fileId. Marking as failed.`);
+        await markJobFailed(job.id, "Job missing fileId");
         continue;
       }
 
@@ -70,18 +90,7 @@ async function runWorker(): Promise<void> {
 
       const originalPdfPath = fileResult.rows[0].storage_path;
 
-      const isEntityExtraction = job.metadata?.kind === "entity_extraction";
-
-      if (isEntityExtraction) {
-        console.log(`[worker] Running entity extraction for job ${job.id}...`);
-        try {
-          await runEntityExtraction(job.id);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          console.error(`[worker] Entity extraction job ${job.id} failed:`, message);
-        }
-      } else {
-        console.log(`[worker] Running pipeline for job ${job.id}...`);
+      console.log(`[worker] Running pipeline for job ${job.id}...`);
         try {
           const result = await runPipeline({
             jobId: job.id,
@@ -99,7 +108,6 @@ async function runWorker(): Promise<void> {
           const message = error instanceof Error ? error.message : String(error);
           console.error(`[worker] Job ${job.id} failed:`, message);
         }
-      }
 
       consecutiveErrors = 0;
     } catch (error) {

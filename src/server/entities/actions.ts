@@ -1,5 +1,4 @@
-import { query, withTransaction } from "../db/client.ts";
-import {
+import { query, withTransaction } from "../db/client.ts";import {
   createIngestionJob,
   markJobFailed,
   markJobProcessing,
@@ -31,23 +30,27 @@ export async function createEntityExtractionJob(
     throw new Error(`Source ${sourceId} has been deleted.`);
   }
 
-  const activeJobs = await query<{ id: string; status: string }>(
-    `SELECT id, status FROM ingestion_jobs
-     WHERE source_id = $1 AND metadata @> '{"kind":"entity_extraction"}'::jsonb
-       AND status IN ('queued', 'processing')`,
-    [sourceId],
-  );
-  if (activeJobs.rows.length > 0) {
-    throw new Error(
-      `Entity extraction already running for source ${sourceId} (job ${activeJobs.rows[0].id}: ${activeJobs.rows[0].status})`,
+  const job = await withTransaction(async (client) => {
+    const activeJobs = await client.query<{ id: string; status: string }>(
+      `SELECT id, status FROM ingestion_jobs
+       WHERE source_id = $1 AND metadata @> '{"kind":"entity_extraction"}'::jsonb
+         AND status IN ('queued', 'processing')
+       FOR UPDATE`,
+      [sourceId],
     );
-  }
+    if (activeJobs.rows.length > 0) {
+      throw new Error(
+        `Entity extraction already running for source ${sourceId} (job ${activeJobs.rows[0].id}: ${activeJobs.rows[0].status})`,
+      );
+    }
 
-  const job = await createIngestionJob({
-    kind: "reprocess" as IngestionJobRecord["kind"],
-    sourceId,
-    requestedByUserId,
-    metadata: { kind: "entity_extraction" },
+    return createIngestionJob({
+      kind: "reprocess" as IngestionJobRecord["kind"],
+      sourceId,
+      requestedByUserId,
+      metadata: { kind: "entity_extraction" },
+      client,
+    });
   });
 
   const queueId = await enqueueJob(job.id);
@@ -85,20 +88,15 @@ export async function runEntityExtraction(jobId: string): Promise<void> {
       const chunks = await loadChunksForFile(file.id);
       if (chunks.length === 0) continue;
 
-      await deleteEntitiesForFile(file.id);
-
       const entities = await extractEntities(
         chunks,
         job.source_id,
         file.id,
       );
 
+      await deleteEntitiesForFile(file.id);
       const inserted = await persistEntities(entities);
       totalEntities += inserted;
-
-      console.log(
-        `[entity-extraction] File ${file.id}: extracted ${inserted} entities from ${chunks.length} chunks`,
-      );
     }
 
     await query(

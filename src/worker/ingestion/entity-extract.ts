@@ -1,5 +1,5 @@
 import { chatCompletion, type ChatMessage } from "../../server/llm/zai.ts";
-import type { EntityInput, EntityType } from "../../server/entities/types.ts";
+import { isEntityType, type EntityInput, type EntityType } from "../../server/entities/types.ts";
 
 const BATCH_SIZE = 15;
 
@@ -50,16 +50,11 @@ function parseEntityResponse(
 
   if (!Array.isArray(parsed)) return [];
 
-  const validTypes = new Set<string>([
-    "spell", "feat", "class_feature", "monster", "magic_item",
-    "species", "subclass", "background", "other",
-  ]);
-
   return parsed
     .filter((item): item is RawExtractedEntity => {
       if (typeof item !== "object" || item === null) return false;
       return typeof item.name === "string" && item.name.trim().length > 0
-        && typeof item.type === "string" && validTypes.has(item.type);
+        && typeof item.type === "string" && isEntityType(item.type);
     })
     .map((item) => ({
       fileId,

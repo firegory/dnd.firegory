@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { requireUser } from "../../server/auth/session";
+import { getAccessibleSourceIds } from "../../server/access/retrieval-filter";
 import { AppLayout } from "../../components/ui/app-layout";
 import { ENTITY_TYPES, ENTITY_CONFIG, type EntityType } from "../../server/entities/types";
 import { countEntitiesByType } from "../../server/entities/storage";
@@ -9,7 +10,11 @@ import { BrowseTypeCard } from "./browse-type-card";
 export default async function BrowsePage() {
   const user = await requireUser();
 
-  const counts = await countEntitiesByType();
+  const sourceIds = await getAccessibleSourceIds({
+    role: user.role,
+    userId: user.id,
+  });
+  const counts = await countEntitiesByType(sourceIds);
 
   return (
     <AppLayout userRole={user.role}>

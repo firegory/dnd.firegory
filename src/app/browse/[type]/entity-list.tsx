@@ -3,6 +3,7 @@
 import Link from "next/link";
 
 import type { EntityRecord } from "../../../server/entities/types";
+import { useUiLanguage } from "../../../components/ui/i18n";
 
 export function EntityList({
   entities,
@@ -10,22 +11,27 @@ export function EntityList({
   total,
   page,
   pageSize,
+  filterParams,
 }: {
   entities: readonly EntityRecord[];
   typeSlug: string;
   total: number;
   page: number;
   pageSize: number;
+  filterParams?: string;
 }) {
+  const { t } = useUiLanguage();
+
   if (entities.length === 0) {
     return (
       <div className="rounded-xl border border-border bg-surface p-8 text-center text-text-muted">
-        No entities found. Extract entities from a source in the admin panel.
+        {t("noEntities")}
       </div>
     );
   }
 
   const totalPages = Math.ceil(total / pageSize);
+  const baseQuery = filterParams ? `${filterParams}&` : "";
 
   return (
     <div className="space-y-4">
@@ -56,13 +62,13 @@ export function EntityList({
       {totalPages > 1 && (
         <div className="flex items-center justify-center gap-2 pt-4">
           {page > 1 && (
-            <PageLink typeSlug={typeSlug} page={page - 1} label="← Prev" />
+            <PageLink href={`/browse/${typeSlug}?${baseQuery}page=${page - 1}`} label="← Prev" />
           )}
           <span className="text-sm text-text-muted">
             Page {page} of {totalPages}
           </span>
           {page < totalPages && (
-            <PageLink typeSlug={typeSlug} page={page + 1} label="Next →" />
+            <PageLink href={`/browse/${typeSlug}?${baseQuery}page=${page + 1}`} label="Next →" />
           )}
         </div>
       )}
@@ -70,10 +76,10 @@ export function EntityList({
   );
 }
 
-function PageLink({ typeSlug, page, label }: { typeSlug: string; page: number; label: string }) {
+function PageLink({ href, label }: { href: string; label: string }) {
   return (
     <Link
-      href={`/browse/${typeSlug}?page=${page}`}
+      href={href}
       className="rounded-lg border border-border px-3 py-1.5 text-sm font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-accent"
     >
       {label}

@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 
 import { requireUser } from "../../../../server/auth/session";
+import { getAccessibleSourceIds } from "../../../../server/access/retrieval-filter";
 import { getEntityById } from "../../../../server/entities/storage";
 import { ENTITY_CONFIG, type EntityType } from "../../../../server/entities/types";
 import { AppLayout } from "../../../../components/ui/app-layout";
@@ -18,8 +19,15 @@ export default async function EntityDetailPage({ params }: PageProps) {
   const entity = await getEntityById(id);
   if (!entity) notFound();
 
+  const accessibleSourceIds = await getAccessibleSourceIds({
+    role: user.role,
+    userId: user.id,
+  });
+  if (!accessibleSourceIds.includes(entity.sourceId)) notFound();
+
   const config = ENTITY_CONFIG[entity.entityType];
   const typeSlugFromConfig = config.slug;
+  if (typeSlug !== typeSlugFromConfig) notFound();
 
   return (
     <AppLayout userRole={user.role}>

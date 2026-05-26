@@ -39,13 +39,17 @@ export default async function EntityTypePage({ params, searchParams }: PageProps
     sourceIds,
   });
 
+  const filterQueryString = Object.entries(filters)
+    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+    .join("&");
+
   return (
     <AppLayout userRole={user.role}>
       <div className="space-y-6">
         <div className="flex items-center gap-3">
           <span className="text-2xl">{config.icon}</span>
           <h1 className="text-2xl font-bold text-text-primary">
-            {config.icon} {entityType.replace(/_/g, " ")}
+            {entityType.replace(/_/g, " ")}
           </h1>
           <span className="rounded-full bg-accent/15 px-3 py-1 text-sm font-bold text-accent">
             {result.total}
@@ -62,6 +66,7 @@ export default async function EntityTypePage({ params, searchParams }: PageProps
           total={result.total}
           page={result.page}
           pageSize={result.pageSize}
+          filterParams={filterQueryString || undefined}
         />
       </div>
     </AppLayout>
