@@ -1,4 +1,5 @@
 import type { UserRole } from "../auth/types";
+import { query } from "../db/client.ts";
 
 export type { UserRole } from "../auth/types";
 
@@ -146,4 +147,44 @@ function sourceMatchesAccessClause(
   }
 
   return source.accessTier === "personal" && source.ownerUserId === clause.ownerUserId;
+}
+
+export async function getAccessibleSourceIds(
+  user: RetrievalUser,
+): Promise<string[]> {
+  if (user.role === "admin") {
+    const result = await query<{ id: string }>(
+      "SELECT id FROM sources WHERE deleted_at IS NULL",
+    );
+    return result.rows.map((r) => r.id);
+  }
+
+  const clauses = buildAccessFilter(user);
+  if (clauses.kind === "all") {
+    const result = await query<{ id: string }>(
+      "SELECT id FROM sources WHERE deleted_at IS NULL",
+    );
+    return result.rows.map((r) => r.id);
+  }
+
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let paramIdx = 1;
+
+  for (const clause of clauses.clauses) {
+    if (clause.accessTier === "open") {
+      conditions.push(`(access_tier = 'open')`);
+    } else if (clause.accessTier === "premium") {
+      conditions.push(`(access_tier = 'premium' AND shared = true)`);
+    } else if (clause.accessTier === "personal" && user.userId) {
+      conditions.push(`(access_tier = 'personal' AND owner_user_id = $${paramIdx++})`);
+      values.push(user.userId);
+    }
+  }
+
+  if (conditions.length === 0) return [];
+
+  const sql = `SELECT id FROM sources WHERE deleted_at IS NULL AND (${conditions.join(" OR ")})`;
+  const result = await query<{ id: string }>(sql, values);
+  return result.rows.map((r) => r.id);
 }
