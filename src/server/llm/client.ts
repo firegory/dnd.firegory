@@ -29,10 +29,11 @@ const DEFAULT_LLM_CONFIG: LlmConfig = {
  * Gets the LLM configuration from environment variables.
  */
 export function getLlmConfig(): LlmConfig {
+  const baseUrl = (process.env.LLM_BASE_URL ?? DEFAULT_LLM_CONFIG.baseUrl).replace(/\/+$/, "");
   return {
     ...DEFAULT_LLM_CONFIG,
     apiKey: process.env.LLM_API_KEY ?? "",
-    baseUrl: process.env.LLM_BASE_URL ?? DEFAULT_LLM_CONFIG.baseUrl,
+    baseUrl,
     model: process.env.LLM_MODEL ?? DEFAULT_LLM_CONFIG.model,
     maxTokens: parseInt(process.env.LLM_MAX_TOKENS ?? String(DEFAULT_LLM_CONFIG.maxTokens), 10),
     temperature: parseFloat(process.env.LLM_TEMPERATURE ?? "0.2"),
@@ -114,7 +115,9 @@ async function ollamaChatCompletion(
     usage: {
       promptTokens: data.prompt_eval_count ?? null,
       completionTokens: data.eval_count ?? null,
-      totalTokens: (data.prompt_eval_count ?? 0) + (data.eval_count ?? 0) || null,
+      totalTokens: data.prompt_eval_count != null && data.eval_count != null
+        ? data.prompt_eval_count + data.eval_count
+        : null,
     },
   };
 }
@@ -189,6 +192,10 @@ export async function chatCompletion(
 
   if (isOllama(cfg.baseUrl, cfg.apiKey)) {
     return ollamaChatCompletion(messages, cfg);
+  }
+
+  if (!cfg.apiKey) {
+    throw new Error("LLM_API_KEY is not configured");
   }
 
   return openAiChatCompletion(messages, cfg);
