@@ -47,7 +47,6 @@ export default async function EntityTypePage({ params, searchParams }: PageProps
     <AppLayout userRole={user.role}>
       <div className="space-y-6">
         <div className="flex items-center gap-3">
-          <span className="text-2xl">{config.icon}</span>
           <h1 className="text-2xl font-bold text-text-primary">
             {entityType.replace(/_/g, " ")}
           </h1>

@@ -44,8 +44,7 @@ export default async function EntityDetailPage({ params }: PageProps) {
 
         <section className="rounded-2xl border border-border bg-surface p-6">
           <div className="flex items-start gap-4">
-            <span className="text-3xl">{config.icon}</span>
-            <div className="flex-1">
+          <div className="flex-1">
               <h1 className="text-2xl font-bold text-text-primary">{entity.name}</h1>
               <div className="mt-2 flex flex-wrap gap-2">
                 <span className="rounded-full bg-accent/15 px-2.5 py-0.5 text-xs font-semibold text-accent">

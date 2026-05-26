@@ -1,5 +1,5 @@
 import type { UserRole } from "../auth/types";
-import { query } from "../db/client";
+import { query } from "../db/client.ts";
 
 export type { UserRole } from "../auth/types";
 

@@ -101,7 +101,6 @@ export type EntityFilterDef = Readonly<{
 export type EntityTypeConfig = Readonly<{
   slug: string;
   labelKey: string;
-  icon: string;
   filters: readonly EntityFilterDef[];
 }>;
 
@@ -109,7 +108,6 @@ export const ENTITY_CONFIG: Record<EntityType, EntityTypeConfig> = {
   spell: {
     slug: "spell",
     labelKey: "entityTypeSpell",
-    icon: "✦",
     filters: [
       {
         key: "level",
@@ -150,7 +148,6 @@ export const ENTITY_CONFIG: Record<EntityType, EntityTypeConfig> = {
   monster: {
     slug: "monster",
     labelKey: "entityTypeMonster",
-    icon: "☠",
     filters: [
       {
         key: "cr",
@@ -199,19 +196,16 @@ export const ENTITY_CONFIG: Record<EntityType, EntityTypeConfig> = {
   class_feature: {
     slug: "class-feature",
     labelKey: "entityTypeClassFeature",
-    icon: "🛡",
     filters: [],
   },
   feat: {
     slug: "feat",
     labelKey: "entityTypeFeat",
-    icon: "⚡",
     filters: [],
   },
   magic_item: {
     slug: "magic-item",
     labelKey: "entityTypeMagicItem",
-    icon: "💎",
     filters: [
       {
         key: "rarity",
@@ -232,25 +226,21 @@ export const ENTITY_CONFIG: Record<EntityType, EntityTypeConfig> = {
   species: {
     slug: "species",
     labelKey: "entityTypeSpecies",
-    icon: "🧬",
     filters: [],
   },
   subclass: {
     slug: "subclass",
     labelKey: "entityTypeSubclass",
-    icon: "⚔",
     filters: [],
   },
   background: {
     slug: "background",
     labelKey: "entityTypeBackground",
-    icon: "📜",
     filters: [],
   },
   other: {
     slug: "other",
     labelKey: "entityTypeOther",
-    icon: "📋",
     filters: [],
   },
 };

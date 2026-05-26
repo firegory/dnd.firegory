@@ -23,7 +23,6 @@ export function BrowseTypeCard({
     >
       <div className="flex items-start justify-between">
         <div>
-          <span className="text-2xl">{config.icon}</span>
           <h2 className="mt-2 text-lg font-bold text-text-primary group-hover:text-accent">
             {t(config.labelKey as TranslationKey)}
           </h2>

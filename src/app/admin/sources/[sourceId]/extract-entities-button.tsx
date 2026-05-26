@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useUiLanguage } from "../../../../components/ui/i18n";
+import { useUiLanguage, type TranslationKey } from "../../../../components/ui/i18n";
 
 export function ExtractEntitiesButton({ sourceId }: { sourceId: string }) {
   const { t } = useUiLanguage();
@@ -39,7 +39,7 @@ export function ExtractEntitiesButton({ sourceId }: { sourceId: string }) {
         <div>
           <h2 className="text-lg font-bold text-text-primary">{t("extractEntities")}</h2>
           <p className="mt-1 text-sm text-text-muted">
-            Extract spells, monsters, feats, and other entities from this source using LLM.
+            {t("extractEntitiesDescription" as TranslationKey)}
           </p>
         </div>
         <div className="flex items-center gap-3">
