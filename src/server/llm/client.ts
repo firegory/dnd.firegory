@@ -30,13 +30,21 @@ const DEFAULT_LLM_CONFIG: LlmConfig = {
  */
 export function getLlmConfig(): LlmConfig {
   const baseUrl = (process.env.LLM_BASE_URL ?? DEFAULT_LLM_CONFIG.baseUrl).replace(/\/+$/, "");
+  const maxTokens = parseInt(process.env.LLM_MAX_TOKENS ?? String(DEFAULT_LLM_CONFIG.maxTokens), 10);
+  const temperature = parseFloat(process.env.LLM_TEMPERATURE ?? "0.2");
+  if (!Number.isFinite(maxTokens)) {
+    throw new Error(`Invalid LLM_MAX_TOKENS: ${process.env.LLM_MAX_TOKENS}`);
+  }
+  if (!Number.isFinite(temperature)) {
+    throw new Error(`Invalid LLM_TEMPERATURE: ${process.env.LLM_TEMPERATURE}`);
+  }
   return {
     ...DEFAULT_LLM_CONFIG,
     apiKey: process.env.LLM_API_KEY ?? "",
     baseUrl,
     model: process.env.LLM_MODEL ?? DEFAULT_LLM_CONFIG.model,
-    maxTokens: parseInt(process.env.LLM_MAX_TOKENS ?? String(DEFAULT_LLM_CONFIG.maxTokens), 10),
-    temperature: parseFloat(process.env.LLM_TEMPERATURE ?? "0.2"),
+    maxTokens,
+    temperature,
   };
 }
 
@@ -97,16 +105,21 @@ async function ollamaChatCompletion(
   const lastLine = lines.trim().split("\n").pop();
   if (!lastLine) throw new Error("LLM API returned empty response");
 
-  const data = JSON.parse(lastLine) as {
+  let data: {
     message?: { content?: string };
     model?: string;
     done_reason?: string;
     prompt_eval_count?: number;
     eval_count?: number;
   };
+  try {
+    data = JSON.parse(lastLine);
+  } catch {
+    throw new Error(`LLM API returned invalid JSON: ${lastLine.slice(0, 200)}`);
+  }
 
   const content = data.message?.content;
-  if (!content) throw new Error("LLM API returned no content");
+  if (content === undefined || content === null) throw new Error("LLM API returned no content");
 
   return {
     content,

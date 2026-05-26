@@ -247,9 +247,8 @@ async function generateOpenAiEmbedding(text: string, cfg: EmbeddingConfig): Prom
   });
 
   if (!response.ok) {
-    const body = await response.text().catch(() => "");
     throw new Error(
-      `Embedding API error: ${response.status} ${response.statusText}${body ? ` — ${body}` : ""}`,
+      `Embedding API error: ${response.status} ${response.statusText}`,
     );
   }
 
@@ -293,9 +292,8 @@ async function generateOllamaEmbeddings(
   });
 
   if (!response.ok) {
-    const body = await response.text().catch(() => "");
     throw new Error(
-      `Ollama embedding API error: ${response.status} ${response.statusText}${body ? ` — ${body}` : ""}`,
+      `Ollama embedding API error: ${response.status} ${response.statusText}`,
     );
   }
 
