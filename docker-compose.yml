@@ -5,14 +5,14 @@ x-common-env: &common-env
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dnd_dev_password}
   REDIS_URL: ${REDIS_URL:-redis://redis:6379}
   AUTH_SECRET: ${AUTH_SECRET:-}
-  ZAI_API_KEY: ${ZAI_API_KEY:-}
+  LLM_API_KEY: ${LLM_API_KEY:-}
   # Generic embedding config (fallback for both ingestion and query)
-  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-zai}
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
   EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-}
-  # z.ai embedding
-  ZAI_EMBEDDING_BASE_URL: ${ZAI_EMBEDDING_BASE_URL:-}
-  ZAI_EMBEDDING_MODEL: ${ZAI_EMBEDDING_MODEL:-}
-  ZAI_EMBEDDING_DIMENSIONS: ${ZAI_EMBEDDING_DIMENSIONS:-}
+  # OpenAI-compatible embedding
+  EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+  EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
   # Ollama embedding
   OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
   OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-bge-m3}
@@ -31,10 +31,10 @@ x-common-env: &common-env
   QUERY_OLLAMA_EMBEDDING_DIMENSIONS: ${QUERY_OLLAMA_EMBEDDING_DIMENSIONS:-}
   QUERY_OLLAMA_KEEP_ALIVE: ${QUERY_OLLAMA_KEEP_ALIVE:-}
   # LLM config
-  ZAI_LLM_BASE_URL: ${ZAI_LLM_BASE_URL:-}
-  ZAI_LLM_MODEL: ${ZAI_LLM_MODEL:-}
-  ZAI_LLM_MAX_TOKENS: ${ZAI_LLM_MAX_TOKENS:-}
-  ZAI_LLM_TEMPERATURE: ${ZAI_LLM_TEMPERATURE:-}
+  LLM_BASE_URL: ${LLM_BASE_URL:-}
+  LLM_MODEL: ${LLM_MODEL:-}
+  LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-}
+  LLM_TEMPERATURE: ${LLM_TEMPERATURE:-}
   STORAGE_ROOT: ${STORAGE_ROOT:-/app/storage}
 
 services:
@@ -98,7 +98,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    # Development-only Redis instance; unauthenticated and host-exposed for local tooling.
     command: redis-server --appendonly yes
     ports:
       - "${REDIS_PORT:-6379}:6379"

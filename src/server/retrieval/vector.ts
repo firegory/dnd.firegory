@@ -31,8 +31,8 @@ export async function vectorSearch(
   let queryEmbedding: readonly number[];
   try {
     const config = getQueryEmbeddingConfig();
-    // Ollama does not require an API key; only skip when provider is z.ai
-    // and no key is configured.
+    // Ollama does not require an API key; only skip when the configured
+    // provider requires one and no key is set.
     if (config.provider !== "ollama" && !config.apiKey) {
       return [];
     }

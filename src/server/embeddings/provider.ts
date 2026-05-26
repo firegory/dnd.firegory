@@ -1,14 +1,14 @@
 /**
  * Embedding provider integration.
  *
- * Generates text embeddings using either z.ai or Ollama and persists them
- * into the chunks table with pgvector.
+ * Generates text embeddings using either an OpenAI-compatible API or Ollama
+ * and persists them into the chunks table with pgvector.
  */
 
 import { query } from "../../server/db/client.ts";
 import type { ChunkBbox } from "../../worker/ingestion/bbox.ts";
 
-export type EmbeddingProvider = "zai" | "ollama";
+export type EmbeddingProvider = "openai" | "ollama";
 
 export type EmbeddingConfig = Readonly<{
   provider: EmbeddingProvider;
@@ -19,11 +19,11 @@ export type EmbeddingConfig = Readonly<{
   keepAlive: string;
 }>;
 
-const DEFAULT_ZAI_EMBEDDING_CONFIG: EmbeddingConfig = {
-  provider: "zai",
+const DEFAULT_OPENAI_EMBEDDING_CONFIG: EmbeddingConfig = {
+  provider: "openai",
   apiKey: "",
-  baseUrl: "https://api.z.ai/api/paas/v4",
-  model: "z-embedding",
+  baseUrl: "https://api.openai.com/v1",
+  model: "text-embedding-3-small",
   dimensions: 1024,
   keepAlive: "",
 };
@@ -44,8 +44,9 @@ export type EmbeddingResult = Readonly<{
 }>;
 
 function parseEmbeddingProvider(value: string | undefined): EmbeddingProvider {
-  if (!value) return "zai";
-  if (value === "zai" || value === "ollama") return value;
+  if (!value) return "openai";
+  if (value === "openai" || value === "ollama") return value;
+  if (value === "zai") return "openai";
   throw new Error(`Unsupported EMBEDDING_PROVIDER: ${value}`);
 }
 
@@ -86,15 +87,15 @@ export function getEmbeddingConfig(): EmbeddingConfig {
   }
 
   return {
-    ...DEFAULT_ZAI_EMBEDDING_CONFIG,
-    apiKey: process.env.ZAI_API_KEY ?? "",
+    ...DEFAULT_OPENAI_EMBEDDING_CONFIG,
+    apiKey: process.env.EMBEDDING_API_KEY ?? "",
     baseUrl: trimTrailingSlash(
-      process.env.ZAI_EMBEDDING_BASE_URL ?? DEFAULT_ZAI_EMBEDDING_CONFIG.baseUrl,
+      process.env.EMBEDDING_BASE_URL ?? DEFAULT_OPENAI_EMBEDDING_CONFIG.baseUrl,
     ),
-    model: process.env.ZAI_EMBEDDING_MODEL ?? DEFAULT_ZAI_EMBEDDING_CONFIG.model,
+    model: process.env.EMBEDDING_MODEL ?? DEFAULT_OPENAI_EMBEDDING_CONFIG.model,
     dimensions: parseDimensions(
-      process.env.ZAI_EMBEDDING_DIMENSIONS ?? process.env.EMBEDDING_DIMENSIONS,
-      DEFAULT_ZAI_EMBEDDING_CONFIG.dimensions,
+      process.env.EMBEDDING_DIMENSIONS ?? process.env.OLLAMA_EMBEDDING_DIMENSIONS,
+      DEFAULT_OPENAI_EMBEDDING_CONFIG.dimensions,
     ),
   };
 }
@@ -103,7 +104,7 @@ export function getEmbeddingConfig(): EmbeddingConfig {
  * Gets the embedding configuration for ingestion (worker/pipeline).
  *
  * Uses INGESTION_EMBEDDING_* env vars with fallback to the generic
- * EMBEDDING_PROVIDER / OLLAMA_* / ZAI_EMBEDDING_* vars.
+ * EMBEDDING_PROVIDER / OLLAMA_* / EMBEDDING_* vars.
  *
  * This is used when generating embeddings during PDF upload/processing
  * (e.g. on a remote Ollama instance on the developer's PC).
@@ -139,22 +140,22 @@ export function getIngestionEmbeddingConfig(): EmbeddingConfig {
   }
 
   return {
-    ...DEFAULT_ZAI_EMBEDDING_CONFIG,
-    apiKey: process.env.ZAI_API_KEY ?? "",
+    ...DEFAULT_OPENAI_EMBEDDING_CONFIG,
+    apiKey: process.env.EMBEDDING_API_KEY ?? "",
     baseUrl: trimTrailingSlash(
-      process.env.INGESTION_ZAI_EMBEDDING_BASE_URL
-        ?? process.env.ZAI_EMBEDDING_BASE_URL
-        ?? DEFAULT_ZAI_EMBEDDING_CONFIG.baseUrl,
+      process.env.INGESTION_EMBEDDING_BASE_URL
+          ?? process.env.EMBEDDING_BASE_URL
+          ?? DEFAULT_OPENAI_EMBEDDING_CONFIG.baseUrl,
     ),
     model:
-      process.env.INGESTION_ZAI_EMBEDDING_MODEL
-        ?? process.env.ZAI_EMBEDDING_MODEL
-        ?? DEFAULT_ZAI_EMBEDDING_CONFIG.model,
+      process.env.INGESTION_EMBEDDING_MODEL
+          ?? process.env.EMBEDDING_MODEL
+          ?? DEFAULT_OPENAI_EMBEDDING_CONFIG.model,
     dimensions: parseDimensions(
-      process.env.INGESTION_ZAI_EMBEDDING_DIMENSIONS
-        ?? process.env.ZAI_EMBEDDING_DIMENSIONS
-        ?? process.env.EMBEDDING_DIMENSIONS,
-      DEFAULT_ZAI_EMBEDDING_CONFIG.dimensions,
+      process.env.INGESTION_EMBEDDING_DIMENSIONS
+          ?? process.env.EMBEDDING_DIMENSIONS
+          ?? process.env.OLLAMA_EMBEDDING_DIMENSIONS,
+      DEFAULT_OPENAI_EMBEDDING_CONFIG.dimensions,
     ),
   };
 }
@@ -163,7 +164,7 @@ export function getIngestionEmbeddingConfig(): EmbeddingConfig {
  * Gets the embedding configuration for query-time search (vector retrieval).
  *
  * Uses QUERY_EMBEDDING_* env vars with fallback to the generic
- * EMBEDDING_PROVIDER / OLLAMA_* / ZAI_EMBEDDING_* vars.
+ * EMBEDDING_PROVIDER / OLLAMA_* / EMBEDDING_* vars.
  *
  * This is used when generating embeddings for search queries
  * (e.g. on a local Ollama instance on the deploy server).
@@ -199,22 +200,22 @@ export function getQueryEmbeddingConfig(): EmbeddingConfig {
   }
 
   return {
-    ...DEFAULT_ZAI_EMBEDDING_CONFIG,
-    apiKey: process.env.ZAI_API_KEY ?? "",
+    ...DEFAULT_OPENAI_EMBEDDING_CONFIG,
+    apiKey: process.env.EMBEDDING_API_KEY ?? "",
     baseUrl: trimTrailingSlash(
-      process.env.QUERY_ZAI_EMBEDDING_BASE_URL
-        ?? process.env.ZAI_EMBEDDING_BASE_URL
-        ?? DEFAULT_ZAI_EMBEDDING_CONFIG.baseUrl,
+      process.env.QUERY_EMBEDDING_BASE_URL
+          ?? process.env.EMBEDDING_BASE_URL
+          ?? DEFAULT_OPENAI_EMBEDDING_CONFIG.baseUrl,
     ),
     model:
-      process.env.QUERY_ZAI_EMBEDDING_MODEL
-        ?? process.env.ZAI_EMBEDDING_MODEL
-        ?? DEFAULT_ZAI_EMBEDDING_CONFIG.model,
+      process.env.QUERY_EMBEDDING_MODEL
+          ?? process.env.EMBEDDING_MODEL
+          ?? DEFAULT_OPENAI_EMBEDDING_CONFIG.model,
     dimensions: parseDimensions(
-      process.env.QUERY_ZAI_EMBEDDING_DIMENSIONS
-        ?? process.env.ZAI_EMBEDDING_DIMENSIONS
-        ?? process.env.EMBEDDING_DIMENSIONS,
-      DEFAULT_ZAI_EMBEDDING_CONFIG.dimensions,
+      process.env.QUERY_EMBEDDING_DIMENSIONS
+          ?? process.env.EMBEDDING_DIMENSIONS
+          ?? process.env.OLLAMA_EMBEDDING_DIMENSIONS,
+      DEFAULT_OPENAI_EMBEDDING_CONFIG.dimensions,
     ),
   };
 }
@@ -227,9 +228,9 @@ function assertEmbeddingDimensions(embedding: readonly number[], cfg: EmbeddingC
   }
 }
 
-async function generateZaiEmbedding(text: string, cfg: EmbeddingConfig): Promise<EmbeddingResult> {
+async function generateOpenAiEmbedding(text: string, cfg: EmbeddingConfig): Promise<EmbeddingResult> {
   if (!cfg.apiKey) {
-    throw new Error("ZAI_API_KEY is required for z.ai embedding generation");
+    throw new Error("EMBEDDING_API_KEY is required for OpenAI-compatible embedding generation");
   }
 
   const response = await fetch(`${cfg.baseUrl}/embeddings`, {
@@ -246,9 +247,8 @@ async function generateZaiEmbedding(text: string, cfg: EmbeddingConfig): Promise
   });
 
   if (!response.ok) {
-    const body = await response.text().catch(() => "");
     throw new Error(
-      `Embedding API error: ${response.status} ${response.statusText}${body ? ` — ${body}` : ""}`,
+      `Embedding API error: ${response.status} ${response.statusText}`,
     );
   }
 
@@ -292,9 +292,8 @@ async function generateOllamaEmbeddings(
   });
 
   if (!response.ok) {
-    const body = await response.text().catch(() => "");
     throw new Error(
-      `Ollama embedding API error: ${response.status} ${response.statusText}${body ? ` — ${body}` : ""}`,
+      `Ollama embedding API error: ${response.status} ${response.statusText}`,
     );
   }
 
@@ -332,7 +331,7 @@ export async function generateEmbedding(
     return result;
   }
 
-  return generateZaiEmbedding(text, cfg);
+  return generateOpenAiEmbedding(text, cfg);
 }
 
 /**
@@ -354,7 +353,7 @@ export async function generateEmbeddings(
       results.push(...await generateOllamaEmbeddings(batch, cfg));
     } else {
       const batchResults = await Promise.all(
-        batch.map((text) => generateZaiEmbedding(text, cfg)),
+        batch.map((text) => generateOpenAiEmbedding(text, cfg)),
       );
       results.push(...batchResults);
     }

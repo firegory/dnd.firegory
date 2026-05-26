@@ -284,7 +284,7 @@ export async function runPipeline(input: {
     } else {
       embeddingsSkipped = chunks.length;
       if (embeddingConfig.provider !== "ollama" && !embeddingConfig.apiKey) {
-        embeddingErrors.push("ZAI_API_KEY not configured — embeddings skipped");
+        embeddingErrors.push("EMBEDDING_API_KEY not configured — embeddings skipped");
       }
     }
 

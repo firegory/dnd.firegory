@@ -1,54 +1,112 @@
 /**
- * Tests for z.ai LLM client configuration and types.
+ * Tests for LLM client configuration and types.
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { getLlmConfig } from "../../src/server/llm/zai.ts";
+import { getLlmConfig } from "../../src/server/llm/client.ts";
+
+const LLM_ENV_KEYS = [
+  "LLM_API_KEY",
+  "LLM_BASE_URL",
+  "LLM_MODEL",
+  "LLM_MAX_TOKENS",
+  "LLM_TEMPERATURE",
+] as const;
+
+function withLlmEnv(fn: () => void): void {
+  const original = Object.fromEntries(
+    LLM_ENV_KEYS.map((key) => [key, process.env[key]]),
+  ) as Record<typeof LLM_ENV_KEYS[number], string | undefined>;
+
+  try {
+    for (const key of LLM_ENV_KEYS) {
+      delete process.env[key];
+    }
+    fn();
+  } finally {
+    for (const key of LLM_ENV_KEYS) {
+      const value = original[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
 
 describe("getLlmConfig", () => {
   it("returns default config when no env vars set", () => {
-    const config = getLlmConfig();
-    assert.equal(config.model, process.env.ZAI_LLM_MODEL ?? "z-llm");
-    assert.equal(config.maxTokens, parseInt(process.env.ZAI_LLM_MAX_TOKENS ?? "1024", 10));
-    assert.equal(config.temperature, parseFloat(process.env.ZAI_LLM_TEMPERATURE ?? "0.2"));
-    assert.ok(config.baseUrl.length > 0);
+    withLlmEnv(() => {
+      const config = getLlmConfig();
+      assert.equal(config.model, "gpt-4o-mini");
+      assert.equal(config.maxTokens, 1024);
+      assert.equal(config.temperature, 0.2);
+      assert.equal(config.baseUrl, "https://api.openai.com/v1");
+      assert.equal(config.apiKey, "");
+    });
   });
 
-  it("apiKey defaults to empty when ZAI_API_KEY not set", () => {
-    // If ZAI_API_KEY is set in env, this tests that it's used
-    const config = getLlmConfig();
-    assert.equal(config.apiKey, process.env.ZAI_API_KEY ?? "");
+  it("apiKey defaults to empty when LLM_API_KEY not set", () => {
+    withLlmEnv(() => {
+      const config = getLlmConfig();
+      assert.equal(config.apiKey, "");
+    });
   });
 
-  it("uses ZAI_LLM_BASE_URL when set", () => {
-    const original = process.env.ZAI_LLM_BASE_URL;
-    try {
-      process.env.ZAI_LLM_BASE_URL = "https://custom.api/v1";
+  it("uses LLM_BASE_URL when set", () => {
+    withLlmEnv(() => {
+      process.env.LLM_BASE_URL = "https://custom.api/v1";
       const config = getLlmConfig();
       assert.equal(config.baseUrl, "https://custom.api/v1");
-    } finally {
-      if (original === undefined) {
-        delete process.env.ZAI_LLM_BASE_URL;
-      } else {
-        process.env.ZAI_LLM_BASE_URL = original;
-      }
-    }
+    });
   });
 
-  it("uses ZAI_LLM_MODEL when set", () => {
-    const original = process.env.ZAI_LLM_MODEL;
-    try {
-      process.env.ZAI_LLM_MODEL = "custom-model";
+  it("trims trailing slash from LLM_BASE_URL", () => {
+    withLlmEnv(() => {
+      process.env.LLM_BASE_URL = "https://custom.api/v1/";
+      const config = getLlmConfig();
+      assert.equal(config.baseUrl, "https://custom.api/v1");
+    });
+  });
+
+  it("uses LLM_MODEL when set", () => {
+    withLlmEnv(() => {
+      process.env.LLM_MODEL = "custom-model";
       const config = getLlmConfig();
       assert.equal(config.model, "custom-model");
-    } finally {
-      if (original === undefined) {
-        delete process.env.ZAI_LLM_MODEL;
-      } else {
-        process.env.ZAI_LLM_MODEL = original;
-      }
-    }
+    });
+  });
+
+  it("uses LLM_MAX_TOKENS when set", () => {
+    withLlmEnv(() => {
+      process.env.LLM_MAX_TOKENS = "2048";
+      const config = getLlmConfig();
+      assert.equal(config.maxTokens, 2048);
+    });
+  });
+
+  it("uses LLM_TEMPERATURE when set", () => {
+    withLlmEnv(() => {
+      process.env.LLM_TEMPERATURE = "0.5";
+      const config = getLlmConfig();
+      assert.equal(config.temperature, 0.5);
+    });
+  });
+
+  it("rejects invalid LLM_MAX_TOKENS", () => {
+    withLlmEnv(() => {
+      process.env.LLM_MAX_TOKENS = "not-a-number";
+      assert.throws(() => getLlmConfig(), /Invalid LLM_MAX_TOKENS/);
+    });
+  });
+
+  it("rejects invalid LLM_TEMPERATURE", () => {
+    withLlmEnv(() => {
+      process.env.LLM_TEMPERATURE = "bad";
+      assert.throws(() => getLlmConfig(), /Invalid LLM_TEMPERATURE/);
+    });
   });
 });
