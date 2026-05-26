@@ -3,7 +3,7 @@
  *
  * Provides an interface for post-retrieval reranking. The default implementation
  * uses a simple heuristic based on score, source priority, and section heading
- * matches. Future implementations can call a reranking model (e.g. z.ai rerank).
+ * matches. Future implementations can call a dedicated reranking model.
  *
  * The reranker can be disabled entirely, in which case candidates pass through
  * in their original order.

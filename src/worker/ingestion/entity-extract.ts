@@ -1,4 +1,4 @@
-import { chatCompletion, type ChatMessage } from "../../server/llm/zai.ts";
+import { chatCompletion, type ChatMessage } from "../../server/llm/client.ts";
 import { isEntityType, type EntityInput, type EntityType } from "../../server/entities/types.ts";
 
 const BATCH_SIZE = 15;
