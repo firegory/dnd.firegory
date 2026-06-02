@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import type { EntityRecord } from "../../../../server/entities/types";
+import type { EntityRecord, EntityType } from "../../../../server/entities/types";
 import { MarkdownText } from "../../../../components/ui/markdown-text";
 import { useUiLanguage } from "../../../../components/ui/i18n";
 
@@ -13,7 +13,7 @@ export function ClassDetailClient({
 }: {
   features: readonly EntityRecord[];
   subclasses: readonly EntityRecord[];
-  entityType: string;
+  entityType: EntityType;
 }) {
   const { t } = useUiLanguage();
   const [selectedSubclass, setSelectedSubclass] = useState<string | "__base__">("__base__");

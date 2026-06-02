@@ -1,5 +1,7 @@
 import { chatCompletion, type ChatMessage } from "../../server/llm/client.ts";
 import { isEntityType, type EntityInput, type EntityType } from "../../server/entities/types.ts";
+import { normalizeEntityName, namesCouldMatch } from "../../server/entities/name-utils.ts";
+import { mergeEntityGroup } from "../../server/entities/merge-utils.ts";
 
 const BATCH_SIZE = 5;
 
@@ -81,42 +83,14 @@ function parseEntityResponse(
     }));
 }
 
-function normalizeEntityKey(name: string): string {
-  let n = name.trim().toLowerCase();
-  n = n.replace(/ё/g, "е");
-  return n;
-}
-
-function namesAreSimilar(a: string, b: string): boolean {
-  if (a === b) return true;
-  if (Math.abs(a.length - b.length) > Math.max(a.length, b.length) * 0.4) return false;
-  const maxLen = Math.max(a.length, b.length);
-  let commonPrefix = 0;
-  while (commonPrefix < Math.min(a.length, b.length) && a[commonPrefix] === b[commonPrefix]) {
-    commonPrefix++;
-  }
-  if (commonPrefix / maxLen >= 0.75) return true;
-  let mismatches = 0;
-  const limit = Math.floor(Math.max(a.length, b.length) * 0.25);
-  for (let i = 0, j = 0; i < a.length && j < b.length; i++, j++) {
-    if (a[i] !== b[j]) {
-      mismatches++;
-      if (mismatches > limit) return false;
-      if (a.length > b.length) { j--; }
-      else if (a.length < b.length) { i--; }
-    }
-  }
-  return true;
-}
-
-function mergeEntities(entities: readonly EntityInput[]): EntityInput[] {
+function mergeExtractedDuplicates(entities: readonly EntityInput[]): EntityInput[] {
   const groups: { key: string; names: string[]; entities: EntityInput[] }[] = [];
 
   for (const entity of entities) {
-    const norm = normalizeEntityKey(entity.name);
+    const norm = normalizeEntityName(entity.name);
     let matchedGroup = groups.find(
       (g) => g.entities[0].entityType === entity.entityType &&
-        g.names.some((n) => namesAreSimilar(norm, n)),
+        g.names.some((n) => namesCouldMatch(norm, n)),
     );
 
     if (!matchedGroup) {
@@ -127,47 +101,7 @@ function mergeEntities(entities: readonly EntityInput[]): EntityInput[] {
     matchedGroup.entities.push(entity);
   }
 
-  const merged: EntityInput[] = [];
-  for (const data of groups) {
-    const group = data.entities;
-    const chunkIds = new Set<string>();
-    const pageNumbers = new Set<number>();
-    const names: string[] = [];
-    const attrs = { ...group[0].attributes } as Record<string, unknown>;
-
-    for (const entity of group) {
-      for (const id of entity.chunkIds) chunkIds.add(id);
-      for (const p of entity.pageNumbers) pageNumbers.add(p);
-      if (!names.includes(entity.name)) names.push(entity.name);
-      const srcAttrs = entity.attributes as Record<string, unknown>;
-      for (const [k, v] of Object.entries(srcAttrs)) {
-        if (Array.isArray(v) && v.length > 0) {
-          const existing = attrs[k];
-          if (Array.isArray(existing)) {
-            attrs[k] = [...new Set([...existing, ...v])];
-          } else if (!existing) {
-            attrs[k] = v;
-          }
-        } else if (v !== undefined && v !== null && v !== "" &&
-          (attrs[k] === undefined || attrs[k] === null || attrs[k] === "")) {
-          attrs[k] = v;
-        }
-      }
-    }
-
-    const bestName = names.reduce((a, b) => a.length <= b.length ? a : b);
-
-    merged.push({
-      ...group[0],
-      name: bestName,
-      description: "",
-      attributes: attrs,
-      pageNumbers: Array.from(pageNumbers).sort((a, b) => a - b),
-      chunkIds: Array.from(chunkIds),
-    });
-  }
-
-  return merged;
+  return groups.map((data) => mergeEntityGroup(data.entities));
 }
 
 export type ExtractionChunk = Readonly<{
@@ -236,5 +170,5 @@ export async function identifyEntities(
     );
   }
 
-  return mergeEntities(allEntities);
+  return mergeExtractedDuplicates(allEntities);
 }

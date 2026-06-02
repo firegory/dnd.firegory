@@ -37,7 +37,7 @@ export default async function EntityTypePage({ params, searchParams }: PageProps
     const result = await listEntitiesByType(entityType, {
       filters: Object.keys(filters).length > 0 ? filters : undefined,
       page,
-      pageSize: 100,
+      pageSize: 1000,
       sourceIds,
     });
 

@@ -19,7 +19,7 @@ export async function POST(request: Request) {
   }
 
   const { targetId, sourceIds } = body;
-  if (!targetId || !Array.isArray(sourceIds) || sourceIds.length === 0) {
+  if (typeof targetId !== "string" || !targetId || !Array.isArray(sourceIds) || sourceIds.length === 0) {
     return NextResponse.json(
       { error: "targetId and non-empty sourceIds[] required" },
       { status: 400 },

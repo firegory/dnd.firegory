@@ -1,12 +1,11 @@
 "use client";
 
-import type { EntityAttributes as EntityAttributesType, EntityType } from "../../../../server/entities/types";
+import type { EntityAttributes as EntityAttributesType } from "../../../../server/entities/types";
 import { useUiLanguage, type TranslationKey } from "../../../../components/ui/i18n";
 
 export function EntityAttributes({
   attributes,
 }: {
-  entityType: EntityType;
   attributes: EntityAttributesType;
 }) {
   const { t } = useUiLanguage();

@@ -1,4 +1,5 @@
-import { query, withTransaction } from "../db/client.ts";import {
+import { query, withTransaction } from "../db/client.ts";
+import {
   createIngestionJob,
   markJobFailed,
   markJobProcessing,
@@ -17,6 +18,8 @@ import {
 import { identifyEntities, type ExtractionChunk } from "../../worker/ingestion/entity-extract.ts";
 import { chatCompletion } from "../llm/client.ts";
 import type { EntityInput, EntityType } from "../entities/types.ts";
+import { normalizeEntityName, namesCouldMatch } from "../entities/name-utils.ts";
+import { mergeEntityGroup } from "../entities/merge-utils.ts";
 
 export async function createEntityExtractionJob(
   sourceId: string,
@@ -134,11 +137,12 @@ export async function runEntityExtraction(jobId: string): Promise<void> {
 
     await updateJobProgress(jobId, 80);
 
-    for (const file of files) {
-      await deleteEntitiesForFile(file.id);
-    }
-
-    const inserted = await persistEntities(formattedEntities);
+    const inserted = await withTransaction(async (client) => {
+      for (const file of files) {
+        await deleteEntitiesForFile(file.id, client);
+      }
+      return persistEntities(formattedEntities, client);
+    });
 
     await linkChildEntitiesToClasses(job.source_id);
 
@@ -159,36 +163,36 @@ export async function runEntityExtraction(jobId: string): Promise<void> {
 }
 
 export async function reprocessEntityDescription(entityId: string): Promise<void> {
-  const result = await query<{
-    id: string;
-    name: string;
-    entity_type: string;
-    chunk_ids: string[] | null;
-    description: string;
-  }>("SELECT id, name, entity_type, chunk_ids, description FROM entities WHERE id = $1", [entityId]);
-
-  if (result.rows.length === 0) return;
-
-  const row = result.rows[0];
-  const chunkIds = row.chunk_ids ?? [];
-
-  const chunks = await query<{ text: string; page_number: number | null }>(
-    "SELECT text, page_number FROM chunks WHERE id = ANY($1) ORDER BY page_number",
-    [chunkIds],
-  );
-
-  let description: string;
-  if (chunks.rows.length > 0) {
-    description = chunks.rows.map((c) => c.text).join("\n\n");
-  } else if (row.description) {
-    description = row.description;
-  } else {
-    return;
-  }
-
-  if (description.length < 50) return;
-
   try {
+    const result = await query<{
+      id: string;
+      name: string;
+      entity_type: string;
+      chunk_ids: string[] | null;
+      description: string;
+    }>("SELECT id, name, entity_type, chunk_ids, description FROM entities WHERE id = $1", [entityId]);
+
+    if (result.rows.length === 0) return;
+
+    const row = result.rows[0];
+    const chunkIds = row.chunk_ids ?? [];
+
+    const chunks = await query<{ text: string; page_number: number | null }>(
+      "SELECT text, page_number FROM chunks WHERE id = ANY($1) ORDER BY page_number",
+      [chunkIds],
+    );
+
+    let description: string;
+    if (chunks.rows.length > 0) {
+      description = chunks.rows.map((c) => c.text).join("\n\n");
+    } else if (row.description) {
+      description = row.description;
+    } else {
+      return;
+    }
+
+    if (description.length < 50) return;
+
     const entityLike = { entityType: row.entity_type as EntityType, name: row.name, description } as EntityInput;
     const llmResult = await chatCompletion(
       [{
@@ -202,7 +206,7 @@ export async function reprocessEntityDescription(entityId: string): Promise<void
       await query("UPDATE entities SET description = $1 WHERE id = $2", [formatted, entityId]);
     }
   } catch (err) {
-    console.warn(`[reprocess] Format failed for "${row.name}":`, err instanceof Error ? err.message : err);
+    console.warn(`[reprocess] Failed for entity ${entityId}:`, err instanceof Error ? err.message : err);
   }
 }
 
@@ -268,53 +272,6 @@ Indices to keep:`;
   return result;
 }
 
-function mergeGroup(members: EntityInput[]): EntityInput {
-  const chunkIds = new Set<string>();
-  const pageNumbers = new Set<number>();
-  const names: string[] = [];
-  const attrs = { ...(members[0].attributes as Record<string, unknown>) };
-
-  for (const entity of members) {
-    for (const id of entity.chunkIds) chunkIds.add(id);
-    for (const p of entity.pageNumbers) pageNumbers.add(p);
-    if (!names.includes(entity.name)) names.push(entity.name);
-    const srcAttrs = entity.attributes as Record<string, unknown>;
-    for (const [k, v] of Object.entries(srcAttrs)) {
-      if (Array.isArray(v) && v.length > 0) {
-        const existing = attrs[k];
-        if (Array.isArray(existing)) {
-          attrs[k] = [...new Set([...existing, ...v])];
-        } else if (!existing) {
-          attrs[k] = v;
-        }
-      } else if (v !== undefined && v !== null && v !== "" &&
-        (attrs[k] === undefined || attrs[k] === null || attrs[k] === "")) {
-        attrs[k] = v;
-      }
-    }
-  }
-
-  const bestName = names.reduce((a, b) => (a.length <= b.length ? a : b));
-
-  return {
-    ...members[0],
-    name: bestName,
-    description: "",
-    attributes: attrs,
-    pageNumbers: Array.from(pageNumbers).sort((a, b) => a - b),
-    chunkIds: Array.from(chunkIds),
-  };
-}
-
-function normalize(name: string): string {
-  return name
-    .trim()
-    .toLowerCase()
-    .replace(/ё/g, "е")
-    .replace(/[\s\-_]+/g, " ")
-    .replace(/[()\"']/g, "");
-}
-
 const RU_PLURAL_SUFFIXES = [
   ["цы", "ц"],
   ["цы", "ец"],
@@ -340,32 +297,6 @@ function isStemMatch(a: string, b: string): boolean {
     }
   }
   return false;
-}
-
-function namesCouldMatch(a: string, b: string): boolean {
-  if (a === b) return true;
-  if (a.length < 2 || b.length < 2) return false;
-
-  const longer = a.length > b.length ? a : b;
-  const shorter = a.length > b.length ? b : a;
-  if (shorter.length / longer.length < 0.4) return false;
-
-  if (a.includes(b) || b.includes(a)) return true;
-
-  const commonPrefixLen = (() => {
-    let i = 0;
-    while (i < a.length && i < b.length && a[i] === b[i]) i++;
-    return i;
-  })();
-  if (commonPrefixLen / longer.length >= 0.5) return true;
-
-  const setA = new Set(a);
-  const setB = new Set(b);
-  let shared = 0;
-  for (const c of setA) if (setB.has(c)) shared++;
-  if (shared / Math.max(setA.size, setB.size) < 0.4) return false;
-
-  return true;
 }
 
 class UnionFind {
@@ -421,7 +352,7 @@ async function aiDeduplicate(entities: readonly EntityInput[]): Promise<EntityIn
 
     const normToIndices = new Map<string, number[]>();
     for (let i = 0; i < group.length; i++) {
-      const n = normalize(group[i].name);
+      const n = normalizeEntityName(group[i].name);
       if (!normToIndices.has(n)) normToIndices.set(n, []);
       normToIndices.get(n)!.push(i);
     }
@@ -436,8 +367,8 @@ async function aiDeduplicate(entities: readonly EntityInput[]): Promise<EntityIn
       for (let j = i + 1; j < limit; j++) {
         if (uf.find(i) === uf.find(j)) continue;
 
-        const ni = normalize(group[i].name);
-        const nj = normalize(group[j].name);
+        const ni = normalizeEntityName(group[i].name);
+        const nj = normalizeEntityName(group[j].name);
 
         if (isStemMatch(ni, nj)) {
           uf.union(i, j);
@@ -472,14 +403,14 @@ Answer:`;
     }
 
     for (const idxGroup of uf.groups(group.length)) {
-      result.push(mergeGroup(idxGroup.map((i) => group[i])));
+      result.push(mergeEntityGroup(idxGroup.map((i) => group[i])));
     }
   }
 
   const seen = new Map<string, EntityInput>();
   const finalResult: EntityInput[] = [];
   for (const entity of result) {
-    const key = normalize(entity.name);
+    const key = normalizeEntityName(entity.name);
     const existing = seen.get(key);
     if (!existing) {
       seen.set(key, entity);
@@ -536,7 +467,7 @@ async function linkChildEntitiesToClasses(sourceId: string): Promise<void> {
   const classNamesNorm = new Map<string, string>();
   for (const row of classResult.rows) {
     classNames.set(row.name.trim().toLowerCase(), row.id);
-    classNamesNorm.set(normalize(row.name), row.id);
+    classNamesNorm.set(normalizeEntityName(row.name), row.id);
   }
 
   const childResult = await query<{ id: string; attributes: Record<string, unknown> }>(
@@ -552,7 +483,7 @@ async function linkChildEntitiesToClasses(sourceId: string): Promise<void> {
   for (const child of childResult.rows) {
     const rawClass = String(child.attributes?.class ?? "").trim();
     const className = rawClass.toLowerCase();
-    const classNorm = normalize(rawClass);
+    const classNorm = normalizeEntityName(rawClass);
 
     let parentId = classNames.get(className);
 

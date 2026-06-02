@@ -1,4 +1,6 @@
-import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
+import { Pool, type PoolClient as PoolClientType, type QueryResult, type QueryResultRow } from "pg";
+
+export type PoolClient = PoolClientType;
 
 let pool: Pool | undefined;
 

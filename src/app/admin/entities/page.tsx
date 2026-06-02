@@ -1,16 +1,9 @@
-import { requireUser } from "../../../server/auth/session";
+import { requireAdmin } from "../../../server/auth/session";
 import { AppLayout } from "../../../components/ui/app-layout";
 import { AdminEntitiesClient } from "./entities-client";
 
 export default async function AdminEntitiesPage() {
-  const user = await requireUser();
-  if (user.role !== "admin") {
-    return (
-      <AppLayout userRole={user.role}>
-        <p className="p-8 text-text-muted">Access denied.</p>
-      </AppLayout>
-    );
-  }
+  await requireAdmin();
 
   return (
     <AppLayout userRole="admin">

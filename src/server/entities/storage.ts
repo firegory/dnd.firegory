@@ -1,13 +1,15 @@
-import { query, withTransaction } from "../db/client.ts";
+import { query, withTransaction, type PoolClient } from "../db/client.ts";
 import type { EntityRecord, EntityInput, EntityType } from "./types.ts";
 
 export async function persistEntities(
   entities: readonly EntityInput[],
+  client?: PoolClient,
 ): Promise<number> {
   if (entities.length === 0) return 0;
 
   const BATCH_SIZE = 25;
   let totalInserted = 0;
+  const exec = client ? (sql: string, params: unknown[]) => client.query(sql, params) : query;
 
   for (let i = 0; i < entities.length; i += BATCH_SIZE) {
     const batch = entities.slice(i, i + BATCH_SIZE);
@@ -38,15 +40,16 @@ export async function persistEntities(
         attributes, page_numbers, chunk_ids, parent_entity_id
       ) VALUES ${valueGroups.join(", ")}`;
 
-    await query(sql, params);
+    await exec(sql, params);
     totalInserted += batch.length;
   }
 
   return totalInserted;
 }
 
-export async function deleteEntitiesForFile(fileId: string): Promise<number> {
-  const result = await query(
+export async function deleteEntitiesForFile(fileId: string, client?: PoolClient): Promise<number> {
+  const exec = client ? (sql: string, params: unknown[]) => client.query(sql, params) : query;
+  const result = await exec(
     "DELETE FROM entities WHERE file_id = $1",
     [fileId],
   );

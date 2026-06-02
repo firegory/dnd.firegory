@@ -6,7 +6,7 @@ import process from "node:process";
 const sourceId = process.argv[2];
 const userId = "31da5bd9-558d-4816-993f-3779582a86e4";
 if (!sourceId) {
-  console.error("Usage: node --experimental-strip-types scripts/extract-entities.ts <source_id>");
+  console.error("Usage: node --experimental-strip-types scripts/extract-entities.mts <source_id>");
   process.exit(1);
 }
 
@@ -57,34 +57,23 @@ for (const file of files.rows) {
   }
 }
 
-const jobResult = await query<{ id: string; status: string }>(
-  `SELECT id, status FROM ingestion_jobs
-   WHERE source_id = $1 AND metadata @> '{"kind":"entity_extraction"}'::jsonb
-   AND status IN ('queued', 'processing')
-   ORDER BY queued_at DESC LIMIT 1`,
-  [sourceId],
+const insertResult = await query<{ id: string }>(
+  `INSERT INTO ingestion_jobs (kind, source_id, status, metadata, queue_id, requested_by_user_id)
+   VALUES ('reprocess', $1, 'queued', '{"kind":"entity_extraction"}', gen_random_uuid()::text, $2)
+   RETURNING id`,
+  [sourceId, userId],
 );
-
-let jobId: string;
-if (jobResult.rows.length > 0) {
-  jobId = jobResult.rows[0].id;
-  console.log(`[extract] Using existing queued job: ${jobId}`);
-} else {
-  const insertResult = await query<{ id: string }>(
-    `INSERT INTO ingestion_jobs (kind, source_id, status, metadata, queue_id, requested_by_user_id)
-     VALUES ('reprocess', $1, 'queued', '{"kind":"entity_extraction"}', gen_random_uuid()::text, $2)
-     RETURNING id`,
-    [sourceId, userId],
-  );
-  jobId = insertResult.rows[0].id;
-  console.log(`[extract] Created job: ${jobId}`);
-}
+const jobId = insertResult.rows[0].id;
+console.log(`[extract] Created job: ${jobId}`);
 
 try {
   await runEntityExtraction(jobId);
   console.log("[extract] Entity extraction complete.");
 } catch (err) {
   console.error("[extract] Extraction failed:", err instanceof Error ? err.message : err);
+  try {
+    await query("UPDATE ingestion_jobs SET status = 'failed', error_summary = $1 WHERE id = $2 AND status IN ('queued', 'processing')", [err instanceof Error ? err.message : String(err), jobId]);
+  } catch {}
   process.exit(1);
 }
 

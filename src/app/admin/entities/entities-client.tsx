@@ -2,9 +2,8 @@
 
 import { useState, useCallback } from "react";
 
-import { ENTITY_TYPES, type EntityType } from "../../../server/entities/types";
+import { ENTITY_TYPES, type EntityType, type EntityRecord } from "../../../server/entities/types";
 import { useUiLanguage } from "../../../components/ui/i18n";
-import type { EntityRecord } from "../../../server/entities/types";
 
 export function AdminEntitiesClient() {
   const { t } = useUiLanguage();
@@ -23,6 +22,10 @@ export function AdminEntitiesClient() {
     setTargetId("");
     try {
       const res = await fetch(`/api/admin/entities/list?entityType=${selectedType}`);
+      if (!res.ok) {
+        setMessage({ type: "err", text: t("mergeError") });
+        return;
+      }
       const data = await res.json();
       if (data.items) setEntities(data.items);
     } catch {
