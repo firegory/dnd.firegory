@@ -1,0 +1,49 @@
+.markdown-text {
+  line-height: 1.6;
+  font-size: 0.95rem;
+}
+
+.markdown-text h2 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border, #333);
+  padding-bottom: 0.25rem;
+}
+
+.markdown-text h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-top: 1rem;
+  margin-bottom: 0.4rem;
+}
+
+.markdown-text p {
+  margin: 0.5rem 0;
+}
+
+.markdown-text ul,
+.markdown-text ol {
+  margin: 0.4rem 0;
+  padding-left: 1.5rem;
+}
+
+.markdown-text li {
+  margin: 0.2rem 0;
+}
+
+.markdown-text strong {
+  font-weight: 700;
+}
+
+.markdown-text em {
+  font-style: italic;
+}
+
+.markdown-text code {
+  background: var(--muted, #222);
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.85em;
+}

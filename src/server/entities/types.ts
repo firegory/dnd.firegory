@@ -2,6 +2,7 @@ export type EntityType =
   | "spell"
   | "feat"
   | "class_feature"
+  | "class"
   | "monster"
   | "magic_item"
   | "species"
@@ -13,6 +14,7 @@ export const ENTITY_TYPES: readonly EntityType[] = [
   "spell",
   "feat",
   "class_feature",
+  "class",
   "monster",
   "magic_item",
   "species",
@@ -20,6 +22,10 @@ export const ENTITY_TYPES: readonly EntityType[] = [
   "background",
   "other",
 ];
+
+export const NAV_ENTITY_TYPES: readonly EntityType[] = ENTITY_TYPES.filter(
+  (t) => t !== "class_feature" && t !== "subclass",
+);
 
 export function isEntityType(value: string): value is EntityType {
   return (ENTITY_TYPES as readonly string[]).includes(value);
@@ -71,6 +77,13 @@ export type SpeciesAttributes = {
   traits?: string[];
 };
 
+export type ClassAttributes = {
+  levels?: number;
+  hit_die?: string;
+  primary_ability?: string[];
+  saving_throws?: string[];
+};
+
 export type SubclassAttributes = {
   class?: string;
   level?: number;
@@ -84,6 +97,7 @@ export type EntityAttributes =
   | SpellAttributes
   | MonsterAttributes
   | ClassFeatureAttributes
+  | ClassAttributes
   | FeatAttributes
   | MagicItemAttributes
   | SpeciesAttributes
@@ -198,6 +212,26 @@ export const ENTITY_CONFIG: Record<EntityType, EntityTypeConfig> = {
     labelKey: "entityTypeClassFeature",
     filters: [],
   },
+  class: {
+    slug: "class",
+    labelKey: "entityTypeClass",
+    filters: [
+      {
+        key: "primary_ability",
+        labelKey: "filterPrimaryAbility",
+        type: "select",
+        options: [
+          { value: "", labelKey: "filterAny" },
+          { value: "strength", labelKey: "abilityStrength" },
+          { value: "dexterity", labelKey: "abilityDexterity" },
+          { value: "constitution", labelKey: "abilityConstitution" },
+          { value: "intelligence", labelKey: "abilityIntelligence" },
+          { value: "wisdom", labelKey: "abilityWisdom" },
+          { value: "charisma", labelKey: "abilityCharisma" },
+        ],
+      },
+    ],
+  },
   feat: {
     slug: "feat",
     labelKey: "entityTypeFeat",
@@ -262,6 +296,7 @@ export type EntityRecord = Readonly<{
   attributes: EntityAttributes;
   pageNumbers: readonly number[];
   chunkIds: readonly string[];
+  parentEntityId: string | null;
   createdAt: string;
 }>;
 
@@ -274,4 +309,5 @@ export type EntityInput = Readonly<{
   attributes: EntityAttributes;
   pageNumbers: readonly number[];
   chunkIds: readonly string[];
+  parentEntityId?: string;
 }>;

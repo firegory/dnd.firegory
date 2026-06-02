@@ -6,13 +6,13 @@ import { usePathname } from "next/navigation";
 import type { AppLayoutRole } from "./app-layout";
 import { Toggle } from "./toggle";
 import { useUiLanguage, type UiLanguage, type TranslationKey } from "./i18n";
-import { ENTITY_CONFIG, ENTITY_TYPES } from "../../server/entities/types";
+import { ENTITY_CONFIG, NAV_ENTITY_TYPES } from "../../server/entities/types";
 
 const BASE_NAV_ITEMS = [
   { href: "/search", labelKey: "search" as TranslationKey },
 ] as const;
 
-const ENTITY_NAV_ITEMS = ENTITY_TYPES.map((type) => ({
+const ENTITY_NAV_ITEMS = NAV_ENTITY_TYPES.map((type) => ({
   href: `/browse/${ENTITY_CONFIG[type].slug}`,
   labelKey: ENTITY_CONFIG[type].labelKey,
 }));
@@ -20,6 +20,7 @@ const ENTITY_NAV_ITEMS = ENTITY_TYPES.map((type) => ({
 const ADMIN_NAV_ITEMS = [
   { href: "/admin/sources", labelKey: "sources" as TranslationKey },
   { href: "/admin/ingestion", labelKey: "upload" as TranslationKey },
+  { href: "/admin/entities", labelKey: "entities" as TranslationKey },
   { href: "/admin/users", labelKey: "users" as TranslationKey },
 ] as const;
 

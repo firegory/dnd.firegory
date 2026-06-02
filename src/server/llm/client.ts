@@ -77,24 +77,28 @@ function isOllama(baseUrl: string, apiKey: string): boolean {
 async function ollamaChatCompletion(
   messages: readonly ChatMessage[],
   cfg: LlmConfig,
+  format?: "json",
 ): Promise<ChatCompletionResult> {
   const url = new URL(cfg.baseUrl);
   const nativeUrl = `${url.origin}/api/chat`;
 
+  const body: Record<string, unknown> = {
+    model: cfg.model,
+    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    stream: false,
+    think: false,
+    keep_alive: "30m",
+    options: {
+      num_predict: cfg.maxTokens,
+      temperature: cfg.temperature,
+    },
+  };
+  if (format) body.format = format;
+
   const response = await fetch(nativeUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: cfg.model,
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
-      stream: false,
-      think: false,
-      keep_alive: "30m",
-      options: {
-        num_predict: cfg.maxTokens,
-        temperature: cfg.temperature,
-      },
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -154,6 +158,7 @@ async function openAiChatCompletion(
       messages: messages.map((m) => ({ role: m.role, content: m.content })),
       max_tokens: cfg.maxTokens,
       temperature: cfg.temperature,
+      chat_template_kwargs: { enable_thinking: false },
     }),
   });
 
@@ -199,12 +204,16 @@ async function openAiChatCompletion(
  */
 export async function chatCompletion(
   messages: readonly ChatMessage[],
-  config?: Partial<LlmConfig>,
+  config?: Partial<LlmConfig> & { preferOllamaNative?: boolean; responseFormat?: "json" },
 ): Promise<ChatCompletionResult> {
-  const cfg = { ...getLlmConfig(), ...config };
+  const { preferOllamaNative, responseFormat, ...rest } = config ?? {};
+  const cfg = { ...getLlmConfig(), ...rest };
 
   if (isOllama(cfg.baseUrl, cfg.apiKey)) {
-    return ollamaChatCompletion(messages, cfg);
+    if (preferOllamaNative || responseFormat === "json") {
+      return ollamaChatCompletion(messages, cfg, responseFormat);
+    }
+    return openAiChatCompletion(messages, cfg);
   }
 
   if (!cfg.apiKey) {

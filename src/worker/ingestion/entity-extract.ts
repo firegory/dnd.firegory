@@ -1,34 +1,51 @@
 import { chatCompletion, type ChatMessage } from "../../server/llm/client.ts";
 import { isEntityType, type EntityInput, type EntityType } from "../../server/entities/types.ts";
 
-const BATCH_SIZE = 15;
+const BATCH_SIZE = 5;
 
-const SYSTEM_PROMPT = `You are a D&D 5e entity extractor. Given text from a rulebook, extract all named entities (spells, monsters, feats, class features, magic items, species/races, subclasses, backgrounds).
+const EXTRACTION_USER_PROMPT = `Extract D&D entities from the text below as a JSON array.
 
-For each entity, output a JSON object with:
-- "type": one of "spell", "feat", "class_feature", "monster", "magic_item", "species", "subclass", "background", "other"
-- "name": the entity's name
-- "description": brief description (1-3 sentences from the text)
-- "attributes": type-specific details as JSON:
-  - spells: {"level": number, "school": string, "casting_time": string, "range": string, "components": string, "duration": string, "classes": [string]}
-  - monsters: {"ac": number, "hp": string, "cr": string, "type": string, "size": string, "str": number, "dex": number, "con": number, "int": number, "wis": number, "cha": number}
-  - class features: {"class": string, "subclass": string, "level": number}
-  - feats: {"prerequisite": string}
-  - magic items: {"rarity": string, "attunement": boolean, "type": string}
-  - species: {"traits": [string]}
-  - subclasses: {"class": string, "level": number}
-  - backgrounds: {"skill_proficiencies": [string]}
-- "chunk_ids": array of chunk IDs that mention this entity
+Entity types and rules:
+- "class": a playable class with levels, hit die, features (e.g. Fighter, Wizard, Колдун)
+- "subclass": a specialization of a class. ALWAYS include "class" in attributes with the parent class name (e.g. {"class":"Колдун"})
+- "class_feature": a specific ability gained by a class at a level. ALWAYS include "class" in attributes with the parent class name (e.g. {"class":"Колдун","level":3})
+- "species": a playable race/species (e.g. Elf, Human, Стидиец, Крыслинг)
+- "feat": an optional ability chosen at level-up (NOT class features)
+- "spell": a spell with casting rules (e.g. Fireball, Wish)
+- "monster": a creature/NPC with stat block or bestiary entry
+- "magic_item": a magical weapon, armor, potion, or artifact
+- "background": a character background (e.g. Soldier, Sage)
+- "other": game mechanics that don't fit above (e.g. a unique subsystem)
+
+Do NOT extract:
+- Game system names (D&D, Dungeons & Dragons)
+- Region/place names (use "other" only if it's a game mechanic)
+- Deity names unless they have mechanical rules attached
+- Adjectives, descriptors, or title words by themselves
+- Table headers, section titles, or formatting artifacts
+
+Each entity must have:
+- "type": the entity type string from above
+- "name": entity name in original language (2+ characters, must be a proper noun or specific term)
+- "attributes": simple key-value details only (e.g. {"level":1, "hit_die":"d8", "class":"Колдун", "speed":"30 футов"}). Do NOT nest objects or arrays inside attributes — each distinct ability/feature must be a SEPARATE entity with its own type "class_feature".
+- "chunk_ids": array of chunk IDs mentioning this entity
 - "page_numbers": array of page numbers
 
-Output ONLY a JSON array of entity objects. If no entities are found, output [].
+Output ONLY a valid JSON array. No other text. If no valid entities found, output [].
 
-Keep the text in its original language — do NOT translate.`;
+Text:`;
+
+const DESCRIBE_PROMPT = `You are a D&D 5e content extractor. Extract ALL information about the specified entity from the given text passages.
+
+Rules:
+- Include ALL details: lore, mechanics, stats, features, traits, rules, descriptions
+- Do NOT summarize — preserve the complete information from the source
+- Keep the text in its original language
+- Write clearly but preserve all content. Use paragraphs and lists where appropriate.`;
 
 type RawExtractedEntity = {
   type?: string;
   name?: string;
-  description?: string;
   attributes?: Record<string, unknown>;
   chunk_ids?: string[];
   page_numbers?: number[];
@@ -61,15 +78,104 @@ function parseEntityResponse(
       sourceId,
       entityType: item.type as EntityType,
       name: item.name!.trim(),
-      description: typeof item.description === "string" ? item.description : "",
+      description: "",
       attributes: (item.attributes ?? {}) as EntityInput["attributes"],
       pageNumbers: Array.isArray(item.page_numbers)
         ? item.page_numbers.filter((p): p is number => typeof p === "number")
         : [],
       chunkIds: Array.isArray(item.chunk_ids)
-        ? item.chunk_ids.filter((c): c is string => typeof c === "string")
+        ? item.chunk_ids.filter((c): c is string => typeof c === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(c))
         : [],
     }));
+}
+
+function normalizeEntityKey(name: string): string {
+  let n = name.trim().toLowerCase();
+  n = n.replace(/ё/g, "е");
+  return n;
+}
+
+function namesAreSimilar(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > Math.max(a.length, b.length) * 0.4) return false;
+  const maxLen = Math.max(a.length, b.length);
+  let commonPrefix = 0;
+  while (commonPrefix < Math.min(a.length, b.length) && a[commonPrefix] === b[commonPrefix]) {
+    commonPrefix++;
+  }
+  if (commonPrefix / maxLen >= 0.75) return true;
+  let mismatches = 0;
+  const limit = Math.floor(Math.max(a.length, b.length) * 0.25);
+  for (let i = 0, j = 0; i < a.length && j < b.length; i++, j++) {
+    if (a[i] !== b[j]) {
+      mismatches++;
+      if (mismatches > limit) return false;
+      if (a.length > b.length) { j--; }
+      else if (a.length < b.length) { i--; }
+    }
+  }
+  return true;
+}
+
+function mergeEntities(entities: readonly EntityInput[]): EntityInput[] {
+  const groups: { key: string; names: string[]; entities: EntityInput[] }[] = [];
+
+  for (const entity of entities) {
+    const norm = normalizeEntityKey(entity.name);
+    let matchedGroup = groups.find(
+      (g) => g.entities[0].entityType === entity.entityType &&
+        g.names.some((n) => namesAreSimilar(norm, n)),
+    );
+
+    if (!matchedGroup) {
+      matchedGroup = { key: `${entity.entityType}:${norm}`, names: [norm], entities: [] };
+      groups.push(matchedGroup);
+    }
+    if (!matchedGroup.names.includes(norm)) matchedGroup.names.push(norm);
+    matchedGroup.entities.push(entity);
+  }
+
+  const merged: EntityInput[] = [];
+  for (const data of groups) {
+    const group = data.entities;
+    const chunkIds = new Set<string>();
+    const pageNumbers = new Set<number>();
+    const names: string[] = [];
+    const attrs = { ...group[0].attributes } as Record<string, unknown>;
+
+    for (const entity of group) {
+      for (const id of entity.chunkIds) chunkIds.add(id);
+      for (const p of entity.pageNumbers) pageNumbers.add(p);
+      if (!names.includes(entity.name)) names.push(entity.name);
+      const srcAttrs = entity.attributes as Record<string, unknown>;
+      for (const [k, v] of Object.entries(srcAttrs)) {
+        if (Array.isArray(v) && v.length > 0) {
+          const existing = attrs[k];
+          if (Array.isArray(existing)) {
+            attrs[k] = [...new Set([...existing, ...v])];
+          } else if (!existing) {
+            attrs[k] = v;
+          }
+        } else if (v !== undefined && v !== null && v !== "" &&
+          (attrs[k] === undefined || attrs[k] === null || attrs[k] === "")) {
+          attrs[k] = v;
+        }
+      }
+    }
+
+    const bestName = names.reduce((a, b) => a.length <= b.length ? a : b);
+
+    merged.push({
+      ...group[0],
+      name: bestName,
+      description: "",
+      attributes: attrs,
+      pageNumbers: Array.from(pageNumbers).sort((a, b) => a - b),
+      chunkIds: Array.from(chunkIds),
+    });
+  }
+
+  return merged;
 }
 
 export type ExtractionChunk = Readonly<{
@@ -78,7 +184,7 @@ export type ExtractionChunk = Readonly<{
   pageNumber: number | null;
 }>;
 
-export async function extractEntities(
+export async function identifyEntities(
   chunks: readonly ExtractionChunk[],
   sourceId: string,
   fileId: string,
@@ -95,35 +201,114 @@ export async function extractEntities(
       .join("\n\n---\n\n");
 
     const messages: ChatMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
       {
         role: "user",
-        content: `Extract all D&D entities from the following text chunks:\n\n${batchText}`,
+        content: `${EXTRACTION_USER_PROMPT}\n\n${batchText}`,
       },
     ];
 
     let content: string;
-    try {
-      const result = await chatCompletion(messages, {
-        maxTokens: 4096,
-        temperature: 0.2,
-      });
-      content = result.content;
-    } catch (err) {
-      console.error(
-        `[entity-extract] LLM call failed for batch ${i / BATCH_SIZE + 1}:`,
-        err instanceof Error ? err.message : err,
-      );
-      continue;
+    let entities: EntityInput[] = [];
+    const maxRetries = 2;
+
+    for (let retry = 0; retry <= maxRetries; retry++) {
+      try {
+        const result = await chatCompletion(messages, {
+          maxTokens: 4096,
+          temperature: 0,
+          preferOllamaNative: true,
+        });
+        content = result.content;
+      } catch (err) {
+        console.error(
+          `[entity-extract] Pass 1 LLM call failed for batch ${i / BATCH_SIZE + 1}:`,
+          err instanceof Error ? err.message : err,
+        );
+        break;
+      }
+
+      entities = parseEntityResponse(content, sourceId, fileId);
+      if (entities.length > 0) break;
+
+      if (retry < maxRetries) {
+        console.warn(
+          `[entity-extract] Batch ${i / BATCH_SIZE + 1} returned 0 entities (attempt ${retry + 1}), retrying...`,
+        );
+      }
     }
 
-    const entities = parseEntityResponse(content, sourceId, fileId);
     allEntities.push(...entities);
 
     console.log(
-      `[entity-extract] Batch ${i / BATCH_SIZE + 1}/${Math.ceil(chunks.length / BATCH_SIZE)}: extracted ${entities.length} entities`,
+      `[entity-extract] Pass 1 batch ${i / BATCH_SIZE + 1}/${Math.ceil(chunks.length / BATCH_SIZE)}: identified ${entities.length} entities`,
     );
   }
 
-  return allEntities;
+  return mergeEntities(allEntities);
+}
+
+export async function enrichDescriptions(
+  entities: readonly EntityInput[],
+  chunkMap: Map<string, ExtractionChunk>,
+): Promise<EntityInput[]> {
+  const result: EntityInput[] = [];
+
+  for (let i = 0; i < entities.length; i++) {
+    const entity = entities[i];
+    const entityChunks = entity.chunkIds
+      .map((id) => chunkMap.get(id))
+      .filter((c): c is ExtractionChunk => c !== undefined);
+
+    if (entityChunks.length === 0) {
+      result.push(entity);
+      continue;
+    }
+
+    const chunksText = entityChunks
+      .sort((a, b) => (a.pageNumber ?? 0) - (b.pageNumber ?? 0))
+      .map((c) => `[page ${c.pageNumber ?? "unknown"}]\n${c.text}`)
+      .join("\n\n---\n\n");
+
+    const messages: ChatMessage[] = [
+      { role: "system", content: DESCRIBE_PROMPT },
+      {
+        role: "user",
+        content: `Extract ALL information about "${entity.name}" (type: ${entity.entityType}) from the following passages:\n\n${chunksText}`,
+      },
+    ];
+
+    try {
+      const llmResult = await chatCompletion(messages, {
+        maxTokens: 4096,
+        temperature: 0.1,
+      });
+
+      result.push({
+        ...entity,
+        description: llmResult.content.trim() || assembleFallbackDescription(entityChunks),
+      });
+    } catch (err) {
+      console.warn(
+        `[entity-extract] Pass 2 failed for "${entity.name}":`,
+        err instanceof Error ? err.message : err,
+      );
+      result.push({
+        ...entity,
+        description: assembleFallbackDescription(entityChunks),
+      });
+    }
+
+    console.log(
+      `[entity-extract] Pass 2: enriched "${entity.name}" (${i + 1}/${entities.length})`,
+    );
+  }
+
+  return result;
+}
+
+function assembleFallbackDescription(chunks: readonly ExtractionChunk[]): string {
+  return [...chunks]
+    .sort((a, b) => (a.pageNumber ?? 0) - (b.pageNumber ?? 0))
+    .map((c) => c.text)
+    .join("\n\n");
 }

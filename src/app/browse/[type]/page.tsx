@@ -2,11 +2,12 @@ import { notFound } from "next/navigation";
 
 import { requireUser } from "../../../server/auth/session";
 import { getAccessibleSourceIds } from "../../../server/access/retrieval-filter";
-import { listEntitiesByType } from "../../../server/entities/storage";
+import { listEntitiesByType, countEntitiesByType } from "../../../server/entities/storage";
 import { getEntityTypeBySlug, ENTITY_CONFIG } from "../../../server/entities/types";
 import { AppLayout } from "../../../components/ui/app-layout";
 import { EntityList } from "./entity-list";
 import { EntityFilters } from "./entity-filters";
+import { ClassCardGrid } from "./class-card-grid";
 
 type PageProps = { params: Promise<{ type: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> };
 
@@ -31,6 +32,38 @@ export default async function EntityTypePage({ params, searchParams }: PageProps
     role: user.role,
     userId: user.id,
   });
+
+  if (entityType === "class") {
+    const result = await listEntitiesByType(entityType, {
+      filters: Object.keys(filters).length > 0 ? filters : undefined,
+      page,
+      pageSize: 100,
+      sourceIds,
+    });
+
+    const counts = await countEntitiesByType(sourceIds);
+
+    return (
+      <AppLayout userRole={user.role}>
+        <div className="space-y-6">
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-text-primary">
+              {config.labelKey === "entityTypeClass" ? config.labelKey : entityType.replace(/_/g, " ")}
+            </h1>
+            <span className="rounded-full bg-accent/15 px-3 py-1 text-sm font-bold text-accent">
+              {result.total}
+            </span>
+          </div>
+
+          {config.filters.length > 0 && (
+            <EntityFilters typeSlug={typeSlug} config={config} currentFilters={filters} />
+          )}
+
+          <ClassCardGrid entities={result.items} featureCount={counts.class_feature} subclassCount={counts.subclass} />
+        </div>
+      </AppLayout>
+    );
+  }
 
   const result = await listEntitiesByType(entityType, {
     filters: Object.keys(filters).length > 0 ? filters : undefined,

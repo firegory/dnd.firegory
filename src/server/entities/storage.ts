@@ -16,9 +16,9 @@ export async function persistEntities(
 
     for (let j = 0; j < batch.length; j++) {
       const entity = batch[j];
-      const base = j * 8;
+      const base = j * 9;
       valueGroups.push(
-        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}::jsonb, $${base + 7}::integer[], $${base + 8}::uuid[])`,
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}::jsonb, $${base + 7}::integer[], $${base + 8}::uuid[], $${base + 9}::uuid)`,
       );
       params.push(
         entity.fileId,
@@ -27,14 +27,15 @@ export async function persistEntities(
         entity.name,
         entity.description,
         JSON.stringify(entity.attributes),
-        entity.pageNumbers.length > 0 ? entity.pageNumbers : null,
-        entity.chunkIds.length > 0 ? entity.chunkIds : null,
+        entity.pageNumbers,
+        entity.chunkIds,
+        entity.parentEntityId ?? null,
       );
     }
 
     const sql = `INSERT INTO entities (
         file_id, source_id, entity_type, name, description,
-        attributes, page_numbers, chunk_ids
+        attributes, page_numbers, chunk_ids, parent_entity_id
       ) VALUES ${valueGroups.join(", ")}`;
 
     await query(sql, params);
@@ -57,7 +58,7 @@ export async function countEntitiesByType(
 ): Promise<Record<EntityType, number>> {
   const counts = {} as Record<EntityType, number>;
   for (const type of [
-    "spell", "feat", "class_feature", "monster", "magic_item",
+    "spell", "feat", "class_feature", "class", "monster", "magic_item",
     "species", "subclass", "background", "other",
   ]) {
     counts[type as EntityType] = 0;
@@ -95,6 +96,7 @@ type EntityRow = Readonly<{
   attributes: EntityRecord["attributes"];
   page_numbers: number[] | null;
   chunk_ids: string[] | null;
+  parent_entity_id: string | null;
   created_at: string;
 }>;
 
@@ -109,6 +111,7 @@ function rowToRecord(row: EntityRow): EntityRecord {
     attributes: row.attributes,
     pageNumbers: row.page_numbers ?? [],
     chunkIds: row.chunk_ids ?? [],
+    parentEntityId: row.parent_entity_id,
     createdAt: row.created_at,
   };
 }
@@ -152,6 +155,9 @@ export async function listEntitiesByType(
         values.push(value);
       } else if (key === "rarity") {
         conditions.push(`e.attributes->>'rarity' = $${paramIdx++}`);
+        values.push(value);
+      } else if (key === "primary_ability") {
+        conditions.push(`e.attributes->'primary_ability' ? $${paramIdx++}`);
         values.push(value);
       }
     }
@@ -227,4 +233,118 @@ export async function loadChunksForFile(
     [fileId],
   );
   return result.rows.map((r) => ({ id: r.id, text: r.text, pageNumber: r.page_number }));
+}
+
+export async function listChildrenOf(
+  parentId: string,
+  entityType?: EntityType,
+): Promise<readonly EntityRecord[]> {
+  const conditions = ["e.parent_entity_id = $1"];
+  const values: unknown[] = [parentId];
+
+  if (entityType) {
+    conditions.push("e.entity_type = $2");
+    values.push(entityType);
+  }
+
+  const result = await query<EntityRow>(
+    `SELECT e.* FROM entities e WHERE ${conditions.join(" AND ")} ORDER BY e.name`,
+    values,
+  );
+  return result.rows.map(rowToRecord);
+}
+
+export async function linkChildEntities(
+  parentId: string,
+  childIds: readonly string[],
+): Promise<number> {
+  if (childIds.length === 0) return 0;
+  const result = await query(
+    "UPDATE entities SET parent_entity_id = $1 WHERE id = ANY($2)",
+    [parentId, childIds],
+  );
+  return result.rowCount ?? 0;
+}
+
+export async function mergeEntities(
+  targetId: string,
+  sourceIds: readonly string[],
+): Promise<void> {
+  if (sourceIds.length === 0) return;
+
+  const allIds = [targetId, ...sourceIds];
+  const result = await query<EntityRow>(
+    "SELECT * FROM entities WHERE id = ANY($1) ORDER BY CASE WHEN id = $2 THEN 0 ELSE 1 END",
+    [allIds, targetId],
+  );
+
+  if (result.rows.length === 0) return;
+
+  const target = rowToRecord(result.rows[0]);
+  const sources = result.rows.slice(1).map(rowToRecord);
+
+  const mergedChunkIds = new Set<string>(target.chunkIds);
+  const mergedPageNumbers = new Set<number>(target.pageNumbers);
+  const descriptions = [target.description];
+  const mergedAttributes = { ...target.attributes } as Record<string, unknown>;
+
+  for (const src of sources) {
+    for (const id of src.chunkIds) mergedChunkIds.add(id);
+    for (const p of src.pageNumbers) mergedPageNumbers.add(p);
+    if (src.description && src.description !== target.description) {
+      descriptions.push(src.description);
+    }
+    const srcAttrs = src.attributes as Record<string, unknown>;
+    for (const [k, v] of Object.entries(srcAttrs)) {
+      if (v !== undefined && v !== null && v !== "" &&
+        (mergedAttributes[k] === undefined || mergedAttributes[k] === null || mergedAttributes[k] === "")) {
+        mergedAttributes[k] = v;
+      }
+    }
+  }
+
+  await query(
+    `UPDATE entities SET
+      description = $1,
+      attributes = $2::jsonb,
+      page_numbers = $3::integer[],
+      chunk_ids = $4::uuid[]
+     WHERE id = $5`,
+    [
+      descriptions.filter(Boolean).join("\n\n"),
+      JSON.stringify(mergedAttributes),
+      Array.from(mergedPageNumbers).sort((a, b) => a - b),
+      Array.from(mergedChunkIds),
+      targetId,
+    ],
+  );
+
+  await query(
+    "UPDATE entities SET parent_entity_id = $1 WHERE parent_entity_id = ANY($2)",
+    [targetId, sourceIds],
+  );
+
+  await query(
+    "DELETE FROM entities WHERE id = ANY($1)",
+    [sourceIds],
+  );
+}
+
+export async function listEntitiesForMerge(
+  entityType: EntityType,
+  sourceIds?: readonly string[],
+): Promise<readonly EntityRecord[]> {
+  const conditions = ["e.entity_type = $1"];
+  const values: unknown[] = [entityType];
+
+  if (sourceIds && sourceIds.length > 0) {
+    conditions.push("e.source_id = ANY($2)");
+    values.push(sourceIds);
+  }
+
+  const result = await query<EntityRow>(
+    `SELECT e.* FROM entities e WHERE ${conditions.join(" AND ")} ORDER BY e.name`,
+    values,
+  );
+  return result.rows.map(rowToRecord);
 }

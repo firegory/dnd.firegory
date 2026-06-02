@@ -44,6 +44,10 @@ export function EntityAttributes({
     attunement: "Attunement",
     traits: "Traits",
     skill_proficiencies: "Skill Proficiencies",
+    levels: "Levels",
+    hit_die: "Hit Die",
+    primary_ability: "Primary Ability",
+    saving_throws: "Saving Throws",
   };
 
   return (
@@ -66,7 +70,8 @@ export function EntityAttributes({
 }
 
 function formatAttributeValue(value: unknown): string {
-  if (Array.isArray(value)) return value.join(", ");
+  if (Array.isArray(value)) return value.map((v) => (typeof v === "object" && v !== null ? JSON.stringify(v) : String(v))).join(", ");
+  if (typeof value === "object" && value !== null) return JSON.stringify(value);
   if (typeof value === "boolean") return value ? "Yes" : "No";
   return String(value);
 }
