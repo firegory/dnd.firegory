@@ -33,12 +33,19 @@ export async function POST(request: Request) {
     );
   }
 
+  if (!sourceIds.every((id) => typeof id === "string" && id.length > 0)) {
+    return NextResponse.json(
+      { error: "sourceIds must be an array of non-empty strings" },
+      { status: 400 },
+    );
+  }
+
   try {
     await mergeEntities(targetId, sourceIds);
     await reprocessEntityDescription(targetId);
     return NextResponse.json({ ok: true });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("[merge] Failed:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ error: "Merge failed. Please try again." }, { status: 500 });
   }
 }

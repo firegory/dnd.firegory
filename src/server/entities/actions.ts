@@ -15,7 +15,7 @@ import {
   linkChildEntities,
 } from "../entities/storage.ts";
 import { identifyEntities, type ExtractionChunk } from "../../worker/ingestion/entity-extract.ts";
-import { chatCompletion, type ChatMessage } from "../llm/client.ts";
+import { chatCompletion } from "../llm/client.ts";
 import type { EntityInput, EntityType } from "../entities/types.ts";
 
 export async function createEntityExtractionJob(
@@ -100,7 +100,6 @@ export async function runEntityExtraction(jobId: string): Promise<void> {
         file.id,
       );
 
-      await deleteEntitiesForFile(file.id);
       allExtractedEntities.push(...entities);
 
       console.log(
@@ -133,7 +132,11 @@ export async function runEntityExtraction(jobId: string): Promise<void> {
       `[entity-extraction] Formatted ${formattedEntities.filter((e) => e.description.length > 0).length} descriptions`,
     );
 
-    await updateJobProgress(jobId, 90);
+    await updateJobProgress(jobId, 80);
+
+    for (const file of files) {
+      await deleteEntitiesForFile(file.id);
+    }
 
     const inserted = await persistEntities(formattedEntities);
 
@@ -242,7 +245,7 @@ Indices to keep:`;
       if (match) {
         const indices: number[] = JSON.parse(match[0]);
         for (const idx of indices) {
-          if (typeof idx === "number" && idx >= 0 && idx < entities.length) {
+          if (typeof idx === "number" && idx >= start && idx < start + batch.length) {
             validIndices.add(idx);
           }
         }
@@ -411,6 +414,11 @@ async function aiDeduplicate(entities: readonly EntityInput[]): Promise<EntityIn
 
     const uf = new UnionFind(group.length);
 
+    const MAX_GROUP_SIZE = 50;
+    if (group.length > MAX_GROUP_SIZE) {
+      console.warn(`[dedup] Type "${type}" has ${group.length} entities, capping pairwise comparison to first ${MAX_GROUP_SIZE}`);
+    }
+
     const normToIndices = new Map<string, number[]>();
     for (let i = 0; i < group.length; i++) {
       const n = normalize(group[i].name);
@@ -423,8 +431,9 @@ async function aiDeduplicate(entities: readonly EntityInput[]): Promise<EntityIn
       }
     }
 
-    for (let i = 0; i < group.length; i++) {
-      for (let j = i + 1; j < group.length; j++) {
+    const limit = Math.min(group.length, MAX_GROUP_SIZE);
+    for (let i = 0; i < limit; i++) {
+      for (let j = i + 1; j < limit; j++) {
         if (uf.find(i) === uf.find(j)) continue;
 
         const ni = normalize(group[i].name);
@@ -549,7 +558,8 @@ async function linkChildEntitiesToClasses(sourceId: string): Promise<void> {
 
     if (!parentId) {
       for (const [normName, id] of classNamesNorm) {
-        if (classNorm.includes(normName) || normName.includes(classNorm)) {
+        const tokens = classNorm.split(/\s+/);
+        if (tokens.some((t) => t === normName) || normName.split(/\s+/).some((t) => t === classNorm)) {
           parentId = id;
           break;
         }
@@ -571,12 +581,14 @@ async function linkChildEntitiesToClasses(sourceId: string): Promise<void> {
     }
   }
 
+  let totalLinked = 0;
   for (const [parentId, childIds] of links) {
     await linkChildEntities(parentId, childIds);
+    totalLinked += childIds.length;
   }
 
   console.log(
-    `[entity-extraction] Linked ${childResult.rows.length} child entities to ${classResult.rows.length} classes`,
+    `[entity-extraction] Linked ${totalLinked} child entities to ${classResult.rows.length} classes`,
   );
 }
 

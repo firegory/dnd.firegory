@@ -9,8 +9,6 @@ export function ClassCardGrid({
   entities,
 }: {
   entities: readonly EntityRecord[];
-  featureCount: number;
-  subclassCount: number;
 }) {
   const { t } = useUiLanguage();
 

@@ -139,6 +139,17 @@ async function ollamaChatCompletion(
   };
 }
 
+function isTgiEndpoint(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    return url.hostname.includes("huggingface") ||
+      url.hostname.includes("hf.co") ||
+      url.hostname.includes("bekendesite");
+  } catch {
+    return false;
+  }
+}
+
 async function openAiChatCompletion(
   messages: readonly ChatMessage[],
   cfg: LlmConfig,
@@ -150,16 +161,21 @@ async function openAiChatCompletion(
     headers["Authorization"] = `Bearer ${cfg.apiKey}`;
   }
 
+  const body: Record<string, unknown> = {
+    model: cfg.model,
+    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    max_tokens: cfg.maxTokens,
+    temperature: cfg.temperature,
+  };
+
+  if (isTgiEndpoint(cfg.baseUrl)) {
+    body.chat_template_kwargs = { enable_thinking: false };
+  }
+
   const response = await fetch(`${cfg.baseUrl}/chat/completions`, {
     method: "POST",
     headers,
-    body: JSON.stringify({
-      model: cfg.model,
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
-      max_tokens: cfg.maxTokens,
-      temperature: cfg.temperature,
-      chat_template_kwargs: { enable_thinking: false },
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {

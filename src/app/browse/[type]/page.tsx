@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 
 import { requireUser } from "../../../server/auth/session";
 import { getAccessibleSourceIds } from "../../../server/access/retrieval-filter";
-import { listEntitiesByType, countEntitiesByType } from "../../../server/entities/storage";
+import { listEntitiesByType } from "../../../server/entities/storage";
 import { getEntityTypeBySlug, ENTITY_CONFIG } from "../../../server/entities/types";
 import { AppLayout } from "../../../components/ui/app-layout";
 import { EntityList } from "./entity-list";
@@ -41,14 +41,12 @@ export default async function EntityTypePage({ params, searchParams }: PageProps
       sourceIds,
     });
 
-    const counts = await countEntitiesByType(sourceIds);
-
     return (
       <AppLayout userRole={user.role}>
         <div className="space-y-6">
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold text-text-primary">
-              {config.labelKey === "entityTypeClass" ? config.labelKey : entityType.replace(/_/g, " ")}
+              {entityType.replace(/_/g, " ")}
             </h1>
             <span className="rounded-full bg-accent/15 px-3 py-1 text-sm font-bold text-accent">
               {result.total}
@@ -59,7 +57,7 @@ export default async function EntityTypePage({ params, searchParams }: PageProps
             <EntityFilters typeSlug={typeSlug} config={config} currentFilters={filters} />
           )}
 
-          <ClassCardGrid entities={result.items} featureCount={counts.class_feature} subclassCount={counts.subclass} />
+          <ClassCardGrid entities={result.items} />
         </div>
       </AppLayout>
     );

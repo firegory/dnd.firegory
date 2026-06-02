@@ -145,8 +145,8 @@ export function AdminEntitiesClient() {
                   <div className="flex-1">
                     <p className="text-sm font-medium text-text-primary">{entity.name}</p>
                     <p className="text-xs text-text-muted">
-                      {entity.description.slice(0, 100)}
-                      {entity.description.length > 100 ? "..." : ""}
+                      {entity.description ? entity.description.slice(0, 100) : ""}
+                      {entity.description && entity.description.length > 100 ? "..." : ""}
                     </p>
                   </div>
                   <span className="text-xs text-text-muted">

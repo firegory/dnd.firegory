@@ -35,14 +35,6 @@ Output ONLY a valid JSON array. No other text. If no valid entities found, outpu
 
 Text:`;
 
-const DESCRIBE_PROMPT = `You are a D&D 5e content extractor. Extract ALL information about the specified entity from the given text passages.
-
-Rules:
-- Include ALL details: lore, mechanics, stats, features, traits, rules, descriptions
-- Do NOT summarize — preserve the complete information from the source
-- Keep the text in its original language
-- Write clearly but preserve all content. Use paragraphs and lists where appropriate.`;
-
 type RawExtractedEntity = {
   type?: string;
   name?: string;
@@ -245,70 +237,4 @@ export async function identifyEntities(
   }
 
   return mergeEntities(allEntities);
-}
-
-export async function enrichDescriptions(
-  entities: readonly EntityInput[],
-  chunkMap: Map<string, ExtractionChunk>,
-): Promise<EntityInput[]> {
-  const result: EntityInput[] = [];
-
-  for (let i = 0; i < entities.length; i++) {
-    const entity = entities[i];
-    const entityChunks = entity.chunkIds
-      .map((id) => chunkMap.get(id))
-      .filter((c): c is ExtractionChunk => c !== undefined);
-
-    if (entityChunks.length === 0) {
-      result.push(entity);
-      continue;
-    }
-
-    const chunksText = entityChunks
-      .sort((a, b) => (a.pageNumber ?? 0) - (b.pageNumber ?? 0))
-      .map((c) => `[page ${c.pageNumber ?? "unknown"}]\n${c.text}`)
-      .join("\n\n---\n\n");
-
-    const messages: ChatMessage[] = [
-      { role: "system", content: DESCRIBE_PROMPT },
-      {
-        role: "user",
-        content: `Extract ALL information about "${entity.name}" (type: ${entity.entityType}) from the following passages:\n\n${chunksText}`,
-      },
-    ];
-
-    try {
-      const llmResult = await chatCompletion(messages, {
-        maxTokens: 4096,
-        temperature: 0.1,
-      });
-
-      result.push({
-        ...entity,
-        description: llmResult.content.trim() || assembleFallbackDescription(entityChunks),
-      });
-    } catch (err) {
-      console.warn(
-        `[entity-extract] Pass 2 failed for "${entity.name}":`,
-        err instanceof Error ? err.message : err,
-      );
-      result.push({
-        ...entity,
-        description: assembleFallbackDescription(entityChunks),
-      });
-    }
-
-    console.log(
-      `[entity-extract] Pass 2: enriched "${entity.name}" (${i + 1}/${entities.length})`,
-    );
-  }
-
-  return result;
-}
-
-function assembleFallbackDescription(chunks: readonly ExtractionChunk[]): string {
-  return [...chunks]
-    .sort((a, b) => (a.pageNumber ?? 0) - (b.pageNumber ?? 0))
-    .map((c) => c.text)
-    .join("\n\n");
 }

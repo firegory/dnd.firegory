@@ -1,4 +1,4 @@
-import { query } from "../db/client.ts";
+import { query, withTransaction } from "../db/client.ts";
 import type { EntityRecord, EntityInput, EntityType } from "./types.ts";
 
 export async function persistEntities(
@@ -272,62 +272,71 @@ export async function mergeEntities(
 ): Promise<void> {
   if (sourceIds.length === 0) return;
 
-  const allIds = [targetId, ...sourceIds];
-  const result = await query<EntityRow>(
-    "SELECT * FROM entities WHERE id = ANY($1) ORDER BY CASE WHEN id = $2 THEN 0 ELSE 1 END",
-    [allIds, targetId],
-  );
+  await withTransaction(async (client) => {
+    const allIds = [targetId, ...sourceIds];
+    const result = await client.query<EntityRow>(
+      "SELECT * FROM entities WHERE id = ANY($1) ORDER BY CASE WHEN id = $2 THEN 0 ELSE 1 END",
+      [allIds, targetId],
+    );
 
-  if (result.rows.length === 0) return;
+    if (result.rows.length === 0) return;
 
-  const target = rowToRecord(result.rows[0]);
-  const sources = result.rows.slice(1).map(rowToRecord);
+    const target = rowToRecord(result.rows[0]);
+    const sources = result.rows.slice(1).map(rowToRecord);
 
-  const mergedChunkIds = new Set<string>(target.chunkIds);
-  const mergedPageNumbers = new Set<number>(target.pageNumbers);
-  const descriptions = [target.description];
-  const mergedAttributes = { ...target.attributes } as Record<string, unknown>;
+    const mergedChunkIds = new Set<string>(target.chunkIds);
+    const mergedPageNumbers = new Set<number>(target.pageNumbers);
+    const descriptions = [target.description];
+    const mergedAttributes = { ...target.attributes } as Record<string, unknown>;
 
-  for (const src of sources) {
-    for (const id of src.chunkIds) mergedChunkIds.add(id);
-    for (const p of src.pageNumbers) mergedPageNumbers.add(p);
-    if (src.description && src.description !== target.description) {
-      descriptions.push(src.description);
-    }
-    const srcAttrs = src.attributes as Record<string, unknown>;
-    for (const [k, v] of Object.entries(srcAttrs)) {
-      if (v !== undefined && v !== null && v !== "" &&
-        (mergedAttributes[k] === undefined || mergedAttributes[k] === null || mergedAttributes[k] === "")) {
-        mergedAttributes[k] = v;
+    for (const src of sources) {
+      for (const id of src.chunkIds) mergedChunkIds.add(id);
+      for (const p of src.pageNumbers) mergedPageNumbers.add(p);
+      if (src.description && src.description !== target.description) {
+        descriptions.push(src.description);
+      }
+      const srcAttrs = src.attributes as Record<string, unknown>;
+      for (const [k, v] of Object.entries(srcAttrs)) {
+        if (Array.isArray(v) && v.length > 0) {
+          const existing = mergedAttributes[k];
+          if (Array.isArray(existing)) {
+            mergedAttributes[k] = [...new Set([...existing, ...v])];
+          } else if (existing === undefined || existing === null || existing === "") {
+            mergedAttributes[k] = v;
+          }
+        } else if (v !== undefined && v !== null && v !== "" &&
+          (mergedAttributes[k] === undefined || mergedAttributes[k] === null || mergedAttributes[k] === "")) {
+          mergedAttributes[k] = v;
+        }
       }
     }
-  }
 
-  await query(
-    `UPDATE entities SET
-      description = $1,
-      attributes = $2::jsonb,
-      page_numbers = $3::integer[],
-      chunk_ids = $4::uuid[]
-     WHERE id = $5`,
-    [
-      descriptions.filter(Boolean).join("\n\n"),
-      JSON.stringify(mergedAttributes),
-      Array.from(mergedPageNumbers).sort((a, b) => a - b),
-      Array.from(mergedChunkIds),
-      targetId,
-    ],
-  );
+    await client.query(
+      `UPDATE entities SET
+        description = $1,
+        attributes = $2::jsonb,
+        page_numbers = $3::integer[],
+        chunk_ids = $4::uuid[]
+       WHERE id = $5`,
+      [
+        descriptions.filter(Boolean).join("\n\n"),
+        JSON.stringify(mergedAttributes),
+        Array.from(mergedPageNumbers).sort((a, b) => a - b),
+        Array.from(mergedChunkIds),
+        targetId,
+      ],
+    );
 
-  await query(
-    "UPDATE entities SET parent_entity_id = $1 WHERE parent_entity_id = ANY($2)",
-    [targetId, sourceIds],
-  );
+    await client.query(
+      "UPDATE entities SET parent_entity_id = $1 WHERE parent_entity_id = ANY($2)",
+      [targetId, sourceIds],
+    );
 
-  await query(
-    "DELETE FROM entities WHERE id = ANY($1)",
-    [sourceIds],
-  );
+    await client.query(
+      "DELETE FROM entities WHERE id = ANY($1)",
+      [sourceIds],
+    );
+  });
 }
 
 export async function listEntitiesForMerge(
@@ -343,7 +352,7 @@ export async function listEntitiesForMerge(
   }
 
   const result = await query<EntityRow>(
-    `SELECT e.* FROM entities e WHERE ${conditions.join(" AND ")} ORDER BY e.name`,
+    `SELECT e.* FROM entities e WHERE ${conditions.join(" AND ")} ORDER BY e.name LIMIT 500`,
     values,
   );
   return result.rows.map(rowToRecord);
