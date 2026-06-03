@@ -31,6 +31,11 @@ REDIS_URL=redis://redis:6379
 AUTH_SECRET=your-random-secret-at-least-32-chars  # reserved for future use
 ZAI_API_KEY=your-zai-api-key
 
+# LLM (answer generation)
+LLM_API_KEY=your-llm-api-key
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o-mini
+
 # App URLs
 APP_URL=https://dnd.firegory.site
 NEXT_PUBLIC_APP_URL=https://dnd.firegory.site

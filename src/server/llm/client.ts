@@ -32,18 +32,15 @@ export function getLlmConfig(): LlmConfig {
   const baseUrl = (
     process.env.LLM_BASE_URL ?? process.env.ZAI_LLM_BASE_URL ?? DEFAULT_LLM_CONFIG.baseUrl
   ).replace(/\/+$/, "");
-  const maxTokens = parseInt(
-    process.env.LLM_MAX_TOKENS ?? process.env.ZAI_LLM_MAX_TOKENS ?? String(DEFAULT_LLM_CONFIG.maxTokens),
-    10,
-  );
-  const temperature = parseFloat(
-    process.env.LLM_TEMPERATURE ?? process.env.ZAI_LLM_TEMPERATURE ?? "0.2",
-  );
+  const maxTokensStr = process.env.LLM_MAX_TOKENS ?? process.env.ZAI_LLM_MAX_TOKENS ?? String(DEFAULT_LLM_CONFIG.maxTokens);
+  const maxTokens = parseInt(maxTokensStr, 10);
+  const temperatureStr = process.env.LLM_TEMPERATURE ?? process.env.ZAI_LLM_TEMPERATURE ?? "0.2";
+  const temperature = parseFloat(temperatureStr);
   if (!Number.isFinite(maxTokens)) {
-    throw new Error(`Invalid LLM_MAX_TOKENS: ${process.env.LLM_MAX_TOKENS}`);
+    throw new Error(`Invalid LLM_MAX_TOKENS: ${maxTokensStr}`);
   }
   if (!Number.isFinite(temperature)) {
-    throw new Error(`Invalid LLM_TEMPERATURE: ${process.env.LLM_TEMPERATURE}`);
+    throw new Error(`Invalid LLM_TEMPERATURE: ${temperatureStr}`);
   }
   return {
     ...DEFAULT_LLM_CONFIG,
@@ -162,9 +159,11 @@ function isPrivateUrl(baseUrl: string): boolean {
   try {
     const url = new URL(baseUrl);
     const h = url.hostname;
-    return h === "localhost" || h === "127.0.0.1" || h === "::1" ||
-      h.startsWith("192.168.") || h.startsWith("10.") || h.startsWith("172.16.") ||
-      h.endsWith(".local") || h.endsWith(".home");
+    if (h === "localhost" || h === "127.0.0.1" || h === "::1" ||
+      h.startsWith("192.168.") || h.startsWith("10.") ||
+      h.endsWith(".local") || h.endsWith(".home")) return true;
+    if ((/^172\.(1[6-9]|2\d|3[01])\./).test(h)) return true;
+    return false;
   } catch {
     return false;
   }
