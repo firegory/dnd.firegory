@@ -47,7 +47,9 @@ Minimal `.env.local` for bare-metal:
 ```bash
 DATABASE_URL=postgres://<user>:<password>@localhost:5432/dnd_firegory
 REDIS_URL=redis://127.0.0.1:6379
-ZAI_API_KEY=your-zai-api-key
+LLM_API_KEY=your-llm-api-key
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o-mini
 
 # Optional: use Ollama for embeddings instead of z.ai
 # EMBEDDING_PROVIDER=ollama
@@ -104,7 +106,7 @@ See [docs/deployment.md](docs/deployment.md) for the full deployment guide.
 Browser → Next.js app/API → Postgres (pgvector)
                             → Redis queue
                             → File storage
-                            → z.ai LLM/embedding/rerank
+                            → LLM provider (configurable)
 
 Worker  → Redis queue → PDF/OCR tools → Postgres → File storage
 ```
@@ -214,7 +216,10 @@ cp .env.example .env.local
 | `APP_URL` | no | Public app URL (default: `http://localhost:3000`) |
 | `NEXT_PUBLIC_APP_URL` | no | Public app URL exposed to the browser |
 | `AUTH_SECRET` | no | Reserved for future session secret hardening |
-| `ZAI_API_KEY` | yes* | z.ai API key for LLM answer generation and optional z.ai embeddings (*required for answer generation) |
+| `ZAI_API_KEY` | yes* | z.ai API key for z.ai embeddings (*required when using z.ai as embedding provider) |
+| `LLM_API_KEY` | yes* | API key for the LLM chat provider (*required for answer generation unless using a local endpoint) |
+| `LLM_BASE_URL` | no | LLM API base URL (default: `https://api.openai.com/v1`) |
+| `LLM_MODEL` | no | LLM model name (default: `gpt-4o-mini`) |
 | `STORAGE_ROOT` | no | Root directory for file storage (default: `./storage`) |
 | `APP_PORT` | no | Host port for the app in Docker Compose (default: `3000`) |
 | `POSTGRES_DB` | no | PostgreSQL database name (default: `dnd_firegory`) |
@@ -283,12 +288,12 @@ Overrides for vector search. Falls back to generic config if not set.
 ### Example `.env.local` for Ollama deployment
 
 ```bash
-# LLM
-ZAI_API_KEY=your-zai-api-key
-ZAI_LLM_BASE_URL=https://api.z.ai/api/paas/v4
-ZAI_LLM_MODEL=glm-5.1
+# LLM (self-hosted OpenAI-compatible)
+LLM_API_KEY=
+LLM_BASE_URL=http://192.168.0.10:11434/v1
+LLM_MODEL=qwen3.6-q8
 
-# Generic embedding fallback: Ollama
+# Embedding: Ollama
 EMBEDDING_PROVIDER=ollama
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_EMBEDDING_MODEL=bge-m3

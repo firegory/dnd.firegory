@@ -4,7 +4,8 @@
  * POST /api/answer
  *
  * Accepts a query with optional corpus filters, runs hybrid retrieval
- * with access control, and generates a citation-first answer using z.ai.
+ * with access control, and generates a citation-first answer using the
+ * configured LLM provider.
  */
 
 import { NextResponse } from "next/server";
@@ -107,7 +108,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       error instanceof Error ? error.message : "Answer generation failed";
 
     // Check for API key config errors specifically
-    if (message.includes("ZAI_API_KEY")) {
+    if (message.includes("LLM_API_KEY is not configured")) {
       return NextResponse.json(
         { error: "Answer generation is not configured." },
         { status: 503 },

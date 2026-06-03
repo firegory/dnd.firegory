@@ -157,7 +157,8 @@ Before deployment, confirm:
 
 - [ ] `DATABASE_URL` points to Postgres with pgvector extension
 - [ ] `REDIS_URL` points to running Redis instance
-- [ ] `ZAI_API_KEY` is set for embedding + answer generation
+- [ ] `ZAI_API_KEY` is set for embedding generation (when using z.ai provider)
+- [ ] `LLM_API_KEY` is set for answer generation
 - [ ] `AUTH_SECRET` is set for session token hashing
 - [ ] `STORAGE_ROOT` points to writable directory with sufficient disk space
 - [ ] Worker process has access to OCR tools: `ocrmypdf`, `tesseract` (eng+rus), `poppler-utils`, `qpdf`, `ghostscript`
