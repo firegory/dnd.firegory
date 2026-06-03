@@ -108,7 +108,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       error instanceof Error ? error.message : "Answer generation failed";
 
     // Check for API key config errors specifically
-    if (message.includes("LLM_API_KEY") || message.includes("not configured")) {
+    if (message.includes("LLM_API_KEY is not configured")) {
       return NextResponse.json(
         { error: "Answer generation is not configured." },
         { status: 503 },

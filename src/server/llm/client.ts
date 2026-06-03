@@ -29,9 +29,16 @@ const DEFAULT_LLM_CONFIG: LlmConfig = {
  * Gets the LLM configuration from environment variables.
  */
 export function getLlmConfig(): LlmConfig {
-  const baseUrl = (process.env.LLM_BASE_URL ?? DEFAULT_LLM_CONFIG.baseUrl).replace(/\/+$/, "");
-  const maxTokens = parseInt(process.env.LLM_MAX_TOKENS ?? String(DEFAULT_LLM_CONFIG.maxTokens), 10);
-  const temperature = parseFloat(process.env.LLM_TEMPERATURE ?? "0.2");
+  const baseUrl = (
+    process.env.LLM_BASE_URL ?? process.env.ZAI_LLM_BASE_URL ?? DEFAULT_LLM_CONFIG.baseUrl
+  ).replace(/\/+$/, "");
+  const maxTokens = parseInt(
+    process.env.LLM_MAX_TOKENS ?? process.env.ZAI_LLM_MAX_TOKENS ?? String(DEFAULT_LLM_CONFIG.maxTokens),
+    10,
+  );
+  const temperature = parseFloat(
+    process.env.LLM_TEMPERATURE ?? process.env.ZAI_LLM_TEMPERATURE ?? "0.2",
+  );
   if (!Number.isFinite(maxTokens)) {
     throw new Error(`Invalid LLM_MAX_TOKENS: ${process.env.LLM_MAX_TOKENS}`);
   }
@@ -40,9 +47,9 @@ export function getLlmConfig(): LlmConfig {
   }
   return {
     ...DEFAULT_LLM_CONFIG,
-    apiKey: process.env.LLM_API_KEY ?? "",
+    apiKey: process.env.LLM_API_KEY ?? process.env.ZAI_API_KEY ?? "",
     baseUrl,
-    model: process.env.LLM_MODEL ?? DEFAULT_LLM_CONFIG.model,
+    model: process.env.LLM_MODEL ?? process.env.ZAI_LLM_MODEL ?? DEFAULT_LLM_CONFIG.model,
     maxTokens,
     temperature,
   };
@@ -140,11 +147,24 @@ async function ollamaChatCompletion(
 }
 
 function isTgiEndpoint(baseUrl: string): boolean {
+  if (process.env.LLM_PROVIDER === "tgi") return true;
+  if (process.env.LLM_PROVIDER && process.env.LLM_PROVIDER !== "tgi") return false;
   try {
     const url = new URL(baseUrl);
     return url.hostname.includes("huggingface") ||
-      url.hostname.includes("hf.co") ||
-      url.hostname.includes("bekendesite");
+      url.hostname.includes("hf.co");
+  } catch {
+    return false;
+  }
+}
+
+function isPrivateUrl(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    const h = url.hostname;
+    return h === "localhost" || h === "127.0.0.1" || h === "::1" ||
+      h.startsWith("192.168.") || h.startsWith("10.") || h.startsWith("172.16.") ||
+      h.endsWith(".local") || h.endsWith(".home");
   } catch {
     return false;
   }
@@ -232,7 +252,7 @@ export async function chatCompletion(
     return openAiChatCompletion(messages, cfg);
   }
 
-  if (!cfg.apiKey) {
+  if (!cfg.apiKey && !isPrivateUrl(cfg.baseUrl)) {
     throw new Error("LLM_API_KEY is not configured");
   }
 
