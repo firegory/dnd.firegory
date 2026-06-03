@@ -9,11 +9,19 @@ const PUBLIC_PATHS = new Set([
   "/favicon.ico",
 ]);
 
+const WEBHOOK_PATHS = new Set([
+  "/api/telegram/webhook",
+]);
+
 function isPublic(pathname: string): boolean {
   if (PUBLIC_PATHS.has(pathname)) return true;
   if (pathname.startsWith("/_next/")) return true;
   if (pathname.startsWith("/login") || pathname.startsWith("/register")) return true;
   return false;
+}
+
+function isWebhook(pathname: string): boolean {
+  return WEBHOOK_PATHS.has(pathname);
 }
 
 function isApiRoute(pathname: string): boolean {
@@ -24,6 +32,10 @@ export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   if (isPublic(pathname)) {
+    return NextResponse.next();
+  }
+
+  if (isWebhook(pathname)) {
     return NextResponse.next();
   }
 
