@@ -1,13 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { generateLinkTokenAction, unlinkTelegramAction } from "./page";
+import { generateLinkTokenAction, unlinkTelegramAction } from "./actions";
 
 export function SettingsClient({
-  userId,
   isLinked: initialLinked,
 }: {
-  userId: string;
   isLinked: boolean;
 }) {
   const [isLinked, setIsLinked] = useState(initialLinked);

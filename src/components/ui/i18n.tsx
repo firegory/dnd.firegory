@@ -12,6 +12,7 @@ const translations = {
   ru: {
     nav: "Навигация",
     search: "Поиск",
+    settings: "Настройки",
     sources: "Источники",
     upload: "Загрузка",
     users: "Пользователи",
@@ -174,6 +175,7 @@ const translations = {
   en: {
     nav: "Navigation",
     search: "Search",
+    settings: "Settings",
     sources: "Sources",
     upload: "Upload",
     users: "Users",
