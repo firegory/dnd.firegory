@@ -1,6 +1,7 @@
 import type { SourceCitation } from "../rag/format";
 
 const TG_MAX_LENGTH = 4096;
+const TG_MARGIN = 100;
 
 export function formatAnswer(
   answer: string,
@@ -17,8 +18,8 @@ export function formatAnswer(
       const source = formatCitation(c);
       const addition = `\n\n${source}`;
 
-      if (msg.length + addition.length > TG_MAX_LENGTH - 100) {
-        parts.push(msg);
+      if (msg.length + addition.length > TG_MAX_LENGTH - TG_MARGIN) {
+        parts.push(closeOpenTags(msg));
         msg = `<b>Sources (continued)</b>${addition}`;
       } else {
         msg += addition;
@@ -27,10 +28,29 @@ export function formatAnswer(
   }
 
   if (msg.trim()) {
-    parts.push(msg);
+    parts.push(closeOpenTags(msg));
   }
 
   return parts.length > 0 ? parts : ["No answer generated."];
+}
+
+function closeOpenTags(msg: string): string {
+  const openCount = countOccurrences(msg, "<blockquote>");
+  const closeCount = countOccurrences(msg, "</blockquote>");
+  for (let i = 0; i < openCount - closeCount; i++) {
+    msg += "</blockquote>";
+  }
+  return msg;
+}
+
+function countOccurrences(str: string, substr: string): number {
+  let count = 0;
+  let pos = 0;
+  while ((pos = str.indexOf(substr, pos)) !== -1) {
+    count++;
+    pos += substr.length;
+  }
+  return count;
 }
 
 function formatCitation(c: SourceCitation): string {

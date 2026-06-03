@@ -17,10 +17,10 @@ export default async function SettingsPage() {
 
         <section className="rounded-xl border border-border bg-surface p-6">
           <h2 className="text-lg font-semibold text-text-primary">
-            Telegram
+            <T k="telegramSectionTitle" />
           </h2>
           <p className="mt-1 text-sm text-text-muted">
-            Link your Telegram account to search the D&D knowledge base from any device.
+            <T k="telegramSectionDescription" />
           </p>
 
           <div className="mt-6">

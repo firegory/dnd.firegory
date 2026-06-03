@@ -1,4 +1,5 @@
 const TELEGRAM_API_BASE = "https://api.telegram.org/bot";
+const FETCH_TIMEOUT_MS = 10_000;
 
 function getBotToken(): string {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -10,10 +11,14 @@ function apiUrl(method: string): string {
   return `${TELEGRAM_API_BASE}${getBotToken()}/${method}`;
 }
 
+function abortTimeout(ms: number = FETCH_TIMEOUT_MS): AbortSignal {
+  return AbortSignal.timeout(ms);
+}
+
 export type TelegramMessage = {
   message_id: number;
   chat: { id: number; type: string };
-  from?: { id: number; first_name?: string; username?: string };
+  from?: { id: number; first_name?: string; username?: string; language_code?: string };
   text?: string;
 };
 
@@ -35,6 +40,7 @@ export async function sendMessage(
       text,
       parse_mode: options?.parse_mode ?? "HTML",
     }),
+    signal: abortTimeout(),
   });
 
   if (!response.ok) {
@@ -54,6 +60,7 @@ export async function setWebhook(
       url,
       secret_token: secretToken,
     }),
+    signal: abortTimeout(),
   });
 
   const result = await response.json();
@@ -62,18 +69,4 @@ export async function setWebhook(
   }
 
   console.log("[telegram] webhook set:", url);
-}
-
-export async function deleteWebhook(): Promise<void> {
-  await fetch(apiUrl("deleteWebhook"), { method: "POST" });
-}
-
-export async function getWebhookInfo(): Promise<Record<string, unknown>> {
-  const response = await fetch(apiUrl("getWebhookInfo"));
-  return response.json() as Promise<Record<string, unknown>>;
-}
-
-export async function getMe(): Promise<Record<string, unknown>> {
-  const response = await fetch(apiUrl("getMe"));
-  return response.json() as Promise<Record<string, unknown>>;
 }

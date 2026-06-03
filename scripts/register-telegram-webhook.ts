@@ -1,4 +1,4 @@
-import { setWebhook } from "../src/server/telegram/client";
+import { setWebhook } from "../src/server/telegram/client.ts";
 
 const PUBLIC_URL = process.env.APP_URL ?? "https://dnd.firegory.site";
 const SECRET = process.env.TELEGRAM_SECRET_TOKEN;
