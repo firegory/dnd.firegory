@@ -2,7 +2,7 @@
  * RAG answer generation pipeline.
  *
  * Takes a user query, runs hybrid retrieval, constructs a citation-first
- * prompt, calls the z.ai LLM, and extracts structured citations from
+ * prompt, calls the configured LLM, and extracts structured citations from
  * the response.
  *
  * Design principles:
@@ -14,7 +14,7 @@
  */
 
 import { hybridSearch, type HybridSearchResult } from "../retrieval/pipeline";
-import { chatCompletion, type ChatMessage, type LlmConfig } from "../llm/zai";
+import { chatCompletion, type ChatMessage, type LlmConfig } from "../llm/client";
 import type { RetrievalUser, RetrievalSelection } from "../access/retrieval-filter";
 import {
   buildSystemPrompt,
@@ -90,7 +90,7 @@ const MIN_CHUNKS_FOR_CONFIDENT_ANSWER = 1;
  * 1. Run hybrid retrieval with access filters.
  * 2. If insufficient results, return a no-support answer immediately.
  * 3. Build citation-first prompt from retrieval results.
- * 4. Call z.ai LLM.
+ * 4. Call the configured LLM.
  * 5. Parse structured response and map citations.
  */
 export async function generateAnswer(
