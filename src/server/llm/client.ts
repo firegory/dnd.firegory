@@ -143,13 +143,13 @@ async function ollamaChatCompletion(
   };
 }
 
-function isTgiEndpoint(baseUrl: string): boolean {
-  if (process.env.LLM_PROVIDER === "tgi") return true;
-  if (process.env.LLM_PROVIDER && process.env.LLM_PROVIDER !== "tgi") return false;
+function needsThinkingDisabled(baseUrl: string): boolean {
+  if (process.env.LLM_DISABLE_THINKING === "true") return true;
   try {
     const url = new URL(baseUrl);
     return url.hostname.includes("huggingface") ||
-      url.hostname.includes("hf.co");
+      url.hostname.includes("hf.co") ||
+      url.hostname.includes("bekendesite");
   } catch {
     return false;
   }
@@ -187,7 +187,7 @@ async function openAiChatCompletion(
     temperature: cfg.temperature,
   };
 
-  if (isTgiEndpoint(cfg.baseUrl)) {
+  if (needsThinkingDisabled(cfg.baseUrl)) {
     body.chat_template_kwargs = { enable_thinking: false };
   }
 
