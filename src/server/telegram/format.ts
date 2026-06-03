@@ -15,7 +15,7 @@ export function formatAnswer(
     for (let i = 0; i < citations.length; i++) {
       const c = citations[i];
       const source = formatCitation(c);
-      const addition = `\n${i + 1}. ${source}`;
+      const addition = `\n\n${source}`;
 
       if (msg.length + addition.length > TG_MAX_LENGTH - 100) {
         parts.push(msg);
@@ -34,7 +34,7 @@ export function formatAnswer(
 }
 
 function formatCitation(c: SourceCitation): string {
-  let text = `"<i>${escapeHtml(truncate(c.quote, 200))}</i>"`;
+  const quote = truncate(c.quote, 200);
 
   const meta: string[] = [];
   if (c.sourceTitle && c.sourceTitle !== "Unknown") {
@@ -44,11 +44,9 @@ function formatCitation(c: SourceCitation): string {
   if (c.page != null) meta.push(`p.${c.page}`);
   if (c.section) meta.push(escapeHtml(c.section));
 
-  if (meta.length > 0) {
-    text += `\n   — ${meta.join(", ")}`;
-  }
+  const metaLine = meta.length > 0 ? `\n— ${meta.join(", ")}` : "";
 
-  return text;
+  return `<blockquote>${escapeHtml(quote)}${metaLine}</blockquote>`;
 }
 
 function escapeHtml(text: string): string {
