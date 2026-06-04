@@ -107,23 +107,10 @@ export async function hybridSearch(
   const filter = buildRetrievalAuthorizationFilter(user, selection);
   const { sql: accessSql, params: accessParams } = buildSourceAccessSql(filter);
 
-  // Vector search is semantic and language-agnostic — the embedding model handles
-  // cross-language similarity. Omit the language filter so a Russian query can
-  // find chunks in an English source (and vice versa). Keyword search keeps the
-  // language filter because it matches exact text.
-  const filterNoLanguage = { ...filter, language: undefined };
-  const { sql: vectorAccessSql, params: vectorAccessParams } = buildSourceAccessSql(filterNoLanguage);
-
-  const keywordParams: RetrievalParams = {
+  const retrievalParams: RetrievalParams = {
     limit: strategyLimit,
     accessSql,
     accessParams,
-  };
-
-  const vectorParams: RetrievalParams = {
-    limit: strategyLimit,
-    accessSql: vectorAccessSql,
-    accessParams: vectorAccessParams,
   };
 
   // 2. Expand query (static glossary for keyword search)
@@ -143,8 +130,8 @@ export async function hybridSearch(
 
   // 4. Run keyword search in parallel with LLM rewrite + vector search
   const [keywordResults, vectorResults] = await Promise.all([
-    keywordSearch(expandedQueryText, keywordParams),
-    rewritePromise.then(({ vectorQueries }) => vectorSearch(vectorQueries, vectorParams)),
+    keywordSearch(expandedQueryText, retrievalParams),
+    rewritePromise.then(({ vectorQueries }) => vectorSearch(vectorQueries, retrievalParams)),
   ]);
 
   const { rewrite } = await rewritePromise;
