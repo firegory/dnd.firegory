@@ -57,9 +57,18 @@ export type HybridSearchResult = Readonly<{
   hasMore: boolean;
   /** Query expansions used (for diagnostics). */
   expansions: readonly { text: string; reason: string; weight: number }[];
-  /** LLM rewrite result (null if disabled or failed). */
+  /**
+   * LLM rewrite result. Null when rewriting is disabled.
+   * When the LLM call fails, contains a fallback with original query
+   * as canonical and empty bilingual/expanded arrays.
+   */
   rewrite: RewrittenQuery | null;
 }>;
+
+type RewriteOutput = {
+  rewrite: RewrittenQuery;
+  vectorQueries: string[];
+};
 
 /**
  * Executes the full hybrid retrieval pipeline.
@@ -109,21 +118,23 @@ export async function hybridSearch(
   const expandedQueryText = combinedExpandedQuery(expansions);
 
   // 3. Rewrite query via LLM (parallel with keyword search)
-  let rewrite: RewrittenQuery | null = null;
-  let vectorQueries: string[] = [searchQuery];
+  const rewritePromise: Promise<RewriteOutput> = rewriteEnabled
+    ? rewriteQuery(searchQuery).then((rewrite) => ({
+        rewrite,
+        vectorQueries: collectVectorQueries(rewrite),
+      }))
+    : Promise.resolve({
+        rewrite: { original: searchQuery, canonical: searchQuery, bilingual: [], expanded: [] },
+        vectorQueries: [searchQuery],
+      });
 
-  const rewritePromise = rewriteEnabled
-    ? rewriteQuery(searchQuery).then((result) => {
-        rewrite = result;
-        vectorQueries = collectVectorQueries(result);
-      })
-    : Promise.resolve();
-
-  // 4. Run keyword search in parallel with LLM rewrite
+  // 4. Run keyword search in parallel with LLM rewrite + vector search
   const [keywordResults, vectorResults] = await Promise.all([
     keywordSearch(expandedQueryText, retrievalParams),
-    rewritePromise.then(() => vectorSearch(vectorQueries, retrievalParams)),
+    rewritePromise.then(({ vectorQueries }) => vectorSearch(vectorQueries, retrievalParams)),
   ]);
+
+  const { rewrite } = await rewritePromise;
 
   // 5. Merge with RRF
   const mergeLimit = safeLimit * 3;
@@ -148,6 +159,6 @@ export async function hybridSearch(
       reason: e.reason,
       weight: e.weight,
     })),
-    rewrite,
+    rewrite: rewriteEnabled ? rewrite : null,
   };
 }

@@ -6,7 +6,7 @@
  * vectors for broader recall in vector search.
  */
 
-import { chatCompletion, type ChatMessage } from "../llm/client";
+import { chatCompletion, getLlmConfig, type ChatMessage } from "../llm/client.ts";
 
 export type RewrittenQuery = Readonly<{
   /** The original user query. */
@@ -96,7 +96,25 @@ export async function rewriteQuery(query: string): Promise<RewrittenQuery> {
 
   const key = cacheKey(trimmed);
   const cached = rewriteCache.get(key);
-  if (cached) return cached;
+  if (cached) {
+    rewriteCache.delete(key);
+    rewriteCache.set(key, cached);
+    return cached;
+  }
+
+  const llmConfig = getLlmConfig();
+  if (!llmConfig.apiKey) {
+    try {
+      const url = new URL(llmConfig.baseUrl);
+      const isPrivate = url.hostname === "localhost" || url.hostname === "127.0.0.1"
+        || url.hostname.endsWith(".local") || url.hostname.endsWith(".home");
+      if (!isPrivate) {
+        return { original: trimmed, canonical: trimmed, bilingual: [], expanded: [] };
+      }
+    } catch {
+      return { original: trimmed, canonical: trimmed, bilingual: [], expanded: [] };
+    }
+  }
 
   const messages: ChatMessage[] = [
     { role: "system", content: REWRITE_SYSTEM_PROMPT },
@@ -137,6 +155,7 @@ export function collectVectorQueries(rewritten: RewrittenQuery): string[] {
     rewritten.original,
     rewritten.canonical,
     ...rewritten.bilingual,
+    ...rewritten.expanded,
   ];
 
   for (const q of candidates) {

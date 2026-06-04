@@ -4,10 +4,12 @@
  * Generates embeddings for one or more query texts, performs nearest-neighbor
  * search against the HNSW index on `chunks.embedding` for each, and merges
  * results via deduplication with best-score wins.
+ *
+ * Accepts either a single query string or an array for backward compatibility.
  */
 
 import { query } from "../db/client";
-import { generateEmbedding, getQueryEmbeddingConfig } from "../embeddings/provider";
+import { generateEmbedding, generateEmbeddings, getQueryEmbeddingConfig } from "../embeddings/provider";
 import type { RetrievalCandidate, RetrievalParams } from "./types";
 
 type VectorRow = {
@@ -45,16 +47,20 @@ function rowToCandidate(row: VectorRow): RetrievalCandidate {
   };
 }
 
-async function embedQuery(searchQuery: string): Promise<readonly number[] | null> {
+async function batchEmbed(queries: readonly string[]): Promise<(readonly number[] | null)[]> {
   const config = getQueryEmbeddingConfig();
   if (config.provider !== "ollama" && !config.apiKey) {
-    return null;
+    return queries.map(() => null);
   }
+
   try {
-    const result = await generateEmbedding(searchQuery, config);
-    return result.embedding;
+    if (config.provider === "ollama" && queries.length > 1) {
+      const results = await generateEmbeddings([...queries], config);
+      return results.map((r) => r.embedding);
+    }
+    return await Promise.all(queries.map((q) => generateEmbedding(q, config).then((r) => r.embedding)));
   } catch {
-    return null;
+    return queries.map(() => null);
   }
 }
 
@@ -99,38 +105,44 @@ async function searchByEmbedding(
  * neighbor search. Results are merged by chunkId, keeping the best (highest)
  * score per chunk across all query variants.
  *
+ * Accepts a single string or an array for backward compatibility.
  * Falls back gracefully if embedding generation fails for any or all queries.
  */
 export async function vectorSearch(
-  searchQueries: readonly string[],
+  searchQueries: string | readonly string[],
   params: RetrievalParams,
 ): Promise<readonly RetrievalCandidate[]> {
-  const uniqueQueries = [...new Set(
-    searchQueries
-      .map((q) => q.trim())
-      .filter((q) => q.length > 0),
-  )];
+  const queries = (typeof searchQueries === "string" ? [searchQueries] : [...searchQueries])
+    .map((q) => q.trim())
+    .filter((q) => q.length > 0);
+
+  const seen = new Set<string>();
+  const uniqueQueries: string[] = [];
+  for (const q of queries) {
+    const key = q.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      uniqueQueries.push(q);
+    }
+  }
 
   if (uniqueQueries.length === 0) {
     return [];
   }
 
-  const embeddings = await Promise.all(uniqueQueries.map(embedQuery));
+  const embeddings = await batchEmbed(uniqueQueries);
 
-  const validPairs: [string, readonly number[]][] = [];
-  for (let i = 0; i < embeddings.length; i++) {
-    const emb = embeddings[i];
-    if (emb) {
-      validPairs.push([uniqueQueries[i], emb]);
-    }
+  const validEmbeddings: (readonly number[])[] = [];
+  for (const emb of embeddings) {
+    if (emb) validEmbeddings.push(emb);
   }
 
-  if (validPairs.length === 0) {
+  if (validEmbeddings.length === 0) {
     return [];
   }
 
   const allResults = await Promise.all(
-    validPairs.map(([, emb]) => searchByEmbedding(emb, params)),
+    validEmbeddings.map((emb) => searchByEmbedding(emb, params)),
   );
 
   if (allResults.length === 1) {
