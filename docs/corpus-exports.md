@@ -14,15 +14,17 @@ npm run corpus-export -- validate [--data-root <path>] [--export <export-id>]
 
 `generate` uses the same #102 resolver as NFS index synchronization. It folds valid activation deltas and validates the repository manifest, declared JSON Schemas, canonical revision identities, source records, citations, and source-file hashes before writing an export. No database connection is made.
 
-By default, `exports/latest.json` supplies the incremental comparison boundary. `--from` selects an immutable earlier export explicitly. The first export is a full boundary: every active entry is an addition. `--no-latest` creates and validates the immutable export without changing the latest pointer.
+By default, the versioned `exports/latest.json` reader contract and greatest valid record under `exports/latest/` supply the incremental comparison boundary. `--from` selects an immutable earlier export explicitly. The first export is a full boundary: every active entry is an addition. `--no-latest` creates and validates the immutable export without publishing a latest record.
 
-`validate` defaults to the export referenced by `latest.json`. It is also database-free.
+`validate` defaults to the export referenced by the greatest valid latest record. It is also database-free.
 
 ## Layout
 
 ```text
 $DND_DATA_ROOT/exports/
-  latest.json                       atomic pointer to one validated export
+  latest.json                       immutable versioned reader descriptor
+  latest/
+    <32-digit-generation>.json      immutable validated latest-pointer records
   corpus-<sha256>/
     manifest.json                   artifact hashes, byte sizes, boundary, provenance
     catalog.json                    ordered active revisions, sources, schema versions/hashes
@@ -56,6 +58,8 @@ Validation loads the declared predecessor export, recursively validates its chai
 
 Generation writes and `fsync`s every artifact in a private staging directory, validates the complete staged export, atomically renames it to its immutable content-derived directory, and `fsync`s `exports/`. Export directories and artifacts must be physical no-follow children of `exports`; symbolic links and escaping paths are rejected.
 
-Latest publication acquires an exclusive filesystem fence, compares the current pointer with the pointer observed before generation, rejects lower canonical activation generations, and re-resolves the canonical NFS snapshot while holding the fence. Only then does it write and `fsync` a temporary pointer, atomically rename that file to `latest.json`, and `fsync` the directory again. A paused stale generator therefore cannot replace a newer pointer. Readers see either the previous complete validated export or the new complete validated export, never a partial or regressed publication.
+`latest.json` is an immutable descriptor with an explicit reader contract version. Current state is represented only by complete immutable records under `latest/`. Readers validate records independently and choose the greatest valid fixed-width publication generation; corrupt files, symlinks, malformed generation names, and crash temporaries are inert.
+
+Latest publication re-resolves the canonical NFS snapshot immediately before preparing a record and rejects lower canonical activation generations. It writes and `fsync`s a unique temporary record, then atomically hard-links it to the next unoccupied generation. A collision causes the writer to rescan and repeat canonical/latest validation before trying another generation. Recognized occupied generation names are tombstones, so corrupt records cannot be reused, while a far corrupt name cannot force the allocation floor forward. There is no lease or crash-persistent lock: process death can leave only an ignored temporary, and a later publisher proceeds immediately. A paused stale writer either collides with the newer record and fails its repeated canonical check or publishes a lower generation that readers permanently supersede.
 
 The canonical repository's worker-only write and NFS rename/durability assumptions also apply to exports. Agents should mount the repository read-only and must enforce source access metadata before exposing exported personal or premium content.

@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm } from "node:fs/promises";
+import { link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm } from "node:fs/promises";
 import { basename, dirname, relative, resolve, sep } from "node:path";
 
 import {
   canonicalJson,
+  formatPublicationGeneration,
   getDataRoot,
   type CanonicalRevision,
   type ContentSource,
@@ -19,6 +20,7 @@ import {
 } from "../content-storage/validation.ts";
 
 export const CORPUS_EXPORT_SCHEMA_VERSION = 2 as const;
+export const CORPUS_LATEST_READER_CONTRACT_VERSION = 1 as const;
 
 const EXPORT_ID = /^corpus-[0-9a-f]{64}$/;
 const HASH = /^sha256:[0-9a-f]{64}$/;
@@ -71,12 +73,22 @@ type CorpusExportManifest = Readonly<{
 type LatestPointer = Readonly<{
   schemaVersion: typeof CORPUS_EXPORT_SCHEMA_VERSION;
   kind: "corpusExportLatest";
+  readerContractVersion: typeof CORPUS_LATEST_READER_CONTRACT_VERSION;
   noncanonical: true;
+  publicationGeneration: string;
   exportId: string;
   catalogHash: string;
   repositoryGeneration: string | null;
   resolvedManifestHash: string;
   path: string;
+}>;
+
+type LatestDescriptor = Readonly<{
+  schemaVersion: typeof CORPUS_EXPORT_SCHEMA_VERSION;
+  kind: "corpusExportLatestDescriptor";
+  readerContractVersion: typeof CORPUS_LATEST_READER_CONTRACT_VERSION;
+  noncanonical: true;
+  recordsPath: "latest";
 }>;
 
 export type CorpusExportResult = Readonly<{
@@ -91,7 +103,7 @@ export async function generateCorpusExport(input: Readonly<{
   dataRoot?: string;
   fromExportId?: string;
   publishLatest?: boolean;
-  beforeLatestPublication?: () => void | Promise<void>;
+  afterLatestRecordPrepared?: () => void | Promise<void>;
 }> = {}): Promise<CorpusExportResult> {
   const root = await realpath(input.dataRoot ?? getDataRoot());
   const resolved = await loadResolvedCanonicalRevisions(root);
@@ -101,12 +113,10 @@ export async function generateCorpusExport(input: Readonly<{
   const catalog = await buildCatalog(root, resolved.manifest, resolved.generation, resolved.revisions);
   const catalogBytes = jsonFile(catalog);
   const catalogHash = hash(catalogBytes);
-  const initialLatest = await loadLatestPublication(exportsRoot);
   const previous = await resolvePreviousExport(exportsRoot, input.fromExportId);
   if (previous?.manifest.catalogHash === catalogHash) {
     if (input.publishLatest !== false) {
-      await input.beforeLatestPublication?.();
-      await publishLatest(root, exportsRoot, previous.manifest, initialLatest?.pointer ?? null);
+      await publishLatest(root, exportsRoot, previous.manifest, input.afterLatestRecordPrepared);
     }
     return result(previous.manifest.exportId, previous.path, catalogHash, true, previous.changes);
   }
@@ -126,8 +136,7 @@ export async function generateCorpusExport(input: Readonly<{
   const existing = await loadExportIfPresent(finalPath);
   if (existing) {
     if (input.publishLatest !== false) {
-      await input.beforeLatestPublication?.();
-      await publishLatest(root, exportsRoot, existing.manifest, initialLatest?.pointer ?? null);
+      await publishLatest(root, exportsRoot, existing.manifest, input.afterLatestRecordPrepared);
     }
     return result(exportId, finalPath, catalogHash, true, existing.changes);
   }
@@ -185,9 +194,8 @@ export async function generateCorpusExport(input: Readonly<{
   }
 
   if (input.publishLatest !== false) {
-    await input.beforeLatestPublication?.();
     const validated = await validateCorpusExport(finalPath);
-    await publishLatest(root, exportsRoot, validated.manifest, initialLatest?.pointer ?? null);
+    await publishLatest(root, exportsRoot, validated.manifest, input.afterLatestRecordPrepared);
   }
   return result(exportId, finalPath, catalogHash, false, changes);
 }
@@ -463,39 +471,49 @@ async function loadLatestPublication(exportsRoot: string): Promise<Readonly<{
   path: string;
   validated: Awaited<ReturnType<typeof validateCorpusExport>>;
 }> | null> {
-  const latestPath = resolve(exportsRoot, "latest.json");
-  let pointerText: string;
+  const descriptorPath = resolve(exportsRoot, "latest.json");
+  let descriptorText: string;
   try {
-    pointerText = (await readNoFollowFile(exportsRoot, latestPath, "latest.json")).toString("utf8");
+    descriptorText = (await readNoFollowFile(exportsRoot, descriptorPath, "latest.json")).toString("utf8");
   } catch (error) {
     if (hasCode(error, "ENOENT")) return null;
     throw error;
   }
-  const pointer = parseLatest(pointerText);
-  const path = resolve(exportsRoot, pointer.exportId);
-  const validated = await validateCorpusExport(path);
-  assertLatestMatches(pointer, validated.manifest);
-  return { pointer, path, validated };
+  parseLatestDescriptor(descriptorText);
+  const recordsRoot = await assertNoFollowDirectory(resolve(exportsRoot, "latest"), "Corpus latest records directory");
+  if (dirname(recordsRoot) !== exportsRoot) throw new ContentIntegrityError("Corpus latest records directory escapes exports.");
+
+  let latest: Readonly<{
+    pointer: LatestPointer;
+    path: string;
+    validated: Awaited<ReturnType<typeof validateCorpusExport>>;
+  }> | null = null;
+  for (const entry of (await readdir(recordsRoot, { withFileTypes: true })).sort((left, right) => compare(left.name, right.name))) {
+    if (!/^[0-9]{32}\.json$/.test(entry.name) || !entry.isFile()) continue;
+    try {
+      const pointer = parseLatest((await readNoFollowFile(exportsRoot, resolve(recordsRoot, entry.name), entry.name, recordsRoot)).toString("utf8"));
+      if (`${pointer.publicationGeneration}.json` !== entry.name) continue;
+      const path = resolve(exportsRoot, pointer.exportId);
+      const validated = await validateCorpusExport(path);
+      assertLatestMatches(pointer, validated.manifest);
+      if (!latest || pointer.publicationGeneration > latest.pointer.publicationGeneration) latest = { pointer, path, validated };
+    } catch {
+      // Immutable records are independently valid; malformed or escaping records are inert.
+    }
+  }
+  return latest;
 }
 
 async function publishLatest(
   root: string,
   exportsRoot: string,
   manifest: CorpusExportManifest,
-  expected: LatestPointer | null,
+  afterRecordPrepared?: () => void | Promise<void>,
 ): Promise<void> {
-  const lockPath = resolve(exportsRoot, ".latest.lock");
-  try {
-    await mkdir(lockPath, { mode: 0o750 });
-  } catch (error) {
-    if (hasCode(error, "EEXIST")) throw new ContentIntegrityError("Another corpus latest publication currently owns the filesystem fence.");
-    throw error;
-  }
-  try {
+  const recordsRoot = await ensureLatestDescriptor(exportsRoot);
+  let hookPending = true;
+  while (true) {
     const actual = await loadLatestPublication(exportsRoot);
-    if (canonicalJson((actual?.pointer ?? null) as unknown as JsonValue) !== canonicalJson((expected ?? null) as unknown as JsonValue)) {
-      throw new ContentIntegrityError("Corpus latest publication lost its compare-and-swap boundary.");
-    }
     if (actual && compareCanonicalGeneration(manifest.repositoryGeneration, actual.pointer.repositoryGeneration) < 0) {
       throw new ContentIntegrityError("Corpus latest publication cannot regress canonical snapshot generation.");
     }
@@ -514,30 +532,88 @@ async function publishLatest(
       || currentCatalog.repositoryGeneration !== manifest.repositoryGeneration
       || currentCatalog.resolvedManifestHash !== manifest.resolvedManifestHash
     ) throw new ContentIntegrityError("Canonical repository advanced before corpus latest publication.");
+    if (actual?.pointer.exportId === manifest.exportId) return;
 
+    const publicationGeneration = await nextLatestPublicationGeneration(recordsRoot, actual?.pointer.publicationGeneration ?? null);
     const pointer: LatestPointer = {
       schemaVersion: CORPUS_EXPORT_SCHEMA_VERSION,
       kind: "corpusExportLatest",
+      readerContractVersion: CORPUS_LATEST_READER_CONTRACT_VERSION,
       noncanonical: true,
+      publicationGeneration,
       exportId: manifest.exportId,
       catalogHash: manifest.catalogHash,
       repositoryGeneration: manifest.repositoryGeneration,
       resolvedManifestHash: manifest.resolvedManifestHash,
       path: `${manifest.exportId}/manifest.json`,
     };
-    const temporary = resolve(exportsRoot, `.latest.${randomUUID()}.tmp`);
+    const temporary = resolve(recordsRoot, `.${publicationGeneration}.${randomUUID()}.tmp`);
+    const finalPath = resolve(recordsRoot, `${publicationGeneration}.json`);
     try {
       await durableWrite(temporary, jsonFile(pointer));
-      // The pointer and canonical snapshot were checked while this exclusive
-      // fence was held; rename is the only visibility transition.
-      await rename(temporary, resolve(exportsRoot, "latest.json"));
-      await syncDirectory(exportsRoot);
+      if (hookPending) {
+        hookPending = false;
+        await afterRecordPrepared?.();
+      }
+      try {
+        // Linking a complete, synced temporary file is the only visibility
+        // transition. A collision forces a full canonical/latest recheck.
+        await link(temporary, finalPath);
+      } catch (error) {
+        if (hasCode(error, "EEXIST")) continue;
+        throw error;
+      }
+      await syncDirectory(recordsRoot);
+      return;
     } finally {
       await rm(temporary, { force: true });
     }
-  } finally {
-    await rm(lockPath, { recursive: true, force: true });
+  }
+}
+
+async function ensureLatestDescriptor(exportsRoot: string): Promise<string> {
+  const recordsRoot = resolve(exportsRoot, "latest");
+  try {
+    await mkdir(recordsRoot, { mode: 0o750 });
     await syncDirectory(exportsRoot);
+  } catch (error) {
+    if (!hasCode(error, "EEXIST")) throw error;
+  }
+  await assertNoFollowDirectory(recordsRoot, "Corpus latest records directory");
+  const descriptor: LatestDescriptor = {
+    schemaVersion: CORPUS_EXPORT_SCHEMA_VERSION,
+    kind: "corpusExportLatestDescriptor",
+    readerContractVersion: CORPUS_LATEST_READER_CONTRACT_VERSION,
+    noncanonical: true,
+    recordsPath: "latest",
+  };
+  const contents = jsonFile(descriptor);
+  const descriptorPath = resolve(exportsRoot, "latest.json");
+  const temporary = resolve(exportsRoot, `.latest-descriptor.${randomUUID()}.tmp`);
+  try {
+    await durableWrite(temporary, contents);
+    try {
+      await link(temporary, descriptorPath);
+      await syncDirectory(exportsRoot);
+    } catch (error) {
+      if (!hasCode(error, "EEXIST")) throw error;
+      const existing = (await readNoFollowFile(exportsRoot, descriptorPath, "latest.json")).toString("utf8");
+      parseLatestDescriptor(existing);
+      if (existing !== contents) throw new ContentIntegrityError("Corpus latest descriptor does not match the supported reader contract.");
+    }
+  } finally {
+    await rm(temporary, { force: true });
+  }
+  return recordsRoot;
+}
+
+async function nextLatestPublicationGeneration(recordsRoot: string, maximumValid: string | null): Promise<string> {
+  const occupied = new Set((await readdir(recordsRoot)).filter((name) => /^[0-9]{32}\.json$/.test(name)));
+  let candidate = maximumValid === null ? BigInt(1) : BigInt(maximumValid) + BigInt(1);
+  while (true) {
+    const generation = formatPublicationGeneration(candidate);
+    if (!occupied.has(`${generation}.json`)) return generation;
+    candidate++;
   }
 }
 
@@ -752,14 +828,27 @@ function parseChanges(text: string): ChangeManifest {
 
 function parseLatest(text: string): LatestPointer {
   const value = parseCanonicalObject(text, "latest.json");
-  assertExactKeys(value, ["catalogHash", "exportId", "kind", "noncanonical", "path", "repositoryGeneration", "resolvedManifestHash", "schemaVersion"], "latest.json");
+  assertExactKeys(value, ["catalogHash", "exportId", "kind", "noncanonical", "path", "publicationGeneration", "readerContractVersion", "repositoryGeneration", "resolvedManifestHash", "schemaVersion"], "latest pointer record");
   assertCommon(value, "corpusExportLatest");
   assertExportId(value.exportId);
   if (
-    !HASH.test(String(value.catalogHash)) || !HASH.test(String(value.resolvedManifestHash))
+    value.readerContractVersion !== CORPUS_LATEST_READER_CONTRACT_VERSION
+    || typeof value.publicationGeneration !== "string" || !/^[0-9]{32}$/.test(value.publicationGeneration)
+    || !HASH.test(String(value.catalogHash)) || !HASH.test(String(value.resolvedManifestHash))
     || !isGeneration(value.repositoryGeneration) || typeof value.path !== "string"
-  ) throw new ContentIntegrityError("latest.json is invalid.");
+  ) throw new ContentIntegrityError("Corpus latest pointer record is invalid.");
   return value as unknown as LatestPointer;
+}
+
+function parseLatestDescriptor(text: string): LatestDescriptor {
+  const value = parseCanonicalObject(text, "latest.json");
+  assertExactKeys(value, ["kind", "noncanonical", "readerContractVersion", "recordsPath", "schemaVersion"], "latest.json");
+  if (
+    value.schemaVersion !== CORPUS_EXPORT_SCHEMA_VERSION || value.kind !== "corpusExportLatestDescriptor"
+    || value.readerContractVersion !== CORPUS_LATEST_READER_CONTRACT_VERSION
+    || value.noncanonical !== true || value.recordsPath !== "latest"
+  ) throw new ContentIntegrityError("Corpus latest descriptor has an unsupported reader contract.");
+  return value as unknown as LatestDescriptor;
 }
 
 function assertCommon(value: Record<string, unknown>, kind: string): void {

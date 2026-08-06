@@ -54,8 +54,14 @@ test("full export is portable, deterministic, validated, and atomically publishe
 
   const latest = JSON.parse(await readFile(resolve(root, "exports/latest.json"), "utf8")) as Record<string, unknown>;
   assert.equal(latest.noncanonical, true);
-  assert.equal(latest.exportId, first.exportId);
-  assert.equal(latest.path, `${first.exportId}/manifest.json`);
+  assert.equal(latest.kind, "corpusExportLatestDescriptor");
+  assert.equal(latest.readerContractVersion, 1);
+  assert.equal(latest.recordsPath, "latest");
+  const pointerNames = await readdir(resolve(root, "exports/latest"));
+  assert.deepEqual(pointerNames, ["00000000000000000000000000000001.json"]);
+  const pointer = JSON.parse(await readFile(resolve(root, "exports/latest", pointerNames[0]), "utf8")) as Record<string, unknown>;
+  assert.equal(pointer.exportId, first.exportId);
+  assert.equal(pointer.path, `${first.exportId}/manifest.json`);
   assert.deepEqual((await readdir(resolve(root, "exports"))).filter((name) => name.startsWith(".")), []);
 });
 
@@ -123,14 +129,46 @@ test("validation rejects a rehashed but incomplete Markdown representation", asy
   await assert.rejects(() => validateCorpusExport(generated.path), /deterministic complete rendering/);
 });
 
-test("published validation rejects a latest pointer that does not match its immutable export", async (t) => {
+test("published validation ignores corrupt higher pointer records", async (t) => {
+  const root = await temporaryRepository(t);
+  const generated = await generateCorpusExport({ dataRoot: root });
+  await writeFile(resolve(root, "exports/latest/00000000000000000000000000000002.json"), "{corrupt\n");
+  const latest = await validatePublishedCorpusExport(root);
+  assert.equal(latest.manifest.exportId, generated.exportId);
+
+  const original = await activeRevision(root, "dash");
+  const updated = revised(original, "dash", "After corrupt pointer");
+  await installRevision(root, updated, [{ entryId: updated.entryId, revisionId: updated.revisionId, contentHash: updated.contentHash, path: revisionPath(updated) }]);
+  const recovered = await generateCorpusExport({ dataRoot: root });
+  assert.deepEqual((await readdir(resolve(root, "exports/latest"))).filter((name) => /^[0-9]{32}\.json$/.test(name)), [
+    "00000000000000000000000000000001.json",
+    "00000000000000000000000000000002.json",
+    "00000000000000000000000000000003.json",
+  ]);
+  assert.equal((await validatePublishedCorpusExport(root)).manifest.exportId, recovered.exportId);
+});
+
+test("crashed pointer preparation and abandoned legacy lock cannot block later publication", async (t) => {
   const root = await temporaryRepository(t);
   await generateCorpusExport({ dataRoot: root });
-  const pointerPath = resolve(root, "exports/latest.json");
-  const pointer = JSON.parse(await readFile(pointerPath, "utf8")) as Record<string, unknown>;
-  pointer.catalogHash = `sha256:${"0".repeat(64)}`;
-  await writeFile(pointerPath, `${canonicalJson(pointer as JsonValue)}\n`);
-  await assert.rejects(() => validatePublishedCorpusExport(root), /pointer does not match/);
+  const original = await activeRevision(root, "dash");
+  const updated = revised(original, "dash", "After crash");
+  await installRevision(root, updated, [{ entryId: updated.entryId, revisionId: updated.revisionId, contentHash: updated.contentHash, path: revisionPath(updated) }]);
+
+  await assert.rejects(() => generateCorpusExport({
+    dataRoot: root,
+    afterLatestRecordPrepared: () => { throw new Error("simulated process death"); },
+  }), /simulated process death/);
+  await writeFile(resolve(root, "exports/latest/.crashed-writer.tmp"), "partial");
+  await mkdir(resolve(root, "exports/.latest.lock"));
+
+  const recovered = await generateCorpusExport({ dataRoot: root });
+  const latest = await validatePublishedCorpusExport(root);
+  assert.equal(latest.manifest.exportId, recovered.exportId);
+  assert.deepEqual((await readdir(resolve(root, "exports/latest"))).filter((name) => /^[0-9]{32}\.json$/.test(name)), [
+    "00000000000000000000000000000001.json",
+    "00000000000000000000000000000002.json",
+  ]);
 });
 
 test("incremental validation recomputes predecessor diff and verifies previous hashes", async (t) => {
@@ -259,7 +297,7 @@ test("a paused older generator cannot regress latest after a newer snapshot publ
   const release = new Promise<void>((resolveRelease) => { releaseOlder = resolveRelease; });
   const olderGeneration = generateCorpusExport({
     dataRoot: root,
-    beforeLatestPublication: async () => {
+    afterLatestRecordPrepared: async () => {
       reportPaused();
       await release;
     },
@@ -270,7 +308,7 @@ test("a paused older generator cannot regress latest after a newer snapshot publ
   await installRevision(root, newer, [{ entryId: newer.entryId, revisionId: newer.revisionId, contentHash: newer.contentHash, path: revisionPath(newer) }]);
   const newerGeneration = await generateCorpusExport({ dataRoot: root });
   releaseOlder();
-  await assert.rejects(olderGeneration, /compare-and-swap boundary|advanced before/);
+  await assert.rejects(olderGeneration, /advanced before/);
 
   const latest = await validatePublishedCorpusExport(root);
   assert.equal(latest.manifest.exportId, newerGeneration.exportId);
@@ -281,11 +319,11 @@ test("CLI generates and validates exports without database connectivity", async 
   const root = await temporaryRepository(t);
   const environment = { ...process.env, DND_DATA_ROOT: root, DATABASE_URL: "postgresql://unreachable.invalid/no-db" };
   const generated = await execute(process.execPath, ["--experimental-strip-types", "scripts/corpus-export.mts", "generate"], { env: environment });
-  const result = JSON.parse(generated.stdout) as { exportId: string; changes: { additions: number } };
+  const result = JSON.parse(generated.stdout) as { exportId: string; catalogHash: string; changes: { additions: number } };
   assert.match(result.exportId, /^corpus-[0-9a-f]{64}$/);
   assert.equal(result.changes.additions, 1);
   const validated = await execute(process.execPath, ["--experimental-strip-types", "scripts/corpus-export.mts", "validate"], { env: environment });
-  assert.deepEqual(JSON.parse(validated.stdout), { exportId: result.exportId, catalogHash: JSON.parse(await readFile(resolve(root, "exports/latest.json"), "utf8")).catalogHash, valid: true });
+  assert.deepEqual(JSON.parse(validated.stdout), { exportId: result.exportId, catalogHash: result.catalogHash, valid: true });
 });
 
 async function temporaryRepository(t: TestContext): Promise<string> {
