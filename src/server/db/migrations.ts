@@ -5,6 +5,7 @@ export const MIGRATION_FILENAMES = [
   "0004_source_publication_constraints.sql",
   "0005_ingestion_generations.sql",
   "0006_ingestion_generation_integrity.sql",
+  "0007_compendium_relational_core.sql",
 ] as const;
 
 export type MigrationFilename = (typeof MIGRATION_FILENAMES)[number];
