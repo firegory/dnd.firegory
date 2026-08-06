@@ -53,6 +53,7 @@ const minimumDelayMs = parseInteger(values["delay-ms"], "--delay-ms");
 const retries = parseInteger(values.retries, "--retries");
 const result = await collectNextDndSnapshots({
   outputDirectory: resolve(values.output),
+  allowNetwork: values["allow-network"],
   categories,
   refresh: values.refresh,
   offline: values.offline,
@@ -62,15 +63,17 @@ const result = await collectNextDndSnapshots({
 
 console.log(JSON.stringify({
   runDirectory: result.runDirectory,
+  status: result.manifest.status,
   categories: result.manifest.categories.length,
   entries: result.manifest.categories.reduce((total, category) => total + category.entryCount, 0),
   details: result.manifest.categories.reduce((total, category) => total + category.details.length, 0),
   parserFailures: result.manifest.parserFailures.length,
+  diagnostics: result.manifest.diagnostics.length,
 }, null, 2));
-if (result.manifest.parserFailures.length > 0) process.exitCode = 2;
+if (result.manifest.status !== "complete") process.exitCode = 2;
 
 function parseInteger(value: string, name: string): number {
-  if (!/^\d+$/.test(value)) throw new Error(`${name} must be a nonnegative integer.`);
+  if (!/^\d+$/.test(value)) throw new Error(`${name} must be an integer.`);
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed)) throw new Error(`${name} is too large.`);
   return parsed;

@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 
 import type { CompendiumEntryType } from "../service.ts";
 
-export const NEXT_DND_PARSER_VERSION = "next-dnd-2024-v1";
+export const NEXT_DND_PARSER_VERSION = "next-dnd-2024-v2";
 
 export const NEXT_DND_CATEGORIES = {
   class: { path: "/class/", entryType: "class" },
@@ -65,13 +65,29 @@ export type NextDndNormalizedDetail = Readonly<{
   contentText: string;
 }>;
 
-export function parseNextDndDetail(html: string, category: NextDndCategory, externalId: string): NextDndNormalizedDetail {
+const ALLOWED_TAGS = new Set([
+  "article", "section", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6",
+  "strong", "b", "em", "i", "u", "s", "small", "sub", "sup", "ul", "ol", "li",
+  "dl", "dt", "dd", "table", "caption", "thead", "tbody", "tfoot", "tr", "th", "td",
+  "blockquote", "pre", "code", "br", "hr", "a",
+]);
+const REMOVED_TAGS = "script,style,svg,math,iframe,frame,frameset,object,embed,img,picture,source,video,audio,link,meta,base,canvas,template,noscript,form,input,button,select,textarea";
+const ALLOWED_ATTRIBUTES: Readonly<Record<string, ReadonlySet<string>>> = {
+  a: new Set(["href", "title"]),
+  th: new Set(["colspan", "rowspan"]),
+  td: new Set(["colspan", "rowspan"]),
+};
+
+export function parseNextDndDetail(html: string, cardCategory: string, externalId: string): NextDndNormalizedDetail {
+  if (!/^[a-z][a-z0-9_-]*$/.test(cardCategory)) throw new Error(`Invalid detail card category ${cardCategory}.`);
+  if (!/^\d+$/.test(externalId)) throw new Error(`Invalid detail external ID ${externalId}.`);
   const $ = cheerio.load(html, { xmlMode: false });
   const card = $(".card[data-id]").filter((_, element) => {
     const id = $(element).attr("data-id");
-    return id === `${category}:${externalId}` || id?.endsWith(`:${externalId}`) === true;
+    return id === `${cardCategory}:${externalId}`;
   }).first();
-  if (card.length === 0) throw new Error(`Detail page does not contain card ${category}:${externalId}.`);
+  if (card.length === 0) throw new Error(`Detail page does not contain exact card ${cardCategory}:${externalId}.`);
+  if (!new Set(["article", "section", "div"]).has(card[0].tagName.toLowerCase())) throw new Error("Detail card root element is not allowed.");
 
   card.find([
     "nav", "aside", "header", "footer", "form", "script", "style",
@@ -80,9 +96,38 @@ export function parseNextDndDetail(html: string, category: NextDndCategory, exte
   ].join(",")).remove();
   const titleNode = card.find(".card-title").first();
   const title = (titleNode.find("[data-copy]").attr("data-copy") ?? titleNode.text()).replace(/\s+/g, " ").trim();
+  card.find(REMOVED_TAGS).remove();
+  card.find("*").addBack().each((_, element) => {
+    if (element.type !== "tag") return;
+    const tag = element.tagName.toLowerCase();
+    if (!ALLOWED_TAGS.has(tag)) {
+      $(element).replaceWith($(element).contents());
+      return;
+    }
+    const allowed = ALLOWED_ATTRIBUTES[tag] ?? new Set<string>();
+    for (const attribute of Object.keys(element.attribs)) {
+      if (!allowed.has(attribute.toLowerCase())) $(element).removeAttr(attribute);
+    }
+    if (tag === "a") {
+      const href = $(element).attr("href");
+      if (href && !safeLink(href)) $(element).removeAttr("href");
+    }
+  });
   const contentText = card.text().replace(/\s+/g, " ").trim();
-  if (!title || !contentText) throw new Error(`Detail card ${category}:${externalId} has no normalized content.`);
+  if (!title || !contentText) throw new Error(`Detail card ${cardCategory}:${externalId} has no normalized content.`);
   return { title, contentHtml: $.html(card), contentText };
+}
+
+function safeLink(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) return true;
+  if (trimmed.startsWith("#")) return true;
+  try {
+    const url = new URL(trimmed);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
 }
 
 function parseListCard(value: unknown, index: number, indexUrl: string, category: NextDndCategory): NextDndIndexEntry {
