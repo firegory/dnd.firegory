@@ -11,7 +11,7 @@ export default async function SourcesPage() {
   const sources = await listSourcesWithStats({ userId: user.id, role: "admin" });
 
   return (
-    <AppLayout userRole="admin">
+    <AppLayout userRole="admin" wide>
       <div className="space-y-8">
         <nav className="flex items-center gap-2 text-sm text-text-muted">
           <Link href="/search" className="hover:text-accent"><T k="search" /></Link>

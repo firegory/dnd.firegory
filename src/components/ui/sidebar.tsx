@@ -2,106 +2,179 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 
-import type { AppLayoutRole } from "./app-layout";
+import type { AppLayoutRole } from "./navigation";
+import { getNavigationItems, isNavigationItemActive } from "./navigation";
 import { Toggle } from "./toggle";
 import { useUiLanguage, type UiLanguage } from "./i18n";
 
-const BASE_NAV_ITEMS = [
-  { href: "/search", labelKey: "search" },
-  { href: "/settings", labelKey: "settings" },
-] as const;
+function Brand({ onNavigate }: { onNavigate?: () => void }) {
+  const { t } = useUiLanguage();
 
-const ADMIN_NAV_ITEMS = [
-  { href: "/admin/sources", labelKey: "sources" },
-  { href: "/admin/ingestion", labelKey: "upload" },
-  { href: "/admin/users", labelKey: "users" },
-] as const;
+  return (
+    <Link href="/search" className="brand-lockup" aria-label={`dnd.firegory - ${t("rulesSearch")}`} onClick={onNavigate}>
+      <span className="brand-mark" aria-hidden="true">D20</span>
+      <span>
+        <strong>dnd<span>.firegory</span></strong>
+        <small>{t("rulesSearch")}</small>
+      </span>
+    </Link>
+  );
+}
 
-function getNavItems(userRole?: AppLayoutRole) {
-  return userRole === "admin" ? [...BASE_NAV_ITEMS, ...ADMIN_NAV_ITEMS] : BASE_NAV_ITEMS;
+function Navigation({ userRole, onNavigate }: { userRole?: AppLayoutRole; onNavigate?: () => void }) {
+  const pathname = usePathname();
+  const { t } = useUiLanguage();
+
+  return (
+    <nav className="shell-navigation" aria-label={t("primaryNavigation")}>
+      <p>{t("nav")}</p>
+      <ul>
+        {getNavigationItems(userRole).map((item) => {
+          const active = isNavigationItemActive(pathname, item.href);
+          return (
+            <li key={item.href}>
+              <Link
+                href={item.href}
+                aria-current={active ? "page" : undefined}
+                className={active ? "active" : undefined}
+                onClick={onNavigate}
+              >
+                <span className="nav-glyph" aria-hidden="true" />
+                {t(item.labelKey)}
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
+    </nav>
+  );
+}
+
+function LanguageToggle() {
+  const { language, setLanguage, t } = useUiLanguage();
+
+  return (
+    <div className="sidebar-language">
+      <Toggle
+        label={t("siteLanguage")}
+        value={language}
+        options={[
+          { value: "ru", label: "RU" },
+          { value: "en", label: "EN" },
+        ]}
+        onChange={(value) => setLanguage(value as UiLanguage)}
+      />
+    </div>
+  );
 }
 
 export function Sidebar({ userRole }: { userRole?: AppLayoutRole }) {
-  const pathname = usePathname();
-  const { language, setLanguage, t } = useUiLanguage();
-  const navItems = getNavItems(userRole);
-
   return (
-    <aside className="fixed inset-y-0 left-0 z-30 flex w-64 flex-col border-r border-border bg-surface lg:w-56">
-      <div className="flex h-16 items-center border-b border-border px-5">
-        <div>
-          <h1 className="text-lg leading-tight font-bold text-text-primary">
-            dnd<span className="text-accent">.firegory</span>
-          </h1>
-          <p className="text-[11px] tracking-wider text-text-muted uppercase">{t("rulesSearch")}</p>
-        </div>
-      </div>
-      <nav className="flex-1 overflow-y-auto px-3 py-4">
-        <p className="mb-2 px-3 text-[11px] font-semibold tracking-widest text-text-muted uppercase">
-          {t("nav")}
-        </p>
-        <ul className="space-y-1">
-          {navItems.map((item) => {
-            const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-            return (
-              <li key={item.href}>
-                <Link
-                  href={item.href}
-                  className={`block rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
-                    active
-                      ? "bg-accent/15 text-accent"
-                      : "text-text-secondary hover:bg-surface-light hover:text-text-primary"
-                  }`}
-                >
-                  {t(item.labelKey)}
-                </Link>
-              </li>
-            );
-          })}
-        </ul>
-      </nav>
-      <div className="border-t border-border px-5 py-4">
-        <Toggle
-          label={t("siteLanguage")}
-          value={language}
-          options={[
-            { value: "ru", label: "RU" },
-            { value: "en", label: "EN" },
-          ]}
-          onChange={(value) => setLanguage(value as UiLanguage)}
-        />
-      </div>
+    <aside className="sidebar-panel">
+      <Brand />
+      <Navigation userRole={userRole} />
+      <LanguageToggle />
     </aside>
   );
 }
 
 export function MobileHeader({ userRole }: { userRole?: AppLayoutRole }) {
-  const pathname = usePathname();
   const { t } = useUiLanguage();
-  const navItems = getNavItems(userRole);
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
+
+  function closeDrawer(restoreFocus = true) {
+    setOpen(false);
+    if (restoreFocus) triggerRef.current?.focus();
+  }
+
+  useEffect(() => {
+    if (!open) return;
+
+    const previousOverflow = document.body.style.overflow;
+    const desktopQuery = window.matchMedia("(min-width: 62rem)");
+    document.body.style.overflow = "hidden";
+    drawerRef.current?.querySelector<HTMLElement>("a, button")?.focus();
+
+    function handleDesktopChange(event: MediaQueryListEvent) {
+      if (event.matches) setOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeDrawer();
+        return;
+      }
+      if (event.key !== "Tab" || !drawerRef.current) return;
+
+      const focusable = Array.from(
+        drawerRef.current.querySelectorAll<HTMLElement>('a, button:not([disabled]), [tabindex]:not([tabindex="-1"])'),
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    desktopQuery.addEventListener("change", handleDesktopChange);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      desktopQuery.removeEventListener("change", handleDesktopChange);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
 
   return (
-    <header className="sticky top-0 z-20 flex min-h-14 flex-wrap items-center gap-3 border-b border-border bg-surface/95 px-4 py-2 backdrop-blur-sm lg:hidden">
-      <Link href="/search" className="font-bold text-text-primary">
-        dnd<span className="text-accent">.firegory</span>
-      </Link>
-      <nav className="ml-auto flex flex-wrap justify-end gap-1">
-        {navItems.map((item) => {
-          const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${
-                active ? "bg-accent/15 text-accent" : "text-text-secondary hover:text-text-primary"
-              }`}
-            >
-              {t(item.labelKey)}
-            </Link>
-          );
-        })}
-      </nav>
-    </header>
+    <>
+      <header className="mobile-header">
+        <Brand />
+        <button
+          ref={triggerRef}
+          type="button"
+          className="menu-button"
+          aria-expanded={open}
+          aria-controls="mobile-navigation"
+          aria-label={t("openNavigation")}
+          onClick={() => setOpen(true)}
+        >
+          <span aria-hidden="true" />
+          <span aria-hidden="true" />
+          <span aria-hidden="true" />
+        </button>
+      </header>
+      {open ? (
+        <div className="drawer-layer">
+          <button className="drawer-backdrop" type="button" aria-label={t("closeNavigation")} onClick={() => closeDrawer()} />
+          <aside
+            id="mobile-navigation"
+            ref={drawerRef}
+            className="mobile-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("primaryNavigation")}
+          >
+            <div className="drawer-heading">
+              <Brand onNavigate={() => closeDrawer(false)} />
+              <button type="button" className="close-button" aria-label={t("closeNavigation")} onClick={() => closeDrawer()}>
+                <span aria-hidden="true">×</span>
+              </button>
+            </div>
+            <Navigation userRole={userRole} onNavigate={() => closeDrawer(false)} />
+            <LanguageToggle />
+          </aside>
+        </div>
+      ) : null}
+    </>
   );
 }

@@ -153,7 +153,7 @@ export function JobsTable() {
   }
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-border">
+    <div className="table-scroll rounded-xl border border-border" role="region" aria-labelledby="processing-jobs-title" tabIndex={0}>
       <table className="w-full text-left text-sm">
         <thead>
           <tr className="border-b border-border bg-surface">

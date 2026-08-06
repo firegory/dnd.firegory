@@ -18,7 +18,7 @@ export default async function AdminUsersPage() {
   const users = await listUsers();
 
   return (
-    <AppLayout userRole="admin">
+    <AppLayout userRole="admin" wide>
       <div className="space-y-8">
         <nav className="flex items-center gap-2 text-sm text-text-muted">
           <Link href="/search" className="hover:text-accent"><T k="search" /></Link>
@@ -26,8 +26,9 @@ export default async function AdminUsersPage() {
           <span className="text-text-secondary"><T k="users" /></span>
         </nav>
 
-        <section>
-          <div className="overflow-x-auto rounded-xl border border-border">
+        <section aria-labelledby="users-title">
+          <h1 id="users-title" className="mb-4 text-2xl font-bold text-text-primary"><T k="users" /></h1>
+          <div className="table-scroll rounded-xl border border-border" role="region" aria-labelledby="users-title" tabIndex={0}>
             <table className="w-full text-left text-sm">
               <thead>
                 <tr className="border-b border-border bg-surface">
