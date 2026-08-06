@@ -155,6 +155,8 @@ npm run ingest -- \
   --access open
 ```
 
+The explicitly invoked next.dnd.su 2024 HTML snapshot collector is documented in [docs/next-dnd-snapshots.md](docs/next-dnd-snapshots.md). It retains raw inputs and reports only; it does not publish compendium content.
+
 | Option | Required | Description |
 | --- | --- | --- |
 | `--pdf` | yes | Path to a local PDF file |
