@@ -175,7 +175,7 @@ test("publishing locks ownership and transitions revision before active pointer"
   await service.publishRevision(ids.version, ids.revision);
   assert.match(statements[0], /FOR UPDATE OF v, r/);
   assert.match(statements[1], /FOR SHARE OF g/);
-  assert.match(statements[2], /compendium_import_links/);
+  assert.match(statements[2], /compendium_import_links[\s\S]*FOR SHARE OF link, occurrence, run/);
   assert.match(statements[3], /UPDATE compendium_revisions SET lifecycle = 'published'/);
   assert.match(statements[4], /active_revision_id = \$2/);
 });

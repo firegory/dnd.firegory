@@ -38,6 +38,27 @@ SET parser_version = coalesce(parser_version, importer_version),
     ), 'hex'))
 WHERE parser_version IS NULL OR prompt_version IS NULL OR model_version IS NULL OR input_sha256 IS NULL;
 
+-- 0007 already allowed terminal runs. Normalize those rows before adding the
+-- success/checkpoint constraint, and retain any completed occurrence phase.
+UPDATE compendium_import_runs run
+SET checkpoint = CASE
+  WHEN run.status = 'succeeded' THEN 'completed'
+  WHEN run.status = 'failed' AND EXISTS (
+    SELECT 1 FROM compendium_import_occurrences occurrence
+    WHERE occurrence.import_run_id = run.id
+  ) THEN 'occurrences'
+  WHEN run.status = 'failed' THEN 'created'
+  WHEN EXISTS (
+    SELECT 1 FROM compendium_import_occurrences occurrence
+    WHERE occurrence.import_run_id = run.id
+  ) THEN 'occurrences'
+  ELSE 'created'
+END,
+occurrence_count = (
+  SELECT count(*)::integer FROM compendium_import_occurrences occurrence
+  WHERE occurrence.import_run_id = run.id
+);
+
 ALTER TABLE compendium_import_runs
   ALTER COLUMN parser_version SET NOT NULL,
   ALTER COLUMN prompt_version SET NOT NULL,
@@ -111,6 +132,7 @@ CREATE TABLE IF NOT EXISTS compendium_import_candidates (
   generation_id uuid,
   occurrence_id uuid,
   previous_candidate_id uuid,
+  candidate_order integer NOT NULL,
   candidate_key text NOT NULL,
   entry_type compendium_entry_type,
   diff_status compendium_import_diff_status NOT NULL,
@@ -129,6 +151,7 @@ CREATE TABLE IF NOT EXISTS compendium_import_candidates (
     REFERENCES compendium_import_candidates(id, source_id, file_id),
   CONSTRAINT compendium_import_candidates_content_object CHECK (jsonb_typeof(content) = 'object'),
   CONSTRAINT compendium_import_candidates_content_hash CHECK (content_sha256 ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT compendium_import_candidates_order_nonnegative CHECK (candidate_order >= 0),
   CONSTRAINT compendium_import_candidates_key_not_blank CHECK (btrim(candidate_key) <> ''),
   CONSTRAINT compendium_import_candidates_shape CHECK (
     (diff_status = 'missing' AND occurrence_id IS NULL AND previous_candidate_id IS NOT NULL
@@ -142,6 +165,7 @@ CREATE TABLE IF NOT EXISTS compendium_import_candidates (
   ),
   CONSTRAINT compendium_import_candidates_slot_unique UNIQUE NULLS NOT DISTINCT
     (import_run_id, candidate_key, occurrence_id),
+  CONSTRAINT compendium_import_candidates_order_unique UNIQUE (import_run_id, candidate_order),
   CONSTRAINT compendium_import_candidates_id_source_file_unique UNIQUE (id, source_id, file_id)
 );
 CREATE INDEX IF NOT EXISTS compendium_import_candidates_run_status_idx
@@ -237,6 +261,13 @@ BEGIN
   IF OLD.status = 'succeeded' OR OLD.status = 'cancelled' THEN
     RAISE EXCEPTION 'completed import run state is immutable';
   END IF;
+  IF NEW.checkpoint IS DISTINCT FROM OLD.checkpoint AND NOT (
+    (OLD.checkpoint = 'created' AND NEW.checkpoint = 'occurrences')
+    OR (OLD.checkpoint = 'occurrences' AND NEW.checkpoint = 'diffed')
+    OR (OLD.checkpoint = 'diffed' AND NEW.checkpoint = 'completed')
+  ) THEN
+    RAISE EXCEPTION 'import run checkpoints must advance exactly one phase';
+  END IF;
   IF NOT (
     (OLD.status = 'pending' AND NEW.status IN ('running', 'cancelled'))
     OR (OLD.status = 'running' AND NEW.status IN ('running', 'succeeded', 'failed', 'cancelled'))
@@ -255,15 +286,30 @@ FOR EACH ROW EXECUTE FUNCTION compendium_guard_import_run_lifecycle();
 
 CREATE OR REPLACE FUNCTION compendium_guard_import_artifact_immutability() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE run_status compendium_import_status;
+DECLARE
+  run_status compendium_import_status;
+  run_checkpoint text;
 BEGIN
   IF TG_OP <> 'INSERT' THEN
     RAISE EXCEPTION 'import occurrences, candidates, checkpoints, diagnostics, and audit records are immutable';
   END IF;
   IF TG_TABLE_NAME IN ('compendium_import_occurrences', 'compendium_import_candidates', 'compendium_import_checkpoints', 'compendium_import_diagnostics') THEN
-    SELECT status INTO run_status FROM compendium_import_runs WHERE id = NEW.import_run_id FOR SHARE;
+    SELECT status, checkpoint INTO run_status, run_checkpoint
+    FROM compendium_import_runs WHERE id = NEW.import_run_id FOR SHARE;
     IF run_status <> 'running' THEN
       RAISE EXCEPTION 'import work may only be appended while its run is running';
+    END IF;
+    IF TG_TABLE_NAME = 'compendium_import_occurrences'
+       AND run_checkpoint NOT IN ('created', 'occurrences') THEN
+      RAISE EXCEPTION 'import occurrences cannot be appended after the occurrence phase';
+    ELSIF TG_TABLE_NAME = 'compendium_import_candidates' AND run_checkpoint <> 'occurrences' THEN
+      RAISE EXCEPTION 'import candidates may only be appended during the diff phase';
+    ELSIF TG_TABLE_NAME = 'compendium_import_checkpoints' AND (
+      (NEW.checkpoint_key LIKE 'occurrence:%' AND run_checkpoint NOT IN ('created', 'occurrences'))
+      OR (NEW.checkpoint_key = 'candidate-diff' AND run_checkpoint <> 'occurrences')
+      OR (NEW.checkpoint_key = 'completed' AND run_checkpoint <> 'diffed')
+    ) THEN
+      RAISE EXCEPTION 'import checkpoint does not match the current run phase';
     END IF;
   END IF;
   RETURN NEW;
@@ -289,6 +335,12 @@ END $$;
 CREATE OR REPLACE FUNCTION compendium_require_successful_import_for_publication() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
+  PERFORM 1
+  FROM compendium_import_links link
+  JOIN compendium_import_occurrences occurrence ON occurrence.id = link.occurrence_id
+  JOIN compendium_import_runs run ON run.id = occurrence.import_run_id
+  WHERE link.revision_id = NEW.id
+  FOR SHARE OF link, occurrence, run;
   IF OLD.lifecycle = 'draft' AND NEW.lifecycle = 'published' AND EXISTS (
     SELECT 1
     FROM compendium_import_links link
@@ -306,19 +358,66 @@ FOR EACH ROW EXECUTE FUNCTION compendium_require_successful_import_for_publicati
 
 CREATE OR REPLACE FUNCTION compendium_guard_published_import_link() RETURNS trigger
 LANGUAGE plpgsql AS $$
+DECLARE
+  old_revision uuid;
+  new_revision uuid;
+  locked_revision uuid;
 BEGIN
-  IF NEW.revision_id IS NOT NULL AND EXISTS (
+  old_revision := CASE WHEN TG_OP IN ('UPDATE', 'DELETE') THEN OLD.revision_id ELSE NULL END;
+  new_revision := CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN NEW.revision_id ELSE NULL END;
+  FOR locked_revision IN
+    SELECT DISTINCT revision_id
+    FROM unnest(ARRAY[old_revision, new_revision]) AS revisions(revision_id)
+    WHERE revision_id IS NOT NULL
+    ORDER BY revision_id
+  LOOP
+    PERFORM 1 FROM compendium_revisions WHERE id = locked_revision FOR SHARE;
+  END LOOP;
+
+  IF new_revision IS NOT NULL AND EXISTS (
     SELECT 1
     FROM compendium_revisions revision
     JOIN compendium_import_occurrences occurrence ON occurrence.id = NEW.occurrence_id
     JOIN compendium_import_runs run ON run.id = occurrence.import_run_id
-    WHERE revision.id = NEW.revision_id AND revision.lifecycle = 'published'
+    WHERE revision.id = new_revision AND revision.lifecycle = 'published'
       AND run.status <> 'succeeded'
   ) THEN
     RAISE EXCEPTION 'published revisions cannot acquire failed or partial import provenance';
   END IF;
-  RETURN NEW;
+  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
 END $$;
 DROP TRIGGER IF EXISTS compendium_import_links_published_run ON compendium_import_links;
-CREATE TRIGGER compendium_import_links_published_run BEFORE INSERT OR UPDATE ON compendium_import_links
+CREATE TRIGGER compendium_import_links_published_run BEFORE INSERT OR UPDATE OR DELETE ON compendium_import_links
 FOR EACH ROW EXECUTE FUNCTION compendium_guard_published_import_link();
+
+-- Recheck at transaction end as well as immediately. This gives direct SQL
+-- publication/link races a fresh post-lock invariant check under READ COMMITTED.
+CREATE OR REPLACE FUNCTION compendium_validate_published_import_links() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE target_revision uuid;
+BEGIN
+  target_revision := CASE
+    WHEN TG_TABLE_NAME = 'compendium_revisions' THEN NEW.id
+    ELSE NEW.revision_id
+  END;
+  IF target_revision IS NOT NULL AND EXISTS (
+    SELECT 1
+    FROM compendium_revisions revision
+    JOIN compendium_import_links link ON link.revision_id = revision.id
+    JOIN compendium_import_occurrences occurrence ON occurrence.id = link.occurrence_id
+    JOIN compendium_import_runs run ON run.id = occurrence.import_run_id
+    WHERE revision.id = target_revision AND revision.lifecycle = 'published'
+      AND run.status <> 'succeeded'
+  ) THEN
+    RAISE EXCEPTION 'published revisions require successful import provenance';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS compendium_revisions_import_links_valid ON compendium_revisions;
+CREATE CONSTRAINT TRIGGER compendium_revisions_import_links_valid
+AFTER UPDATE ON compendium_revisions DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION compendium_validate_published_import_links();
+DROP TRIGGER IF EXISTS compendium_import_links_revision_valid ON compendium_import_links;
+CREATE CONSTRAINT TRIGGER compendium_import_links_revision_valid
+AFTER INSERT OR UPDATE ON compendium_import_links DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION compendium_validate_published_import_links();

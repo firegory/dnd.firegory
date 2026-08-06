@@ -70,11 +70,35 @@ export type ImportCandidate = Readonly<{
 
 type CandidateRow = Readonly<{
   id: string;
+  import_run_id: string;
+  source_id: string;
+  file_id: string;
+  generation_id: string | null;
+  occurrence_id: string | null;
+  previous_candidate_id: string | null;
+  candidate_order: number;
   candidate_key: string;
   entry_type: CompendiumEntryType | null;
   diff_status: ImportDiffStatus;
   content: Record<string, unknown>;
   content_sha256: string;
+  invalid_reason: string | null;
+  created_at: string | Date;
+}>;
+
+type BaselineCandidateRow = Pick<CandidateRow, "id" | "candidate_key" | "entry_type" | "content" | "content_sha256">;
+
+type OccurrenceRow = Readonly<{
+  id: string;
+  import_run_id: string;
+  source_id: string;
+  file_id: string;
+  generation_id: string | null;
+  chunk_id: string | null;
+  occurrence_index: number;
+  locator: string;
+  fingerprint_sha256: string;
+  created_at: string | Date;
 }>;
 
 export class ImportRunConflictError extends Error {
@@ -94,6 +118,38 @@ export class CompendiumImportRunService {
   async createRun(input: CreateImportRunInput): Promise<ImportRun> {
     validateRunInput(input);
     return this.transaction(async (client) => {
+      const file = (await client.query<{ id: string }>(
+        `SELECT id FROM files
+         WHERE id = $1 AND source_id = $2 AND deleted_at IS NULL
+         FOR SHARE`,
+        [input.fileId, input.sourceId],
+      )).rows[0];
+      if (!file) throw new CompendiumValidationError("The file is outside the requested source boundary.");
+
+      let generationJobId: string | null = null;
+      if (input.generationId != null) {
+        const generation = (await client.query<{ ingestion_job_id: string | null }>(
+          `SELECT ingestion_job_id FROM ingestion_generations
+           WHERE id = $1 AND file_id = $2 AND source_id = $3
+           FOR SHARE`,
+          [input.generationId, input.fileId, input.sourceId],
+        )).rows[0];
+        if (!generation) throw new CompendiumValidationError("The generation is outside the requested source boundary.");
+        generationJobId = generation.ingestion_job_id;
+      }
+      if (input.ingestionJobId != null) {
+        const job = (await client.query<{ id: string }>(
+          `SELECT id FROM ingestion_jobs
+           WHERE id = $1 AND file_id = $2 AND source_id = $3
+           FOR SHARE`,
+          [input.ingestionJobId, input.fileId, input.sourceId],
+        )).rows[0];
+        if (!job) throw new CompendiumValidationError("The ingestion job is outside the requested source boundary.");
+        if (input.generationId != null && generationJobId !== input.ingestionJobId) {
+          throw new CompendiumValidationError("The generation does not belong to the requested ingestion job.");
+        }
+      }
+
       const values = [
         input.sourceId, input.fileId, input.generationId ?? null, input.ingestionJobId ?? null,
         input.importer.trim(), input.importerVersion.trim(), input.parserVersion.trim(),
@@ -103,26 +159,18 @@ export class CompendiumImportRunService {
         `INSERT INTO compendium_import_runs
            (source_id, file_id, generation_id, ingestion_job_id, importer, importer_version,
             parser_version, prompt_version, model_version, input_sha256)
-         SELECT f.source_id, f.id, g.id, j.id, $5, $6, $7, $8, $9, $10
-         FROM files f
-         LEFT JOIN ingestion_generations g
-           ON g.id = $3 AND g.file_id = f.id AND g.source_id = f.source_id
-         LEFT JOIN ingestion_jobs j
-           ON j.id = $4 AND j.file_id = f.id AND j.source_id = f.source_id
-         WHERE f.id = $2 AND f.source_id = $1 AND f.deleted_at IS NULL
-           AND ($3::uuid IS NULL OR g.id IS NOT NULL)
-           AND ($4::uuid IS NULL OR j.id IS NOT NULL)
-           AND ($3::uuid IS NULL OR $4::uuid IS NULL OR g.ingestion_job_id = j.id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
          ON CONFLICT ON CONSTRAINT compendium_import_runs_identity_unique DO NOTHING
-         RETURNING id, source_id, file_id, generation_id, status, checkpoint, lease_token`,
+         RETURNING id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token`,
         values.slice(0, 10),
       );
       let row = inserted.rows[0];
       if (!row) {
         row = (await client.query<RunRow>(
-          `SELECT id, source_id, file_id, generation_id, status, checkpoint, lease_token
+          `SELECT id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token
            FROM compendium_import_runs
            WHERE source_id = $1 AND file_id = $2 AND generation_id IS NOT DISTINCT FROM $3
+             AND ingestion_job_id IS NOT DISTINCT FROM $4
              AND importer = $5 AND importer_version = $6 AND parser_version = $7
              AND prompt_version = $8 AND model_version = $9 AND input_sha256 = $10`,
           values.slice(0, 10),
@@ -205,26 +253,40 @@ export class CompendiumImportRunService {
     }
     await this.transaction(async (client) => {
       const run = await lockLeasedRun(client, runId, leaseToken);
+      if (run.checkpoint !== "created" && run.checkpoint !== "occurrences") {
+        throw new ImportRunConflictError("Occurrences cannot be recorded after candidate diffing has started.");
+      }
       for (const occurrence of occurrences) {
         const values = [runId, run.source_id, run.file_id, run.generation_id, occurrence.chunkId ?? null, occurrence.occurrenceIndex, occurrence.locator.trim(), occurrence.fingerprintSha256];
-        const inserted = await client.query<{ id: string }>(
+        const inserted = await client.query<OccurrenceRow>(
           `INSERT INTO compendium_import_occurrences
              (import_run_id, source_id, file_id, generation_id, chunk_id, occurrence_index, locator, fingerprint_sha256)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-           ON CONFLICT (import_run_id, occurrence_index) DO NOTHING RETURNING id`,
+           ON CONFLICT (import_run_id, occurrence_index) DO NOTHING
+           RETURNING id, import_run_id, source_id, file_id, generation_id, chunk_id,
+                     occurrence_index, locator, fingerprint_sha256, created_at`,
           values,
         );
-        if (!inserted.rows[0]) {
-          const existing = (await client.query<{ chunk_id: string | null; locator: string; fingerprint_sha256: string }>(
-            `SELECT chunk_id, locator, fingerprint_sha256 FROM compendium_import_occurrences
+        let persisted = inserted.rows[0];
+        if (!persisted) {
+          persisted = (await client.query<OccurrenceRow>(
+            `SELECT id, import_run_id, source_id, file_id, generation_id, chunk_id,
+                    occurrence_index, locator, fingerprint_sha256, created_at
+             FROM compendium_import_occurrences
              WHERE import_run_id = $1 AND occurrence_index = $2`,
             [runId, occurrence.occurrenceIndex],
           )).rows[0];
-          if (!existing || existing.chunk_id !== (occurrence.chunkId ?? null) || existing.locator !== occurrence.locator.trim() || existing.fingerprint_sha256 !== occurrence.fingerprintSha256) {
-            throw new ImportRunConflictError(`Occurrence ${occurrence.occurrenceIndex} was already recorded with different immutable content.`);
-          }
         }
-        await insertCheckpoint(client, runId, `occurrence:${occurrence.occurrenceIndex}`, occurrence.fingerprintSha256, { locator: occurrence.locator.trim() });
+        if (!persisted || !occurrenceMatches(persisted, run, occurrence)) {
+          throw new ImportRunConflictError(`Occurrence ${occurrence.occurrenceIndex} was already recorded with different immutable content.`);
+        }
+        await insertCheckpoint(
+          client,
+          runId,
+          `occurrence:${occurrence.occurrenceIndex}`,
+          sha256Json(occurrenceManifest(persisted)),
+          { occurrenceIndex: occurrence.occurrenceIndex },
+        );
       }
       await client.query(
         `UPDATE compendium_import_runs SET checkpoint = CASE WHEN checkpoint = 'created' THEN 'occurrences' ELSE checkpoint END,
@@ -248,15 +310,36 @@ export class CompendiumImportRunService {
 
     return this.transaction(async (client) => {
       const run = await lockLeasedRun(client, runId, leaseToken);
-      if (run.checkpoint === "diffed") return loadCandidates(client, runId);
-      const occurrences = await client.query<{ id: string; occurrence_index: number }>(
-        "SELECT id, occurrence_index FROM compendium_import_occurrences WHERE import_run_id = $1 ORDER BY occurrence_index",
+      if (run.checkpoint !== "occurrences" && run.checkpoint !== "diffed") {
+        throw new ImportRunConflictError("The occurrence phase must finish before candidate diffing.");
+      }
+      const occurrences = await client.query<OccurrenceRow>(
+        `SELECT id, import_run_id, source_id, file_id, generation_id, chunk_id,
+                occurrence_index, locator, fingerprint_sha256, created_at
+         FROM compendium_import_occurrences
+         WHERE import_run_id = $1 ORDER BY occurrence_index, id`,
         [runId],
       );
       const occurrenceByIndex = new Map(occurrences.rows.map((row) => [row.occurrence_index, row.id]));
-      const baselineRows = await client.query<CandidateRow>(
+      if (run.checkpoint === "diffed") {
+        const persisted = await loadCandidateRows(client, runId);
+        if (!candidateReplayMatches(persisted, run, candidates, occurrenceByIndex)) {
+          throw new ImportRunConflictError("Persisted candidate diff does not match the canonical replay.");
+        }
+        const diffHash = sha256Json({
+          occurrences: occurrences.rows.map(occurrenceManifest),
+          candidates: persisted.map(candidateManifest),
+        });
+        await verifyCheckpoint(client, runId, "candidate-diff", diffHash, {
+          candidateCount: persisted.length,
+          occurrenceCount: occurrences.rows.length,
+        });
+        return candidatesFromRows(persisted);
+      }
+
+      const baselineRows = await client.query<BaselineCandidateRow>(
         `SELECT DISTINCT ON (candidate.candidate_key)
-                candidate.id, candidate.candidate_key, candidate.entry_type, candidate.diff_status,
+                candidate.id, candidate.candidate_key, candidate.entry_type,
                 candidate.content, candidate.content_sha256
          FROM compendium_import_candidates candidate
          JOIN compendium_import_runs previous_run ON previous_run.id = candidate.import_run_id
@@ -270,7 +353,7 @@ export class CompendiumImportRunService {
       const seen = new Set<string>();
       const present = new Set<string>();
       const planned: Array<Readonly<{
-        occurrenceId: string | null; previous: CandidateRow | null; key: string; type: CompendiumEntryType | null;
+        candidateOrder: number; occurrenceId: string | null; previous: BaselineCandidateRow | null; key: string; type: CompendiumEntryType | null;
         status: ImportDiffStatus; content: Record<string, unknown>; hash: string; invalidReason: string | null;
       }>> = [];
 
@@ -284,51 +367,65 @@ export class CompendiumImportRunService {
           || (!type || !COMPENDIUM_ENTRY_TYPES.includes(type) ? "entryType is unsupported" : null);
         const hash = sha256Json(candidate.content);
         if (invalidReason) {
-          planned.push({ occurrenceId, previous: null, key: key || `invalid:${candidate.occurrenceIndex}`, type, status: "invalid", content: candidate.content, hash, invalidReason });
+          planned.push({ candidateOrder: planned.length, occurrenceId, previous: null, key: key || `invalid:${candidate.occurrenceIndex}`, type, status: "invalid", content: candidate.content, hash, invalidReason });
           continue;
         }
         present.add(key);
         if (seen.has(key)) {
-          planned.push({ occurrenceId, previous: null, key, type, status: "duplicate", content: candidate.content, hash, invalidReason: null });
+          planned.push({ candidateOrder: planned.length, occurrenceId, previous: null, key, type, status: "duplicate", content: candidate.content, hash, invalidReason: null });
           continue;
         }
         seen.add(key);
         const previous = baseline.get(key) ?? null;
         const status: ImportDiffStatus = !previous ? "new" : previous.content_sha256 === hash && previous.entry_type === type ? "unchanged" : "changed";
-        planned.push({ occurrenceId, previous, key, type, status, content: candidate.content, hash, invalidReason: null });
+        planned.push({ candidateOrder: planned.length, occurrenceId, previous, key, type, status, content: candidate.content, hash, invalidReason: null });
       }
       for (const [key, previous] of baseline) {
-        if (!present.has(key)) planned.push({ occurrenceId: null, previous, key, type: previous.entry_type, status: "missing", content: previous.content, hash: previous.content_sha256, invalidReason: null });
+        if (!present.has(key)) planned.push({ candidateOrder: planned.length, occurrenceId: null, previous, key, type: previous.entry_type, status: "missing", content: previous.content, hash: previous.content_sha256, invalidReason: null });
       }
 
       for (const candidate of planned) {
         const inserted = await client.query<CandidateRow>(
           `INSERT INTO compendium_import_candidates
              (import_run_id, source_id, file_id, generation_id, occurrence_id, previous_candidate_id,
-              candidate_key, entry_type, diff_status, content, content_sha256, invalid_reason)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12)
+              candidate_order, candidate_key, entry_type, diff_status, content, content_sha256, invalid_reason)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
            ON CONFLICT (import_run_id, candidate_key, occurrence_id) DO NOTHING
-           RETURNING id, candidate_key, entry_type, diff_status, content, content_sha256`,
+           RETURNING id, import_run_id, source_id, file_id, generation_id, occurrence_id,
+                     previous_candidate_id, candidate_order, candidate_key, entry_type, diff_status,
+                     content, content_sha256, invalid_reason, created_at`,
           [runId, run.source_id, run.file_id, run.generation_id, candidate.occurrenceId, candidate.previous?.id ?? null,
-            candidate.key, candidate.type, candidate.status, canonicalJson(candidate.content), candidate.hash, candidate.invalidReason],
+            candidate.candidateOrder, candidate.key, candidate.type, candidate.status, canonicalJson(candidate.content), candidate.hash, candidate.invalidReason],
         );
-        if (!inserted.rows[0]) {
-          const existing = (await client.query<CandidateRow>(
-            `SELECT id, candidate_key, entry_type, diff_status, content, content_sha256
+        let persisted = inserted.rows[0];
+        if (!persisted) {
+          persisted = (await client.query<CandidateRow>(
+            `SELECT id, import_run_id, source_id, file_id, generation_id, occurrence_id,
+                    previous_candidate_id, candidate_order, candidate_key, entry_type, diff_status,
+                    content, content_sha256, invalid_reason, created_at
              FROM compendium_import_candidates
              WHERE import_run_id = $1 AND candidate_key = $2 AND occurrence_id IS NOT DISTINCT FROM $3`,
             [runId, candidate.key, candidate.occurrenceId],
           )).rows[0];
-          if (!existing || existing.diff_status !== candidate.status || existing.content_sha256 !== candidate.hash) {
-            throw new ImportRunConflictError(`Candidate ${candidate.key} was already recorded with different immutable content.`);
-          }
+        }
+        if (!persisted || !candidateMatches(persisted, run, candidate)) {
+          throw new ImportRunConflictError(`Candidate ${candidate.key} was already recorded with different immutable content.`);
         }
       }
-      const diffHash = sha256Json(Object.fromEntries(planned.map((candidate, index) => [`${index}:${candidate.key}`, `${candidate.status}:${candidate.hash}`])));
-      await insertCheckpoint(client, runId, "candidate-diff", diffHash, { candidateCount: planned.length });
+
+      const persisted = await loadCandidateRows(client, runId);
+      if (persisted.length !== planned.length || persisted.some((row, index) => !candidateMatches(row, run, planned[index]))) {
+        throw new ImportRunConflictError("Persisted candidate diff does not match the canonical replay.");
+      }
+      const diffHash = sha256Json({
+        occurrences: occurrences.rows.map(occurrenceManifest),
+        candidates: persisted.map(candidateManifest),
+      });
+      const details = { candidateCount: persisted.length, occurrenceCount: occurrences.rows.length };
+      await insertCheckpoint(client, runId, "candidate-diff", diffHash, details);
       await refreshCounters(client, runId, "diffed");
-      await audit(client, runId, "candidate_diff_computed", actor, { candidateCount: planned.length, contentSha256: diffHash });
-      return loadCandidates(client, runId);
+      await audit(client, runId, "candidate_diff_computed", actor, { ...details, contentSha256: diffHash });
+      return candidatesFromRows(persisted);
     });
   }
 
@@ -431,17 +528,24 @@ async function lockLeasedRun(client: DbClient, runId: string, leaseToken: string
 }
 
 async function insertCheckpoint(client: DbClient, runId: string, key: string, hash: string, details: Readonly<Record<string, unknown>>): Promise<void> {
-  const inserted = await client.query<{ content_sha256: string }>(
+  const inserted = await client.query<{ content_sha256: string; details: Record<string, unknown> }>(
     `INSERT INTO compendium_import_checkpoints (import_run_id, checkpoint_key, content_sha256, details)
-     VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (import_run_id, checkpoint_key) DO NOTHING RETURNING content_sha256`,
+     VALUES ($1,$2,$3,$4::jsonb) ON CONFLICT (import_run_id, checkpoint_key) DO NOTHING
+     RETURNING content_sha256, details`,
     [runId, key, hash, canonicalJson(details)],
   );
   if (!inserted.rows[0]) {
-    const existing = (await client.query<{ content_sha256: string }>(
-      "SELECT content_sha256 FROM compendium_import_checkpoints WHERE import_run_id = $1 AND checkpoint_key = $2",
-      [runId, key],
-    )).rows[0];
-    if (existing?.content_sha256 !== hash) throw new ImportRunConflictError(`Checkpoint ${key} has different immutable content.`);
+    await verifyCheckpoint(client, runId, key, hash, details);
+  }
+}
+
+async function verifyCheckpoint(client: DbClient, runId: string, key: string, hash: string, details: Readonly<Record<string, unknown>>): Promise<void> {
+  const existing = (await client.query<{ content_sha256: string; details: Record<string, unknown> }>(
+    "SELECT content_sha256, details FROM compendium_import_checkpoints WHERE import_run_id = $1 AND checkpoint_key = $2",
+    [runId, key],
+  )).rows[0];
+  if (!existing || existing.content_sha256 !== hash || canonicalJson(existing.details) !== canonicalJson(details)) {
+    throw new ImportRunConflictError(`Checkpoint ${key} has different immutable content.`);
   }
 }
 
@@ -462,13 +566,18 @@ async function refreshCounters(client: DbClient, runId: string, checkpoint: RunR
   );
 }
 
-async function loadCandidates(client: DbClient, runId: string): Promise<readonly ImportCandidate[]> {
-  const result = await client.query<CandidateRow>(
-    `SELECT id, candidate_key, entry_type, diff_status, content, content_sha256
-     FROM compendium_import_candidates WHERE import_run_id = $1 ORDER BY candidate_key, created_at, id`,
+async function loadCandidateRows(client: DbClient, runId: string): Promise<readonly CandidateRow[]> {
+  return (await client.query<CandidateRow>(
+    `SELECT id, import_run_id, source_id, file_id, generation_id, occurrence_id,
+            previous_candidate_id, candidate_order, candidate_key, entry_type, diff_status,
+            content, content_sha256, invalid_reason, created_at
+     FROM compendium_import_candidates WHERE import_run_id = $1 ORDER BY candidate_order, id`,
     [runId],
-  );
-  return result.rows.map((row) => ({ id: row.id, candidateKey: row.candidate_key, diffStatus: row.diff_status, contentSha256: row.content_sha256 }));
+  )).rows;
+}
+
+function candidatesFromRows(rows: readonly CandidateRow[]): readonly ImportCandidate[] {
+  return rows.map((row) => ({ id: row.id, candidateKey: row.candidate_key, diffStatus: row.diff_status, contentSha256: row.content_sha256 }));
 }
 
 async function audit(client: DbClient, runId: string, event: string, actor: string, details: Readonly<Record<string, unknown>>): Promise<void> {
@@ -503,6 +612,128 @@ function canonicalJson(value: unknown): string {
   if (encoded === undefined) throw new CompendiumValidationError("Candidate content must be JSON serializable.");
   return encoded;
 }
+
+function occurrenceMatches(row: OccurrenceRow, run: RunRow, input: ImportOccurrenceInput): boolean {
+  return row.import_run_id === run.id
+    && row.source_id === run.source_id
+    && row.file_id === run.file_id
+    && row.generation_id === run.generation_id
+    && row.chunk_id === (input.chunkId ?? null)
+    && row.occurrence_index === input.occurrenceIndex
+    && row.locator === input.locator.trim()
+    && row.fingerprint_sha256 === input.fingerprintSha256;
+}
+
+function occurrenceManifest(row: OccurrenceRow): Readonly<Record<string, unknown>> {
+  return {
+    id: row.id,
+    importRunId: row.import_run_id,
+    sourceId: row.source_id,
+    fileId: row.file_id,
+    generationId: row.generation_id,
+    chunkId: row.chunk_id,
+    occurrenceIndex: row.occurrence_index,
+    locator: row.locator,
+    fingerprintSha256: row.fingerprint_sha256,
+    createdAt: timestamp(row.created_at),
+  };
+}
+
+function candidateMatches(row: CandidateRow, run: RunRow, candidate: Readonly<{
+  candidateOrder: number;
+  occurrenceId: string | null;
+  previous: BaselineCandidateRow | null;
+  key: string;
+  type: CompendiumEntryType | null;
+  status: ImportDiffStatus;
+  content: Readonly<Record<string, unknown>>;
+  hash: string;
+  invalidReason: string | null;
+}> | undefined): boolean {
+  return candidate !== undefined
+    && row.import_run_id === run.id
+    && row.source_id === run.source_id
+    && row.file_id === run.file_id
+    && row.generation_id === run.generation_id
+    && row.occurrence_id === candidate.occurrenceId
+    && row.previous_candidate_id === (candidate.previous?.id ?? null)
+    && row.candidate_order === candidate.candidateOrder
+    && row.candidate_key === candidate.key
+    && row.entry_type === candidate.type
+    && row.diff_status === candidate.status
+    && canonicalJson(row.content) === canonicalJson(candidate.content)
+    && row.content_sha256 === candidate.hash
+    && row.invalid_reason === candidate.invalidReason;
+}
+
+function candidateManifest(row: CandidateRow): Readonly<Record<string, unknown>> {
+  return {
+    id: row.id,
+    importRunId: row.import_run_id,
+    sourceId: row.source_id,
+    fileId: row.file_id,
+    generationId: row.generation_id,
+    occurrenceId: row.occurrence_id,
+    previousCandidateId: row.previous_candidate_id,
+    candidateOrder: row.candidate_order,
+    candidateKey: row.candidate_key,
+    entryType: row.entry_type,
+    diffStatus: row.diff_status,
+    content: row.content,
+    contentSha256: row.content_sha256,
+    invalidReason: row.invalid_reason,
+    createdAt: timestamp(row.created_at),
+  };
+}
+
+function candidateReplayMatches(
+  rows: readonly CandidateRow[],
+  run: RunRow,
+  inputs: readonly ImportCandidateInput[],
+  occurrenceByIndex: ReadonlyMap<number, string>,
+): boolean {
+  if (rows.length < inputs.length) return false;
+  const seen = new Set<string>();
+  for (const [index, input] of inputs.entries()) {
+    const row = rows[index];
+    const key = input.candidateKey?.trim() ?? "";
+    const type = input.entryType ?? null;
+    const invalidReason = input.invalidReason?.trim()
+      || (!validCandidateKey(key) ? "candidateKey must be a stable lowercase key" : null)
+      || (!type || !COMPENDIUM_ENTRY_TYPES.includes(type) ? "entryType is unsupported" : null);
+    const duplicate = !invalidReason && seen.has(key);
+    if (!invalidReason) seen.add(key);
+    if (!row
+      || row.import_run_id !== run.id
+      || row.source_id !== run.source_id
+      || row.file_id !== run.file_id
+      || row.generation_id !== run.generation_id
+      || row.occurrence_id !== occurrenceByIndex.get(input.occurrenceIndex)
+      || row.candidate_order !== index
+      || row.candidate_key !== (key || `invalid:${input.occurrenceIndex}`)
+      || row.entry_type !== type
+      || canonicalJson(row.content) !== canonicalJson(input.content)
+      || row.content_sha256 !== sha256Json(input.content)
+      || row.invalid_reason !== invalidReason
+      || (invalidReason ? row.diff_status !== "invalid" || row.previous_candidate_id !== null : false)
+      || (duplicate ? row.diff_status !== "duplicate" || row.previous_candidate_id !== null : false)
+      || (!invalidReason && !duplicate && !["new", "unchanged", "changed"].includes(row.diff_status))
+      || (row.diff_status === "new" && row.previous_candidate_id !== null)
+      || (["unchanged", "changed"].includes(row.diff_status) && row.previous_candidate_id === null)) return false;
+  }
+  return rows.slice(inputs.length).every((row, offset) => row.import_run_id === run.id
+    && row.source_id === run.source_id
+    && row.file_id === run.file_id
+    && row.generation_id === run.generation_id
+    && row.occurrence_id === null
+    && row.previous_candidate_id !== null
+    && row.candidate_order === inputs.length + offset
+    && row.entry_type !== null
+    && row.diff_status === "missing"
+    && row.invalid_reason === null);
+}
+
+function timestamp(value: string | Date): string { return value instanceof Date ? value.toISOString() : value; }
 
 function sha256Json(value: unknown): string { return createHash("sha256").update(canonicalJson(value)).digest("hex"); }
 function validCandidateKey(value: string): boolean { return /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/.test(value); }

@@ -165,7 +165,7 @@ export class CompendiumService {
         `SELECT run.status FROM compendium_import_links link
          JOIN compendium_import_occurrences occurrence ON occurrence.id = link.occurrence_id
          JOIN compendium_import_runs run ON run.id = occurrence.import_run_id
-         WHERE link.revision_id = $1 FOR SHARE OF run`,
+         WHERE link.revision_id = $1 FOR SHARE OF link, occurrence, run`,
         [revisionId],
       );
       if (importStates.rows.some(({ status }) => status !== "succeeded")) {

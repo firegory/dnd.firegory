@@ -22,6 +22,10 @@ test("run identity persists versions, input hash, leases, counters, and checkpoi
   assert.match(sql, /compendium_validate_import_run_ownership/);
   assert.match(sql, /generation\.ingestion_job_id = NEW\.ingestion_job_id/);
   assert.match(sql, /compendium_guard_import_run_lifecycle/);
+  assert.match(sql, /UPDATE compendium_import_runs run[\s\S]*run\.status = 'succeeded' THEN 'completed'/);
+  assert.match(sql, /run\.status = 'failed' AND EXISTS[\s\S]*THEN 'occurrences'[\s\S]*run\.status = 'failed' THEN 'created'/);
+  assert.ok(sql.indexOf("UPDATE compendium_import_runs run") < sql.indexOf("compendium_import_runs_success_checkpoint"));
+  assert.match(sql, /import run checkpoints must advance exactly one phase/);
   assert.match(sql, /OLD\.status = 'failed' AND NEW\.status = 'running'/);
   assert.match(sql, /completed import run state is immutable/);
 });
@@ -34,6 +38,8 @@ test("candidate diffs support every review status without mutating publication",
   assert.match(sql, /previous_candidate_id uuid/);
   assert.match(sql, /diff_status = 'missing' AND occurrence_id IS NULL/);
   assert.match(sql, /compendium_import_candidates_slot_unique UNIQUE NULLS NOT DISTINCT/);
+  assert.match(sql, /candidate_order integer NOT NULL/);
+  assert.match(sql, /compendium_import_candidates_order_unique UNIQUE \(import_run_id, candidate_order\)/);
   assert.doesNotMatch(sql, /UPDATE compendium_(?:versions|revisions)\s+SET/i);
 });
 
@@ -44,6 +50,8 @@ test("source artifacts, diagnostics, checkpoints, and audit are retained immutab
   assert.match(sql, /CREATE TABLE IF NOT EXISTS compendium_import_diagnostics/);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS compendium_import_audit/);
   assert.match(sql, /import occurrences, candidates, checkpoints, diagnostics, and audit records are immutable/);
+  assert.match(sql, /import occurrences cannot be appended after the occurrence phase/);
+  assert.match(sql, /import candidates may only be appended during the diff phase/);
 });
 
 test("database publication guard accepts only successful backing runs", () => {
@@ -52,5 +60,12 @@ test("database publication guard accepts only successful backing runs", () => {
   assert.match(sql, /failed or partial import runs cannot publish revisions/);
   assert.match(sql, /compendium_revisions_import_succeeded/);
   assert.match(sql, /compendium_guard_published_import_link/);
+  assert.match(sql, /FOR SHARE OF link, occurrence, run/);
+  assert.match(sql, /FROM compendium_revisions WHERE id = locked_revision FOR SHARE/);
+  assert.match(sql, /BEFORE INSERT OR UPDATE OR DELETE ON compendium_import_links/);
+  assert.match(sql, /RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END/);
+  assert.match(sql, /compendium_validate_published_import_links/);
+  assert.match(sql, /compendium_revisions_import_links_valid[\s\S]*DEFERRABLE INITIALLY DEFERRED/);
+  assert.match(sql, /compendium_import_links_revision_valid[\s\S]*DEFERRABLE INITIALLY DEFERRED/);
   assert.match(sql, /published revisions cannot acquire failed or partial import provenance/);
 });
