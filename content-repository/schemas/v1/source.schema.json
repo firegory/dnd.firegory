@@ -4,20 +4,50 @@
   "title": "Content source provenance",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "kind", "sourceId", "title", "category", "edition", "language", "accessTier", "shared", "ownerUserId", "publisher", "files"],
+  "required": ["schemaVersion", "kind", "sourceId", "title", "category", "edition", "language", "accessTier", "shared", "ownerUserId", "publication", "files"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "kind": { "const": "source" },
     "sourceId": { "$ref": "#/$defs/stableId" },
-    "title": { "type": "string", "minLength": 1 },
+    "title": { "$ref": "#/$defs/nonBlankString" },
     "category": { "enum": ["core_rules", "official_supplement", "homebrew"] },
     "edition": { "enum": ["5e", "5.5e"] },
     "language": { "enum": ["en", "ru"] },
     "accessTier": { "enum": ["open", "premium", "personal"] },
     "shared": { "type": "boolean" },
-    "ownerUserId": { "anyOf": [{ "$ref": "#/$defs/stableId" }, { "type": "null" }] },
-    "publisher": { "type": "string", "minLength": 1 },
-    "license": { "type": "string", "minLength": 1 },
+    "ownerUserId": { "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "title", "publisher", "releaseYear", "sourcePriority", "canonicalBookId"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+        "title": { "$ref": "#/$defs/nonBlankString" },
+        "publisher": { "$ref": "#/$defs/nonBlankString" },
+        "releaseYear": { "type": "integer", "minimum": 1974, "maximum": 2100 },
+        "revision": { "$ref": "#/$defs/nonBlankString" },
+        "origin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "id"],
+          "properties": {
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "allOf": [
+                { "pattern": "^https?://[^%\\s/?#]+" },
+                { "pattern": "^(?:[^%\\s]|%[0-9A-Fa-f]{2})+$" }
+              ]
+            },
+            "id": { "$ref": "#/$defs/nonBlankString" }
+          }
+        },
+        "attribution": { "$ref": "#/$defs/nonBlankString" },
+        "sourcePriority": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "canonicalBookId": { "$ref": "#/$defs/stableId" }
+      }
+    },
+    "license": { "$ref": "#/$defs/nonBlankString" },
     "files": {
       "type": "array",
       "minItems": 1,
@@ -45,11 +75,17 @@
     },
     {
       "if": { "properties": { "accessTier": { "const": "personal" } }, "required": ["accessTier"] },
-      "then": { "properties": { "shared": { "const": false }, "ownerUserId": { "$ref": "#/$defs/stableId" } } }
+      "then": { "properties": { "shared": { "const": false }, "ownerUserId": { "$ref": "#/$defs/uuid" } } }
+    },
+    {
+      "if": { "properties": { "edition": { "const": "5.5e" } }, "required": ["edition"] },
+      "then": { "properties": { "publication": { "type": "object", "properties": { "releaseYear": { "type": "integer", "minimum": 2024 } } } } }
     }
   ],
   "$defs": {
     "stableId": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$" },
+    "uuid": { "type": "string", "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$" },
+    "nonBlankString": { "type": "string", "pattern": "\\S" },
     "relativePath": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[a-zA-Z0-9._/-]+$" },
     "contentHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
   }

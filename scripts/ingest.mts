@@ -63,7 +63,7 @@ Options:
   --edition        D&D edition: 5e or 5.5e (required)
   --language       Language code: en or ru (required)
   --access         Access tier: open, premium, or personal (required)
-  --owner-user-id  Owner user ID for personal content (optional)
+  --owner-user-id  Owner UUID required for personal content; forbidden otherwise
   --help           Show this help message`);
     process.exit(0);
   }

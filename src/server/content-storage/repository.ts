@@ -21,7 +21,20 @@ export type ContentSource = Readonly<{
   accessTier: "open" | "premium" | "personal";
   shared: boolean;
   ownerUserId: string | null;
-  publisher: string;
+  publication: Readonly<{
+    code: string;
+    title: string;
+    publisher: string;
+    releaseYear: number;
+    revision?: string;
+    origin?: Readonly<{
+      url: string;
+      id: string;
+    }>;
+    attribution?: string;
+    sourcePriority: number;
+    canonicalBookId: string;
+  }>;
   license?: string;
   files: readonly Readonly<{
     fileId: string;

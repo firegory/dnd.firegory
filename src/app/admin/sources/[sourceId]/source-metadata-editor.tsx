@@ -1,51 +1,29 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { AppSelect } from "../../../../components/ui/select";
 import { useUiLanguage } from "../../../../components/ui/i18n";
 import type { SourceWithStats } from "../../../../server/admin/source-view";
+import {
+  createSourceMetadataFormState,
+  sourceMetadataPatchFromForm,
+  type SourceMetadataFormState,
+} from "./source-metadata-form";
 
 const LANGUAGE_OPTIONS = [
   { value: "ru", label: "RU" },
   { value: "en", label: "EN" },
 ];
 
-const EDITION_VALUES = new Set(["5.5e", "5e"]);
-const LANGUAGE_VALUES = new Set(["ru", "en"]);
-
-const STORAGE_KEYS = {
-  edition: "dnd.firegory.sourceMetadata.edition",
-  language: "dnd.firegory.sourceMetadata.language",
-} as const;
-
 export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
   const { t } = useUiLanguage();
-  const [title, setTitle] = useState(source.title);
-  const [category, setCategory] = useState(source.category);
-  const [edition, setEdition] = useState(source.edition);
-  const [language, setLanguage] = useState(source.language);
-  const [accessTier, setAccessTier] = useState(source.accessTier);
+  const [form, setForm] = useState(() => createSourceMetadataFormState(source));
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [message, setMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    const storedEdition = window.localStorage.getItem(STORAGE_KEYS.edition);
-    const storedLanguage = window.localStorage.getItem(STORAGE_KEYS.language);
-    if (storedEdition && EDITION_VALUES.has(storedEdition)) {
-      queueMicrotask(() => setEdition(storedEdition as typeof edition));
-    }
-    if (storedLanguage && LANGUAGE_VALUES.has(storedLanguage)) {
-      queueMicrotask(() => setLanguage(storedLanguage as typeof language));
-    }
-  }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEYS.edition, edition);
-  }, [edition]);
-
-  useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEYS.language, language);
-  }, [language]);
+  function setField<K extends keyof SourceMetadataFormState>(field: K, value: SourceMetadataFormState[K]) {
+    setForm((current) => ({ ...current, [field]: value }));
+  }
 
   const categoryOptions = [
     { value: "core_rules", label: t("coreRules") },
@@ -69,7 +47,7 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
       const response = await fetch(`/api/admin/sources/${source.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, category, edition, language, accessTier }),
+        body: JSON.stringify(sourceMetadataPatchFromForm(form)),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -103,15 +81,28 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
         <label className="flex flex-col gap-1.5 sm:col-span-2">
           <span className="text-xs font-semibold tracking-wide text-text-muted uppercase">{t("title")}</span>
           <input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
+            value={form.title}
+            onChange={(event) => setField("title", event.target.value)}
             className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
           />
         </label>
-        <AppSelect label={t("category")} value={category} options={categoryOptions} onChange={(value) => setCategory(value as typeof category)} />
-        <AppSelect label={t("edition")} value={edition} options={editionOptions} onChange={(value) => setEdition(value as typeof edition)} />
-        <AppSelect label={t("language")} value={language} options={LANGUAGE_OPTIONS} onChange={(value) => setLanguage(value as typeof language)} />
-        <AppSelect label={t("access")} value={accessTier} options={accessOptions} onChange={(value) => setAccessTier(value as typeof accessTier)} />
+        <AppSelect label={t("category")} value={form.category} options={categoryOptions} onChange={(value) => setField("category", value as SourceMetadataFormState["category"])} />
+        <AppSelect label={t("edition")} value={form.edition} options={editionOptions} onChange={(value) => setField("edition", value as SourceMetadataFormState["edition"])} />
+        <AppSelect label={t("language")} value={form.language} options={LANGUAGE_OPTIONS} onChange={(value) => setField("language", value as SourceMetadataFormState["language"])} />
+        <AppSelect label={t("access")} value={form.accessTier} options={accessOptions} onChange={(value) => setField("accessTier", value as SourceMetadataFormState["accessTier"])} />
+        <TextField label={t("ownerUserId")} value={form.ownerUserId} onChange={(value) => setField("ownerUserId", value)} disabled={form.accessTier !== "personal"} />
+        <TextField label={t("canonicalSourceId")} value={form.canonicalSourceId} onChange={(value) => setField("canonicalSourceId", value)} />
+        <TextField label={t("publicationCode")} value={form.publicationCode} onChange={(value) => setField("publicationCode", value)} />
+        <TextField label={t("publicationTitle")} value={form.publicationTitle} onChange={(value) => setField("publicationTitle", value)} />
+        <TextField label={t("publisher")} value={form.publisher} onChange={(value) => setField("publisher", value)} />
+        <TextField label={t("releaseYear")} value={form.releaseYear} onChange={(value) => setField("releaseYear", value)} type="number" />
+        <TextField label={t("revision")} value={form.revision} onChange={(value) => setField("revision", value)} />
+        <TextField label={t("externalOriginUrl")} value={form.originUrl} onChange={(value) => setField("originUrl", value)} type="url" />
+        <TextField label={t("externalOriginId")} value={form.originId} onChange={(value) => setField("originId", value)} />
+        <TextField label={t("attribution")} value={form.attribution} onChange={(value) => setField("attribution", value)} />
+        <TextField label={t("sourcePriority")} value={form.sourcePriority} onChange={(value) => setField("sourcePriority", value)} type="number" />
+        <TextField label={t("canonicalBookId")} value={form.canonicalBookId} onChange={(value) => setField("canonicalBookId", value)} />
+        <TextField label={t("license")} value={form.license} onChange={(value) => setField("license", value)} />
       </div>
 
       <div className="mt-5 flex gap-3">
@@ -126,11 +117,7 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
         <button
           type="button"
           onClick={() => {
-            setTitle(source.title);
-            setCategory(source.category);
-            setEdition(source.edition);
-            setLanguage(source.language);
-            setAccessTier(source.accessTier);
+            setForm(createSourceMetadataFormState(source));
             setStatus("idle");
             setMessage(null);
           }}
@@ -140,5 +127,32 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
         </button>
       </div>
     </section>
+  );
+}
+
+function TextField({
+  label,
+  value,
+  onChange,
+  type = "text",
+  disabled = false,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  type?: "text" | "number" | "url";
+  disabled?: boolean;
+}) {
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-xs font-semibold tracking-wide text-text-muted uppercase">{label}</span>
+      <input
+        type={type}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+        className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:opacity-50"
+      />
+    </label>
   );
 }

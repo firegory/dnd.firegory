@@ -4,6 +4,11 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { AppSelect } from "../../../components/ui/select";
 import { useUiLanguage } from "../../../components/ui/i18n";
+import {
+  createUploadSourceFormState,
+  resetUploadSourceFormState,
+  type UploadSourceFormState,
+} from "./upload-source-form";
 
 const LANGUAGES = [
   { value: "ru", label: "RU" },
@@ -37,11 +42,7 @@ async function readUploadResponse(response: Response): Promise<UploadResponse> {
 export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
   const { t } = useUiLanguage();
   const [file, setFile] = useState<File | null>(null);
-  const [title, setTitle] = useState("");
-  const [category, setCategory] = useState<string>("core_rules");
-  const [edition, setEdition] = useState<string>("5.5e");
-  const [language, setLanguage] = useState<string>("ru");
-  const [accessTier, setAccessTier] = useState<string>("open");
+  const [fields, setFields] = useState(createUploadSourceFormState);
   const [formStatus, setFormStatus] = useState<FormStatus>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [result, setResult] = useState<{ sourceId: string; jobId: string } | null>(null);
@@ -49,20 +50,29 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
 
   const isUploading = formStatus === "uploading";
 
+  function setField<K extends keyof UploadSourceFormState>(field: K, value: UploadSourceFormState[K]) {
+    setFields((current) => ({ ...current, [field]: value }));
+  }
+
   useEffect(() => {
     const storedEdition = window.localStorage.getItem(STORAGE_KEYS.edition);
     const storedLanguage = window.localStorage.getItem(STORAGE_KEYS.language);
-    if (storedEdition) queueMicrotask(() => setEdition(storedEdition));
-    if (storedLanguage) queueMicrotask(() => setLanguage(storedLanguage));
+    if (storedEdition || storedLanguage) {
+      queueMicrotask(() => setFields((current) => ({
+        ...current,
+        ...(storedEdition ? { edition: storedEdition } : {}),
+        ...(storedLanguage ? { language: storedLanguage } : {}),
+      })));
+    }
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEYS.edition, edition);
-  }, [edition]);
+    window.localStorage.setItem(STORAGE_KEYS.edition, fields.edition);
+  }, [fields.edition]);
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEYS.language, language);
-  }, [language]);
+    window.localStorage.setItem(STORAGE_KEYS.language, fields.language);
+  }, [fields.language]);
 
   const categories = [
     { value: "core_rules", label: t("coreRules"), description: t("coreRulesDescription") },
@@ -87,7 +97,7 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
       setErrorMessage(t("selectPdfError"));
       return;
     }
-    if (!title.trim()) {
+    if (!fields.title.trim()) {
       setFormStatus("error");
       setErrorMessage(t("enterTitleError"));
       return;
@@ -105,11 +115,23 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
 
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("title", title.trim());
-    formData.append("category", category);
-    formData.append("edition", edition);
-    formData.append("language", language);
-    formData.append("accessTier", accessTier);
+    formData.append("title", fields.title.trim());
+    formData.append("category", fields.category);
+    formData.append("edition", fields.edition);
+    formData.append("language", fields.language);
+    formData.append("accessTier", fields.accessTier);
+    formData.append("canonicalSourceId", fields.canonicalSourceId);
+    formData.append("publicationCode", fields.publicationCode);
+    formData.append("publicationTitle", fields.publicationTitle || fields.title.trim());
+    formData.append("publisher", fields.publisher);
+    formData.append("releaseYear", fields.releaseYear);
+    formData.append("revision", fields.revision);
+    formData.append("originUrl", fields.originUrl);
+    formData.append("originId", fields.originId);
+    formData.append("attribution", fields.attribution);
+    formData.append("sourcePriority", fields.sourcePriority);
+    formData.append("canonicalBookId", fields.canonicalBookId);
+    formData.append("license", fields.license);
 
     try {
       const response = await fetch("/api/admin/ingestion/upload", {
@@ -139,7 +161,7 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
       setFormStatus("success");
       setResult({ sourceId: data.sourceId, jobId: data.jobId });
       setFile(null);
-      setTitle("");
+      setFields((current) => resetUploadSourceFormState(current));
       const fileInput = document.getElementById("pdf-file-input") as HTMLInputElement | null;
       if (fileInput) fileInput.value = "";
       onSuccess?.();
@@ -189,9 +211,9 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
           <span className="text-sm font-semibold text-text-secondary">{t("titleRequired")}</span>
           <input
             type="text"
-            value={title}
+            value={fields.title}
             onChange={(e) => {
-              setTitle(e.target.value);
+              setField("title", e.target.value);
               if (formStatus === "success" || formStatus === "error") {
                 setFormStatus("idle");
                 setErrorMessage(null);
@@ -201,10 +223,22 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
             className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
           />
         </label>
-        <AppSelect label={t("category")} value={category} options={categories} onChange={setCategory} disabled={isUploading} />
-        <AppSelect label={t("edition")} value={edition} options={editions} onChange={setEdition} disabled={isUploading} />
-        <AppSelect label={t("language")} value={language} options={LANGUAGES} onChange={setLanguage} disabled={isUploading} />
-        <AppSelect label={t("accessLevel")} value={accessTier} options={accessTiers} onChange={setAccessTier} disabled={isUploading} />
+        <AppSelect label={t("category")} value={fields.category} options={categories} onChange={(value) => setField("category", value)} disabled={isUploading} />
+        <AppSelect label={t("edition")} value={fields.edition} options={editions} onChange={(value) => setField("edition", value)} disabled={isUploading} />
+        <AppSelect label={t("language")} value={fields.language} options={LANGUAGES} onChange={(value) => setField("language", value)} disabled={isUploading} />
+        <AppSelect label={t("accessLevel")} value={fields.accessTier} options={accessTiers} onChange={(value) => setField("accessTier", value)} disabled={isUploading} />
+        <UploadTextField label={t("canonicalSourceId")} value={fields.canonicalSourceId} onChange={(value) => setField("canonicalSourceId", value)} disabled={isUploading} />
+        <UploadTextField label={t("publicationCode")} value={fields.publicationCode} onChange={(value) => setField("publicationCode", value)} disabled={isUploading} />
+        <UploadTextField label={t("publicationTitle")} value={fields.publicationTitle} onChange={(value) => setField("publicationTitle", value)} disabled={isUploading} />
+        <UploadTextField label={t("publisher")} value={fields.publisher} onChange={(value) => setField("publisher", value)} disabled={isUploading} />
+        <UploadTextField label={t("releaseYear")} value={fields.releaseYear} onChange={(value) => setField("releaseYear", value)} disabled={isUploading} type="number" />
+        <UploadTextField label={t("revision")} value={fields.revision} onChange={(value) => setField("revision", value)} disabled={isUploading} />
+        <UploadTextField label={t("externalOriginUrl")} value={fields.originUrl} onChange={(value) => setField("originUrl", value)} disabled={isUploading} type="url" />
+        <UploadTextField label={t("externalOriginId")} value={fields.originId} onChange={(value) => setField("originId", value)} disabled={isUploading} />
+        <UploadTextField label={t("attribution")} value={fields.attribution} onChange={(value) => setField("attribution", value)} disabled={isUploading} />
+        <UploadTextField label={t("sourcePriority")} value={fields.sourcePriority} onChange={(value) => setField("sourcePriority", value)} disabled={isUploading} type="number" />
+        <UploadTextField label={t("canonicalBookId")} value={fields.canonicalBookId} onChange={(value) => setField("canonicalBookId", value)} disabled={isUploading} />
+        <UploadTextField label={t("license")} value={fields.license} onChange={(value) => setField("license", value)} disabled={isUploading} />
       </div>
 
       <div className="flex flex-wrap items-center gap-4">
@@ -225,5 +259,32 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
         )}
       </div>
     </form>
+  );
+}
+
+function UploadTextField({
+  label,
+  value,
+  onChange,
+  disabled,
+  type = "text",
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+  type?: "text" | "number" | "url";
+}) {
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-sm font-semibold text-text-secondary">{label}</span>
+      <input
+        type={type}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+        className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:opacity-50"
+      />
+    </label>
   );
 }

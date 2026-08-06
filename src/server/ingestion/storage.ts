@@ -10,7 +10,7 @@ import type {
   SourceEdition,
   SourceLanguage,
 } from "../access/retrieval-filter.ts";
-import { normalizeSourceInput } from "../content/metadata.ts";
+import { normalizeSourceInput, type PublicationMetadataInput } from "../content/metadata.ts";
 import { computeChecksum, originalFilePath, getStorageRoot } from "./paths.ts";
 
 export type IngestionJobRecord = Readonly<{
@@ -130,6 +130,9 @@ export async function createSourceRecord(input: {
   language: SourceLanguage;
   accessTier: AccessTier;
   ownerUserId?: string | null;
+  canonicalSourceId?: string | null;
+  publication?: PublicationMetadataInput;
+  license?: string | null;
   createdByUserId?: string | null;
   metadata?: Record<string, unknown>;
   client?: PoolClient;
@@ -141,13 +144,22 @@ export async function createSourceRecord(input: {
     language: input.language,
     accessTier: input.accessTier,
     ownerUserId: input.ownerUserId,
+    canonicalSourceId: input.canonicalSourceId,
+    publication: input.publication,
+    license: input.license,
     metadata: input.metadata,
   });
 
-  const sql = `INSERT INTO sources (title, category, edition, language, access_tier, shared, owner_user_id, created_by_user_id, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+  const sql = `INSERT INTO sources (
+       canonical_source_id, title, category, edition, language, access_tier, shared,
+       owner_user_id, publication_code, publication_title, publisher, release_year,
+       publication_revision, external_origin_url, external_origin_id, attribution,
+       source_priority, canonical_book_id, license, created_by_user_id, metadata
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+               $14, $15, $16, $17, $18, $19, $20, $21)
      RETURNING id`;
   const params = [
+    normalized.canonicalSourceId,
     normalized.title,
     normalized.category,
     normalized.edition,
@@ -155,6 +167,17 @@ export async function createSourceRecord(input: {
     normalized.accessTier,
     normalized.shared,
     normalized.ownerUserId,
+    normalized.publication.code,
+    normalized.publication.title,
+    normalized.publication.publisher,
+    normalized.publication.releaseYear,
+    normalized.publication.revision,
+    normalized.publication.origin?.url ?? null,
+    normalized.publication.origin?.id ?? null,
+    normalized.publication.attribution,
+    normalized.publication.sourcePriority,
+    normalized.publication.canonicalBookId,
+    normalized.license,
     input.createdByUserId ?? null,
     JSON.stringify(normalized.metadata ?? {}),
   ];

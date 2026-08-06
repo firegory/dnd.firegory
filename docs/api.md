@@ -94,12 +94,24 @@ Upload a PDF and start an ingestion job.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `file` | File | yes | PDF file (max 200 MB) |
+| `file` | File | yes | PDF file (max 1 GB) |
 | `title` | string | yes | Source title |
 | `category` | string | yes | `core_rules`, `official_supplement`, or `homebrew` |
 | `edition` | string | yes | `5e` or `5.5e` |
 | `language` | string | yes | `en` or `ru` |
 | `accessTier` | string | yes | `open`, `premium`, or `personal` |
+| `canonicalSourceId` | string | no | Stable canonical source ID |
+| `publicationCode` | string | no | Publication/catalog code |
+| `publicationTitle` | string | no | Defaults to source title |
+| `publisher` | string | no | Publisher |
+| `releaseYear` | integer | no | Publication year |
+| `revision` | string | no | Printing/revision; requires release year |
+| `originUrl` | string | no | Absolute HTTP(S) URL; requires origin ID and valid percent encoding |
+| `originId` | string | no | External provider ID; requires origin URL |
+| `attribution` | string | no | Display attribution |
+| `sourcePriority` | integer | no | 0-1000; defaults to 0 |
+| `canonicalBookId` | string | no | Stable conceptual book identity |
+| `license` | string | no | License statement |
 
 **Response** (201):
 
@@ -246,6 +258,7 @@ List all sources with optional filtering.
   "sources": [
     {
       "id": "uuid",
+      "canonicalSourceId": "players-handbook-2014-en",
       "title": "Player's Handbook",
       "category": "core_rules",
       "edition": "5e",
@@ -253,6 +266,18 @@ List all sources with optional filtering.
       "accessTier": "premium",
       "shared": true,
       "ownerUserId": null,
+      "publication": {
+        "code": "PHB-2014",
+        "title": "Player's Handbook",
+        "publisher": "Wizards of the Coast",
+        "releaseYear": 2014,
+        "revision": "first printing",
+        "origin": { "url": "https://example.com/books/phb", "id": "phb-2014" },
+        "attribution": "Player's Handbook, Wizards of the Coast",
+        "sourcePriority": 100,
+        "canonicalBookId": "players-handbook"
+      },
+      "license": "All rights reserved",
       "metadata": {},
       "createdByUserId": "uuid",
       "createdAt": "2026-01-01T00:00:00Z",
@@ -273,12 +298,25 @@ Create a new source metadata record.
 
 ```json
 {
+  "canonicalSourceId": "players-handbook-2014-en",
   "title": "Player's Handbook",
   "category": "core_rules",
   "edition": "5e",
   "language": "en",
   "accessTier": "premium",
   "ownerUserId": null,
+  "publication": {
+    "code": "PHB-2014",
+    "title": "Player's Handbook",
+    "publisher": "Wizards of the Coast",
+    "releaseYear": 2014,
+    "revision": "first printing",
+    "origin": { "url": "https://example.com/books/phb", "id": "phb-2014" },
+    "attribution": "Player's Handbook, Wizards of the Coast",
+    "sourcePriority": 100,
+    "canonicalBookId": "players-handbook"
+  },
+  "license": "All rights reserved",
   "metadata": {}
 }
 ```
@@ -286,11 +324,23 @@ Create a new source metadata record.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `title` | string | yes | Source title |
+| `canonicalSourceId` | string or null | no | Stable lowercase ID used by canonical `source.json` |
 | `category` | string | yes | `core_rules`, `official_supplement`, or `homebrew` |
 | `edition` | string | yes | `5e` or `5.5e` |
 | `language` | string | yes | `en` or `ru` |
 | `accessTier` | string | yes | `open`, `premium`, or `personal` |
-| `ownerUserId` | string | no | Required for `personal` tier |
+| `ownerUserId` | UUID string | no | Required for `personal` tier; rejected for `open` and `premium` |
+| `publication` | object | no | Bibliographic projection; omitted values retain documented nullable/default behavior |
+| `publication.code` | string or null | no | Publication/catalog code |
+| `publication.title` | string | no | Publication title; defaults to source `title` |
+| `publication.publisher` | string or null | no | Publisher |
+| `publication.releaseYear` | integer or null | no | 1974-2100; `5.5e` cannot predate 2024 |
+| `publication.revision` | string or null | no | Printing/revision; requires `releaseYear` |
+| `publication.origin` | object or null | no | Absolute HTTP(S) `url` and `id`, supplied together; WHATWG-normalized and whitespace-free |
+| `publication.attribution` | string or null | no | Display attribution |
+| `publication.sourcePriority` | integer | no | 0-1000; defaults to 0 |
+| `publication.canonicalBookId` | string or null | no | Stable conceptual book identity |
+| `license` | string or null | no | License statement |
 | `metadata` | object | no | Additional metadata |
 
 **Response** (201): Returns the created source record.
