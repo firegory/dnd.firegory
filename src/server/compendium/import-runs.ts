@@ -391,7 +391,7 @@ export class CompendiumImportRunService {
              (import_run_id, source_id, file_id, generation_id, occurrence_id, previous_candidate_id,
               candidate_order, candidate_key, entry_type, diff_status, content, content_sha256, invalid_reason)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
-           ON CONFLICT (import_run_id, candidate_key, occurrence_id) DO NOTHING
+            ON CONFLICT (import_run_id, entry_type, candidate_key, occurrence_id) DO NOTHING
            RETURNING id, import_run_id, source_id, file_id, generation_id, occurrence_id,
                      previous_candidate_id, candidate_order, candidate_key, entry_type, diff_status,
                      content, content_sha256, invalid_reason, created_at`,
@@ -405,8 +405,9 @@ export class CompendiumImportRunService {
                     previous_candidate_id, candidate_order, candidate_key, entry_type, diff_status,
                     content, content_sha256, invalid_reason, created_at
              FROM compendium_import_candidates
-             WHERE import_run_id = $1 AND candidate_key = $2 AND occurrence_id IS NOT DISTINCT FROM $3`,
-            [runId, candidate.key, candidate.occurrenceId],
+             WHERE import_run_id = $1 AND entry_type IS NOT DISTINCT FROM $2
+               AND candidate_key = $3 AND occurrence_id IS NOT DISTINCT FROM $4`,
+            [runId, candidate.type, candidate.key, candidate.occurrenceId],
           )).rows[0];
         }
         if (!persisted || !candidateMatches(persisted, run, candidate)) {

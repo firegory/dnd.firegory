@@ -34,6 +34,7 @@ type ImportRunStore = Pick<CompendiumImportRunService,
 
 export type ExistingSourceCandidate = Readonly<{
   sourceId: string;
+  fileId: string;
   entryType: CompendiumEntryType;
   candidateKey: string;
 }>;
@@ -123,7 +124,11 @@ export function markAmbiguousSourceLocalDuplicates(
     localCounts.set(identity, (localCounts.get(identity) ?? 0) + 1);
   }
   const existingCounts = new Map<string, number>();
+  const countedFileSlots = new Set<string>();
   for (const match of existing) {
+    const fileSlot = `${match.sourceId}:${match.fileId}:${match.entryType}:${match.candidateKey}`;
+    if (countedFileSlots.has(fileSlot)) continue;
+    countedFileSlots.add(fileSlot);
     const identity = `${match.sourceId}:${match.entryType}:${match.candidateKey}`;
     existingCounts.set(identity, (existingCounts.get(identity) ?? 0) + 1);
   }
@@ -279,16 +284,24 @@ export class CandidateExtractionService {
         [boundary.generationId, boundary.fileId, boundary.sourceId],
       )).rows.map(chunkFromRow);
       const existingCandidates = (await client.query<ExistingRow>(
-        `SELECT candidate.source_id, candidate.entry_type, candidate.candidate_key
-         FROM compendium_import_candidates candidate
-         JOIN compendium_import_runs run ON run.id = candidate.import_run_id
-         WHERE candidate.source_id = $1 AND run.source_id = $1 AND run.status = 'succeeded'
-           AND run.generation_id IS DISTINCT FROM $2
-           AND candidate.diff_status IN ('new', 'unchanged', 'changed')
-           AND candidate.entry_type IS NOT NULL
-         ORDER BY candidate.entry_type, candidate.candidate_key, candidate.id`,
+        `WITH latest AS (
+           SELECT DISTINCT ON (candidate.source_id, candidate.file_id, candidate.entry_type, candidate.candidate_key)
+                  candidate.source_id, candidate.file_id, candidate.entry_type, candidate.candidate_key,
+                  candidate.diff_status
+           FROM compendium_import_candidates candidate
+           JOIN compendium_import_runs run ON run.id = candidate.import_run_id
+           WHERE candidate.source_id = $1 AND run.source_id = $1 AND run.status = 'succeeded'
+             AND run.generation_id IS DISTINCT FROM $2
+             AND candidate.diff_status IN ('new', 'unchanged', 'changed', 'missing')
+             AND candidate.entry_type IS NOT NULL
+           ORDER BY candidate.source_id, candidate.file_id, candidate.entry_type, candidate.candidate_key,
+                    run.finished_at DESC, candidate.created_at DESC, candidate.id DESC
+         )
+         SELECT source_id, file_id, entry_type, candidate_key
+         FROM latest WHERE diff_status <> 'missing'
+         ORDER BY source_id, file_id, entry_type, candidate_key`,
         [boundary.sourceId, boundary.generationId],
-      )).rows.map((row) => ({ sourceId: row.source_id, entryType: row.entry_type, candidateKey: row.candidate_key }));
+      )).rows.map((row) => ({ sourceId: row.source_id, fileId: row.file_id, entryType: row.entry_type, candidateKey: row.candidate_key }));
       return { boundary, chunks, existingCandidates };
     });
   }
@@ -407,7 +420,7 @@ type BoundaryRow = Readonly<{
   edition: string; language: string; access_tier: string; shared: boolean; owner_user_id: string | null;
 }>;
 type ChunkRow = Readonly<{ id: string; chunk_index: number; page_number: number | null; section_heading: string | null; quote_text: string }>;
-type ExistingRow = Readonly<{ source_id: string; entry_type: CompendiumEntryType; candidate_key: string }>;
+type ExistingRow = Readonly<{ source_id: string; file_id: string; entry_type: CompendiumEntryType; candidate_key: string }>;
 
 function boundaryFromRow(row: BoundaryRow): ExtractionBoundary {
   return {

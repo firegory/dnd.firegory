@@ -15,6 +15,7 @@ const ids = {
   source: "10000000-0000-4000-8000-000000000001",
   otherSource: "10000000-0000-4000-8000-000000000002",
   file: "10000000-0000-4000-8000-000000000003",
+  otherFile: "10000000-0000-4000-8000-00000000000a",
   generation: "10000000-0000-4000-8000-000000000004",
   chunk: "10000000-0000-4000-8000-000000000005",
   otherChunk: "10000000-0000-4000-8000-000000000006",
@@ -289,21 +290,35 @@ test("matching is source-local and ambiguous duplicates are review-only", async 
     boundary: openBoundary,
     chunks: [evidence],
     existingCandidates: [
-      { sourceId: ids.otherSource, entryType: "spell", candidateKey: "burning-hands" },
-      { sourceId: ids.otherSource, entryType: "spell", candidateKey: "burning-hands" },
+      { sourceId: ids.otherSource, fileId: ids.file, entryType: "spell", candidateKey: "burning-hands" },
+      { sourceId: ids.otherSource, fileId: ids.otherFile, entryType: "spell", candidateKey: "burning-hands" },
     ],
   }, { modelVersion: "none" });
   assert.equal(extracted.candidates[0].review.status, "ready");
 
   const ambiguous = markAmbiguousSourceLocalDuplicates(extracted.candidates, [
-    { sourceId: ids.source, entryType: "spell", candidateKey: "burning-hands" },
-    { sourceId: ids.source, entryType: "spell", candidateKey: "burning-hands" },
+    { sourceId: ids.source, fileId: ids.file, entryType: "spell", candidateKey: "burning-hands" },
+    { sourceId: ids.source, fileId: ids.otherFile, entryType: "spell", candidateKey: "burning-hands" },
   ]);
   assert.equal(ambiguous[0].review.status, "ambiguous_duplicate");
   assert.match(ambiguous[0].review.reasons[0], /source-local/);
 
   const duplicateCurrent = markAmbiguousSourceLocalDuplicates([extracted.candidates[0], extracted.candidates[0]], []);
   assert.ok(duplicateCurrent.every(({ review }) => review.status === "ambiguous_duplicate"));
+});
+
+test("a third sequential import collapses prior history while competing files remain ambiguous", async () => {
+  const evidence = chunk(await fixture("en-spell.txt"));
+  const candidate = (await extractCandidates({ boundary: openBoundary, chunks: [evidence], existingCandidates: [] }, { modelVersion: "none" })).candidates[0];
+  const sequentialHistory = [
+    { sourceId: ids.source, fileId: ids.file, entryType: "spell" as const, candidateKey: "burning-hands" },
+    { sourceId: ids.source, fileId: ids.file, entryType: "spell" as const, candidateKey: "burning-hands" },
+  ];
+  assert.equal(markAmbiguousSourceLocalDuplicates([candidate], sequentialHistory)[0].review.status, "ready");
+  assert.equal(markAmbiguousSourceLocalDuplicates([candidate], [
+    sequentialHistory[0],
+    { ...sequentialHistory[0], fileId: ids.otherFile },
+  ])[0].review.status, "ambiguous_duplicate");
 });
 
 test("invalid edition, language, and access ownership boundaries fail closed", async () => {
@@ -329,7 +344,7 @@ test("corpus loading enforces successful PDF generation ownership and source-loc
         edition: "5e", language: "en", access_tier: "personal", shared: false, owner_user_id: ids.owner,
       }] } as never;
       if (sql.includes("FROM chunks")) return { rows: [{ id: ids.chunk, chunk_index: 0, page_number: 1, section_heading: null, quote_text: "text" }] } as never;
-      return { rows: [{ source_id: ids.source, entry_type: "spell", candidate_key: "existing" }] } as never;
+      return { rows: [{ source_id: ids.source, file_id: ids.file, entry_type: "spell", candidate_key: "existing" }] } as never;
     },
   }));
   const corpus = await service.loadCorpus(ids.generation);
@@ -340,6 +355,9 @@ test("corpus loading enforces successful PDF generation ownership and source-loc
   assert.match(statements[1].sql, /generation_id = \$1 AND file_id = \$2 AND source_id = \$3/);
   assert.deepEqual(statements[1].values, [ids.generation, ids.file, ids.source]);
   assert.match(statements[2].sql, /candidate\.source_id = \$1 AND run\.source_id = \$1/);
+  assert.match(statements[2].sql, /DISTINCT ON \(candidate\.source_id, candidate\.file_id, candidate\.entry_type, candidate\.candidate_key\)/);
+  assert.match(statements[2].sql, /candidate\.diff_status IN \('new', 'unchanged', 'changed', 'missing'\)[\s\S]*FROM latest WHERE diff_status <> 'missing'/);
+  assert.match(statements[2].sql, /run\.finished_at DESC, candidate\.created_at DESC/);
   assert.match(statements[2].sql, /run\.generation_id IS DISTINCT FROM \$2/);
   assert.deepEqual(statements[2].values, [ids.source, ids.generation]);
 });
@@ -402,7 +420,7 @@ test("run identity hash is stable when prior source-local history changes", asyn
   const service = new CandidateExtractionService(async () => { throw new Error("unused"); }, runs);
   service.loadCorpus = async () => ({ ...corpus, existingCandidates: [] });
   await service.run({ generationId: ids.generation, actor: "test", modelVersion: "none" });
-  service.loadCorpus = async () => ({ ...corpus, existingCandidates: [{ sourceId: ids.source, entryType: "spell", candidateKey: "new-history" }] });
+  service.loadCorpus = async () => ({ ...corpus, existingCandidates: [{ sourceId: ids.source, fileId: ids.file, entryType: "spell", candidateKey: "new-history" }] });
   await service.run({ generationId: ids.generation, actor: "test", modelVersion: "none" });
   assert.equal(hashes[0], hashes[1]);
 });

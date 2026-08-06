@@ -259,6 +259,8 @@ test("occurrences are rejected after the run advances to diffing", async () => {
 test("candidate diff retains unchanged, changed, missing, duplicate, and invalid review rows", async () => {
   const sameHash = hash('{"name":"same"}');
   const inserted: Array<Record<string, unknown>> = [];
+  let candidateInsertSql = "";
+  let replayLookup: { sql: string; values: unknown[] } | null = null;
   const service = new CompendiumImportRunService(async (callback) => callback({
     async query(sql: string, values: unknown[] = []) {
       if (sql.includes("FROM compendium_import_runs") && sql.includes("FOR UPDATE")) return { rows: [runRow] } as never;
@@ -269,8 +271,10 @@ test("candidate diff retains unchanged, changed, missing, duplicate, and invalid
         { id: "old-a", candidate_key: "a", entry_type: "spell", diff_status: "new", content: { name: "same" }, content_sha256: sameHash },
         { id: "old-b", candidate_key: "b", entry_type: "spell", diff_status: "new", content: { name: "old" }, content_sha256: hash('{"name":"old"}') },
         { id: "old-c", candidate_key: "c", entry_type: "spell", diff_status: "new", content: { name: "missing" }, content_sha256: hash('{"name":"missing"}') },
+        { id: "old-item-c", candidate_key: "c", entry_type: "item", diff_status: "new", content: { name: "missing item" }, content_sha256: hash('{"name":"missing item"}') },
       ] } as never;
       if (sql.includes("INSERT INTO compendium_import_candidates")) {
+        candidateInsertSql = sql;
         const row = {
           id: `new-${inserted.length}`, import_run_id: values[0], source_id: values[1], file_id: values[2], generation_id: values[3],
           occurrence_id: values[4], previous_candidate_id: values[5], candidate_order: values[6], candidate_key: values[7],
@@ -278,7 +282,11 @@ test("candidate diff retains unchanged, changed, missing, duplicate, and invalid
           created_at: "2026-08-06T00:00:00.000Z",
         };
         inserted.push(row);
-        return { rows: [row] } as never;
+        return { rows: values[8] === "equipment" ? [] : [row] } as never;
+      }
+      if (sql.includes("entry_type IS NOT DISTINCT FROM")) {
+        replayLookup = { sql, values };
+        return { rows: [inserted.find((candidate) => candidate.entry_type === values[1] && candidate.candidate_key === values[2])] } as never;
       }
       if (sql.includes("INSERT INTO compendium_import_checkpoints")) return { rows: [{ content_sha256: values[2], details: JSON.parse(values[3] as string) }] } as never;
       if (sql.includes("FROM compendium_import_candidates WHERE import_run_id") && sql.includes("ORDER BY candidate_order")) return { rows: inserted } as never;
@@ -292,10 +300,13 @@ test("candidate diff retains unchanged, changed, missing, duplicate, and invalid
     { occurrenceIndex: 3, candidateKey: null, entryType: null, content: { raw: "?" }, invalidReason: "parser rejected candidate" },
     { occurrenceIndex: 4, candidateKey: "b", entryType: "equipment", content: { name: "same key, different type" } },
   ], "worker");
-  assert.deepEqual(result.map(({ diffStatus }) => diffStatus).sort(), ["changed", "duplicate", "invalid", "missing", "new", "unchanged"]);
-  const missing = inserted.find((candidate) => candidate.diff_status === "missing")!;
-  assert.equal(missing.candidate_key, "c");
-  assert.equal((missing.content as { name: string }).name, "missing");
+  assert.deepEqual(result.map(({ diffStatus }) => diffStatus).sort(), ["changed", "duplicate", "invalid", "missing", "missing", "new", "unchanged"]);
+  const missing = inserted.filter((candidate) => candidate.diff_status === "missing");
+  assert.deepEqual(missing.map((candidate) => candidate.entry_type).sort(), ["item", "spell"]);
+  assert.ok(missing.every((candidate) => candidate.candidate_key === "c" && candidate.occurrence_id === null));
+  assert.match(candidateInsertSql, /ON CONFLICT \(import_run_id, entry_type, candidate_key, occurrence_id\) DO NOTHING/);
+  assert.match(replayLookup!.sql, /entry_type IS NOT DISTINCT FROM \$2[\s\S]*candidate_key = \$3[\s\S]*occurrence_id IS NOT DISTINCT FROM \$4/);
+  assert.deepEqual(replayLookup!.values.slice(1), ["equipment", "b", "occurrence-4"]);
 });
 
 test("a persisted diff checkpoint resumes without recomputing candidates", async () => {
