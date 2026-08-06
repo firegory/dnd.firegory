@@ -59,6 +59,8 @@ Sections are ordered, non-overlapping spans that cover `text.plain` exactly. Cit
 
 Files under `generations`, `snapshots`, and `exports` are derived views. They may be recreated from immutable revisions and are never canonical content.
 
+PostgreSQL index synchronization is documented in [`docs/content-index-sync.md`](../docs/content-index-sync.md). Canonical schema version 1 is complete enough to derive structured index entries, ingestion generations, pages, and chunks without a separate generation artifact manifest. Authentication, sessions, audit history, operational state, and unmanaged content are outside this rebuild boundary and still require PostgreSQL backups.
+
 ## Publication ownership and filesystem assumptions
 
 The worker is the only process permitted to mount `DND_DATA_ROOT` read-write. The web application mounts the same repository read-only; it writes complete, validated publication commands to `PUBLICATION_SPOOL_ROOT` and sends only their stable idempotency keys through Redis. The spool must be durable and shared with workers, but it must not be located inside `DND_DATA_ROOT`.

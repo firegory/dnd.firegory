@@ -385,11 +385,16 @@ npm start           # Start production server
 npm test            # Run test suite
 npm run db:migrate  # Run database migrations
 npm run ingest      # CLI ingestion
+npm run content-index -- validate      # Validate canonical NFS content
+npm run content-index -- incremental   # Sync changed managed content
+npm run content-index -- clean         # Reconcile all managed content
 ```
 
 ## Backups
 
 See [docs/backups.md](docs/backups.md) for backup and restore procedures for PostgreSQL data and file storage.
+
+Canonical NFS index validation, clean/incremental synchronization, dry-run, restart checkpoints, and embedding backfill are documented in [docs/content-index-sync.md](docs/content-index-sync.md).
 
 ## Project structure
 

@@ -207,6 +207,24 @@ export async function loadResolvedRepositoryManifest(dataRoot: string): Promise<
   generation: string | null;
 }>> {
   const root = await realpath(dataRoot);
+  const resolved = await composeResolvedRepositoryManifest(root);
+  await validateManifestEntries(root, resolved.manifest.entries);
+  return resolved;
+}
+
+export type ValidatedSourceFile = Readonly<{
+  sourceId: string;
+  fileId: string;
+  path: string;
+  mediaType: string;
+  contentHash: string;
+  byteSize: number;
+}>;
+
+async function composeResolvedRepositoryManifest(root: string): Promise<Readonly<{
+  manifest: RepositoryManifest;
+  generation: string | null;
+}>> {
   const bootstrap = await loadRepositoryBootstrapDescriptor(root);
 
   const entries = new Map(bootstrap.entries.map((entry) => [entry.entryId, entry]));
@@ -225,8 +243,19 @@ export async function loadResolvedRepositoryManifest(dataRoot: string): Promise<
     ...bootstrap,
     entries: [...entries.values()].sort((left, right) => left.entryId.localeCompare(right.entryId)),
   };
-  await validateManifestEntries(root, manifest.entries);
   return { manifest, generation: highestGeneration };
+}
+
+export async function loadResolvedCanonicalRevisions(dataRoot: string): Promise<Readonly<{
+  manifest: RepositoryManifest;
+  generation: string | null;
+  revisions: readonly CanonicalRevision[];
+  sourceFiles: readonly ValidatedSourceFile[];
+}>> {
+  const root = await realpath(dataRoot);
+  const resolved = await composeResolvedRepositoryManifest(root);
+  const validated = await validateManifestEntries(root, resolved.manifest.entries);
+  return { ...resolved, ...validated };
 }
 
 async function validateSchemaDeclarations(root: string, manifest: RepositoryManifest): Promise<void> {
@@ -242,8 +271,12 @@ async function validateSchemaDeclarations(root: string, manifest: RepositoryMani
   }
 }
 
-async function validateManifestEntries(root: string, entries: RepositoryManifest["entries"]): Promise<void> {
+async function validateManifestEntries(root: string, entries: RepositoryManifest["entries"]): Promise<Readonly<{
+  revisions: readonly CanonicalRevision[];
+  sourceFiles: readonly ValidatedSourceFile[];
+}>> {
   const sources = new Map<string, ContentSource>();
+  const revisions: CanonicalRevision[] = [];
   for (const entry of entries) {
     const expectedPath = `compendium/${entry.entryId}/revisions/${entry.revisionId}.json`;
     if (entry.path !== expectedPath) {
@@ -252,6 +285,7 @@ async function validateManifestEntries(root: string, entries: RepositoryManifest
 
     const revision = await readJson(await resolveRepositoryFile(root, entry.path), `Revision ${entry.revisionId}`);
     assertCanonicalRevision(revision);
+    revisions.push(revision);
     if (
       revision.entryId !== entry.entryId ||
       revision.revisionId !== entry.revisionId ||
@@ -270,6 +304,7 @@ async function validateManifestEntries(root: string, entries: RepositoryManifest
     }
   }
 
+  const sourceFiles: ValidatedSourceFile[] = [];
   for (const source of sources.values()) {
     for (const file of source.files) {
       const expectedPrefix = `sources/${source.sourceId}/files/`;
@@ -281,8 +316,17 @@ async function validateManifestEntries(root: string, entries: RepositoryManifest
       if (actualHash !== file.contentHash) {
         throw new ContentIntegrityError(`Source file ${file.fileId} does not match its contentHash.`);
       }
+      sourceFiles.push({
+        sourceId: source.sourceId,
+        fileId: file.fileId,
+        path: file.path,
+        mediaType: file.mediaType,
+        contentHash: actualHash,
+        byteSize: bytes.byteLength,
+      });
     }
   }
+  return { revisions, sourceFiles };
 }
 
 export async function validateCanonicalRevisionDependencies(

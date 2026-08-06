@@ -7,6 +7,8 @@ export const MIGRATION_FILENAMES = [
   "0006_ingestion_generation_integrity.sql",
   "0007_compendium_relational_core.sql",
   "0008_resumable_compendium_imports.sql",
+  // 0009 remains intentionally unused after issue #81.
+  "0010_nfs_content_index_sync.sql",
 ] as const;
 
 export type MigrationFilename = (typeof MIGRATION_FILENAMES)[number];

@@ -7,7 +7,12 @@ import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 const sql = await readFile("migrations/0008_resumable_compendium_imports.sql", "utf8");
 
 test("resumable imports extend the 0007 run and occurrence tables", () => {
-  assert.equal(MIGRATION_FILENAMES.at(-1), "0008_resumable_compendium_imports.sql");
+  assert.ok(MIGRATION_FILENAMES.includes("0008_resumable_compendium_imports.sql"));
+  assert.ok(
+    MIGRATION_FILENAMES.indexOf("0008_resumable_compendium_imports.sql")
+      < MIGRATION_FILENAMES.indexOf("0010_nfs_content_index_sync.sql"),
+  );
+  assert.equal(MIGRATION_FILENAMES.some((name) => name.startsWith("0009_")), false);
   assert.doesNotMatch(sql, /CREATE TABLE IF NOT EXISTS compendium_import_(?:runs|occurrences)\b/);
   assert.match(sql, /ALTER TABLE compendium_import_runs/);
   assert.match(sql, /compendium_import_occurrences_candidate_owner_unique/);
