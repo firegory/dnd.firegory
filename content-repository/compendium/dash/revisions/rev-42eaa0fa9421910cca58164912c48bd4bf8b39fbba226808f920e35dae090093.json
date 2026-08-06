@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "kind": "canonicalRevision",
   "entryId": "dash",
-  "revisionId": "rev-207dc963e06b6aa52c9061a356104da93e9a9c916c34789bdd30b9a15dad8ebe",
-  "contentHash": "sha256:207dc963e06b6aa52c9061a356104da93e9a9c916c34789bdd30b9a15dad8ebe",
+  "revisionId": "rev-42eaa0fa9421910cca58164912c48bd4bf8b39fbba226808f920e35dae090093",
+  "contentHash": "sha256:42eaa0fa9421910cca58164912c48bd4bf8b39fbba226808f920e35dae090093",
   "createdAt": "2026-08-06T00:00:00.000Z",
   "source": {
     "schemaVersion": 1,
@@ -16,7 +16,20 @@
     "accessTier": "open",
     "shared": false,
     "ownerUserId": null,
-    "publisher": "Wizards of the Coast",
+    "publication": {
+      "code": "BR-2014",
+      "title": "D&D Basic Rules",
+      "publisher": "Wizards of the Coast",
+      "releaseYear": 2014,
+      "revision": "2014 release",
+      "origin": {
+        "url": "https://dnd.wizards.com/what-is-dnd/basic-rules",
+        "id": "basic-rules-2014"
+      },
+      "attribution": "Dungeons & Dragons Basic Rules (2014), Wizards of the Coast",
+      "sourcePriority": 100,
+      "canonicalBookId": "basic-rules"
+    },
     "license": "Open reference example",
     "files": [
       {

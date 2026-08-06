@@ -12,6 +12,7 @@ import {
   type SourceEdition,
   type SourceLanguage,
 } from "../../../../../server/access/retrieval-filter";
+import { ContentMetadataValidationError } from "../../../../../server/content/metadata";
 
 const VALID_CATEGORIES = new Set<string>(SOURCE_CATEGORIES);
 const VALID_EDITIONS = new Set<string>(SOURCE_EDITIONS);
@@ -74,6 +75,8 @@ export async function POST(request: Request) {
   }
 
   try {
+    const releaseYear = optionalInteger(formData, "releaseYear");
+    const sourcePriority = optionalInteger(formData, "sourcePriority") ?? 0;
     const pdfData = Buffer.from(await file.arrayBuffer());
     const result = await startIngestion({
       title: title.trim(),
@@ -82,6 +85,21 @@ export async function POST(request: Request) {
       language: language as SourceLanguage,
       accessTier: accessTier as AccessTier,
       ownerUserId: accessTier === "personal" ? user.id : null,
+      canonicalSourceId: optionalText(formData, "canonicalSourceId"),
+      publication: {
+        code: optionalText(formData, "publicationCode"),
+        title: optionalText(formData, "publicationTitle") ?? title.trim(),
+        publisher: optionalText(formData, "publisher"),
+        releaseYear,
+        revision: optionalText(formData, "revision"),
+        origin: optionalText(formData, "originUrl") || optionalText(formData, "originId")
+          ? { url: optionalText(formData, "originUrl"), id: optionalText(formData, "originId") }
+          : null,
+        attribution: optionalText(formData, "attribution"),
+        sourcePriority,
+        canonicalBookId: optionalText(formData, "canonicalBookId"),
+      },
+      license: optionalText(formData, "license"),
       requestedByUserId: user.id,
       originalFilename: file.name,
       pdfData,
@@ -91,7 +109,24 @@ export async function POST(request: Request) {
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Ingestion failed.";
+    if (error instanceof ContentMetadataValidationError) {
+      return NextResponse.json({ error: message }, { status: 400 });
+    }
     console.error("Upload ingestion error:", error);
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+function optionalText(formData: FormData, name: string): string | null {
+  const value = formData.get(name);
+  if (value === null || value === "") return null;
+  if (typeof value !== "string") throw new ContentMetadataValidationError(`${name} must be text.`);
+  return value;
+}
+
+function optionalInteger(formData: FormData, name: string): number | null {
+  const value = optionalText(formData, name);
+  if (value === null) return null;
+  if (!/^-?\d+$/.test(value)) throw new ContentMetadataValidationError(`${name} must be an integer.`);
+  return Number(value);
 }

@@ -13,6 +13,7 @@ import { storeOriginalPdf, createSourceRecord, createIngestionJob, getIngestionJ
 import { enqueueJob } from "./queue.ts";
 import { withTransaction } from "../db/client.ts";
 import type { AccessTier, SourceCategory, SourceEdition, SourceLanguage } from "../access/retrieval-filter.ts";
+import type { PublicationMetadataInput } from "../content/metadata.ts";
 
 export type StartIngestionInput = Readonly<{
   title: string;
@@ -21,6 +22,9 @@ export type StartIngestionInput = Readonly<{
   language: SourceLanguage;
   accessTier: AccessTier;
   ownerUserId?: string | null;
+  canonicalSourceId?: string | null;
+  publication?: PublicationMetadataInput;
+  license?: string | null;
   requestedByUserId?: string | null;
   originalFilename: string;
   pdfData: Buffer;
@@ -57,6 +61,9 @@ export async function startIngestion(input: StartIngestionInput): Promise<Ingest
       language: input.language,
       accessTier: input.accessTier,
       ownerUserId: input.ownerUserId,
+      canonicalSourceId: input.canonicalSourceId,
+      publication: input.publication,
+      license: input.license,
       createdByUserId: input.requestedByUserId,
       metadata: input.metadata,
       client,

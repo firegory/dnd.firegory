@@ -11,6 +11,7 @@ import type {
   SourceEdition,
   SourceLanguage,
 } from "../server/access/retrieval-filter.ts";
+import { normalizePlainUuid } from "../server/content/canonical-values.ts";
 
 export const VALID_CATEGORIES: readonly SourceCategory[] = ["core_rules", "official_supplement", "homebrew"];
 export const VALID_EDITIONS: readonly SourceEdition[] = ["5e", "5.5e"];
@@ -69,13 +70,23 @@ export function validateIngestionArgs(input: {
     throw new Error(`missing required option(s): ${missing.join(", ")}`);
   }
 
+  const access = validateEnum(input.access!, VALID_ACCESS_TIERS, "--access");
+  let ownerUserId: string | undefined;
+  if (access === "personal") {
+    if (!input.ownerUserId) throw new Error("--owner-user-id is required when --access is personal.");
+    ownerUserId = normalizePlainUuid(input.ownerUserId) ?? undefined;
+    if (!ownerUserId) throw new Error("--owner-user-id must be a plain UUID.");
+  } else if (input.ownerUserId !== undefined) {
+    throw new Error(`--owner-user-id is not allowed when --access is ${access}.`);
+  }
+
   return {
     pdf: input.pdf!,
     title: input.title!,
     category: validateEnum(input.category!, VALID_CATEGORIES, "--category"),
     edition: validateEnum(input.edition!, VALID_EDITIONS, "--edition"),
     language: validateEnum(input.language!, VALID_LANGUAGES, "--language"),
-    access: validateEnum(input.access!, VALID_ACCESS_TIERS, "--access"),
-    ownerUserId: input.ownerUserId,
+    access,
+    ownerUserId,
   };
 }
