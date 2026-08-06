@@ -14,6 +14,9 @@ test("candidate controls and citation feedback include candidate-specific access
   assert.match(source, /candidate\.entryId/);
   assert.match(source, /candidate\.publicationCapability/);
   assert.match(source, /selectedPublishable/);
+  assert.match(source, /selectedCanUnpublish/);
+  assert.match(source, /candidate\.evidenceGenerationId/);
+  assert.match(source, /candidate\.publicationCapability === "can_unpublish"/);
   assert.match(source, /publishable && \["new", "changed", "unchanged"\]/);
   assert.match(source, /publicationRequiresExtraction/);
   assert.match(source, /Object\.fromEntries\(candidateIds\.map/);

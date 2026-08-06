@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { extractCandidates } from "../../src/server/compendium/candidate-extraction.ts";
+import { projectExtractedCandidate } from "../../src/server/compendium/candidate-publication.ts";
 import { CompendiumImportReviewService } from "../../src/server/compendium/import-review.ts";
 import { nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
 
@@ -16,6 +17,10 @@ const generationId = "77777777-7777-4777-8777-777777777777";
 const chunkId = "88888888-8888-4888-8888-888888888888";
 const secondChunkId = "99999999-9999-4999-8999-999999999999";
 const astralChunkId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const occurrenceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const previousCandidateId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const currentGenerationId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const previousCreatedAt = "2026-08-05T00:00:00.000Z";
 const boundary = {
   sourceId: firstSourceId(), fileId, generationId, edition: "5e", language: "en", accessTier: "open", shared: false, ownerUserId: null,
 } as const;
@@ -55,14 +60,31 @@ function chunkFields(text = fixtureText, id = chunkId) {
 }
 
 function candidate(overrides: Record<string, unknown> = {}) {
-  return { id: candidateId, import_run_id: runId, source_id: firstSourceId(), file_id: fileId, generation_id: generationId,
+  return { id: candidateId, import_run_id: runId, occurrence_id: occurrenceId, previous_candidate_id: null,
+    source_id: firstSourceId(), file_id: fileId, generation_id: generationId,
     edition: "5e", language: "en", access_tier: "open", shared: false, owner_user_id: null,
     candidate_key: content.candidateKey, entry_type: content.entryType, diff_status: "new", content,
+    content_sha256: "e".repeat(64),
     previous_content: null, invalid_reason: null, locator: "page:1", ...chunkFields(),
     created_at: "2026-08-06T00:00:00.000Z", run_status: "succeeded", decision: null, resolved_content: null,
     publication_status: null, publication_attempt: null, idempotency_key: null, last_error: null, reviewed_by: null, reviewed_at: null,
     expected_active_revision_id: null, expected_active_revision_captured: false,
     ...overrides };
+}
+
+function missingCandidate(overrides: Record<string, unknown> = {}) {
+  return candidate({
+    occurrence_id: null, previous_candidate_id: previousCandidateId, generation_id: currentGenerationId,
+    candidate_key: "shield", entry_type: "equipment", diff_status: "missing", content: equipmentShield,
+    content_sha256: "d".repeat(64), previous_content: equipmentShield, previous_content_sha256: "d".repeat(64),
+    locator: null, chunk_id: null, chunk_index: null, page_number: null, section_heading: null, quote_text: null,
+    previous_source_id: firstSourceId(), previous_file_id: fileId, previous_generation_id: generationId,
+    previous_candidate_key: "shield", previous_entry_type: "equipment", previous_created_at: previousCreatedAt,
+    previous_occurrence_id: occurrenceId, previous_locator: "page:1", previous_chunk_id: secondChunkId,
+    previous_page_number: 1, previous_chunk_index: 1, previous_section_heading: null, previous_quote_text: equipmentShieldText,
+    previous_decision: "approved", previous_resolved_content: null, previous_publication_status: "completed",
+    ...overrides,
+  });
 }
 
 function collectorCandidate(overrides: Record<string, unknown> = {}) {
@@ -81,6 +103,21 @@ function source() {
     attribution: null, source_priority: 100, canonical_book_id: "players-handbook", license: null,
     canonical_files: [{ fileId, path: `sources/players-handbook/files/${fileId}.pdf`, mediaType: "application/pdf", contentHash: `sha256:${"a".repeat(64)}` }] };
 }
+
+function canonicalSource() {
+  return {
+    schemaVersion: 1, kind: "source", sourceId: "players-handbook", title: "Player's Handbook", category: "core_rules",
+    edition: "5e", language: "en", accessTier: "open", shared: false, ownerUserId: null,
+    publication: { code: "PHB", title: "Player's Handbook", publisher: "Wizards", releaseYear: 2014, sourcePriority: 100, canonicalBookId: "players-handbook" },
+    files: [{ fileId, path: `sources/players-handbook/files/${fileId}.pdf`, mediaType: "application/pdf", contentHash: `sha256:${"a".repeat(64)}` }],
+  } as const;
+}
+
+const previousEquipmentRevision = projectExtractedCandidate(equipmentShield, {
+  candidateKey: "shield", entryType: "equipment", createdAt: previousCreatedAt, boundary,
+  source: canonicalSource(),
+  chunk: { id: secondChunkId, chunkIndex: 1, pageNumber: 1, sectionHeading: null, quoteText: equipmentShieldText },
+}).revisionId;
 
 test("approval persists audit intent and submits only a worker publication command", async () => {
   const statements: string[] = [];
@@ -353,20 +390,126 @@ test("projection converts #77 code-point evidence into exact canonical citation 
 
 test("unpublication uses the same type-qualified identity as projection and CAS lookup", async () => {
   let target: string | null = null;
-  const row = candidate({
-    content: equipmentShield, entry_type: "equipment", candidate_key: "shield", diff_status: "missing",
-    occurrence_id: null, ...chunkFields(equipmentShieldText, secondChunkId),
-  });
+  const row = missingCandidate();
   const db = { async query(sql: string) {
     if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: [row] };
+    if (sql.includes("FROM sources source LEFT JOIN files")) return { rows: [source()] };
     return { rows: [], rowCount: 1 };
   } };
   const service = new CompendiumImportReviewService(async (callback) => callback(db), {
     publish: async () => { throw new Error("unused"); },
     unpublish: async (input) => { target = input.entryId; return { commandPath: "/spool/unpublish", existing: false }; },
   }, async () => { throw new Error("mutation must not read canonical state"); });
-  await service.act(admin, runId, { candidateIds: [candidateId], action: "unpublish", activeRevisionTokens: { [candidateId]: activeRevision } });
+  await service.act(admin, runId, { candidateIds: [candidateId], action: "unpublish", activeRevisionTokens: { [candidateId]: previousEquipmentRevision } });
   assert.equal(target, "equipment-shield");
+});
+
+test("missing review derives unpublication target, CAS, and evidence from the previous extraction", async () => {
+  let activeToken = previousEquipmentRevision;
+  const db = { async query(sql: string) {
+    if (sql.includes("FROM compendium_import_runs run JOIN sources")) return { rows: [{
+      id: runId, source_id: firstSourceId(), source_title: "Book", file_id: fileId, status: "succeeded",
+      created_at: "2026-08-06T00:00:00Z", finished_at: "2026-08-06T00:01:00Z", candidate_count: 1,
+      new_count: 0, unchanged_count: 0, changed_count: 0, missing_count: 1, duplicate_count: 0,
+      invalid_count: 0, diagnostic_count: 0, pending_review_count: 1, failed_publication_count: 0,
+    }] };
+    if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: [missingCandidate()] };
+    if (sql.includes("FROM sources source LEFT JOIN files")) return { rows: [source()] };
+    return { rows: [] };
+  } };
+  const service = new CompendiumImportReviewService(async (callback) => callback(db), {
+    publish: async () => { throw new Error("unused"); }, unpublish: async () => { throw new Error("unused"); },
+  }, async (entryIds) => {
+    assert.deepEqual(entryIds, ["equipment-shield"]);
+    return new Map([["equipment-shield", activeToken]]);
+  });
+  const review = (await service.getRun(admin, runId)).candidates[0];
+  assert.deepEqual({
+    capability: review.publicationCapability, entryId: review.entryId, token: review.activeRevisionToken,
+    sourceId: review.evidenceSourceId, fileId: review.evidenceFileId, generationId: review.evidenceGenerationId,
+    chunkId: review.chunkId, page: review.page, locator: review.locator,
+  }, {
+    capability: "can_unpublish", entryId: "equipment-shield", token: previousEquipmentRevision,
+    sourceId: firstSourceId(), fileId, generationId, chunkId: secondChunkId, page: 1, locator: "page:1",
+  });
+  activeToken = activeRevision;
+  const stale = (await service.getRun(admin, runId)).candidates[0];
+  assert.equal(stale.publicationCapability, "requires_extraction");
+  assert.match(stale.publicationBlockReason!, /not the active canonical CAS target/);
+});
+
+test("missing extraction candidates can still be rejected without publication", async () => {
+  const mutations: string[] = [];
+  let submitted = false;
+  const db = { async query(sql: string) {
+    if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: [missingCandidate()] };
+    if (/^(?:INSERT|UPDATE)/.test(sql.trim())) mutations.push(sql);
+    return { rows: [], rowCount: 1 };
+  } };
+  const service = new CompendiumImportReviewService(async (callback) => callback(db), {
+    publish: async () => { submitted = true; throw new Error("unused"); },
+    unpublish: async () => { submitted = true; throw new Error("unused"); },
+  }, async () => new Map());
+  const result = await service.act(admin, runId, { candidateIds: [candidateId], action: "reject" });
+  assert.equal(result[0].publicationStatus, "idle");
+  assert.equal(mutations.some((sql) => sql.includes("compendium_import_candidate_reviews")), true);
+  assert.equal(submitted, false);
+});
+
+test("missing candidates reject cross-source, file, type, key, and CAS tampering before mutation", async () => {
+  const mutations: string[] = [];
+  let row = missingCandidate();
+  const db = { async query(sql: string) {
+    if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: [row] };
+    if (sql.includes("FROM sources source LEFT JOIN files")) return { rows: [source()] };
+    if (/^(?:INSERT|UPDATE)/.test(sql.trim())) mutations.push(sql);
+    return { rows: [], rowCount: 1 };
+  } };
+  const service = new CompendiumImportReviewService(async (callback) => callback(db), {
+    publish: async () => { throw new Error("unused"); }, unpublish: async () => { throw new Error("must not queue"); },
+  }, async () => new Map());
+  for (const action of ["approve", "merge"] as const) {
+    await assert.rejects(service.act(admin, runId, {
+      candidateIds: [candidateId], action, activeRevisionTokens: { [candidateId]: previousEquipmentRevision },
+      ...(action === "merge" ? { resolvedContent: equipmentShield } : {}),
+    }), /missing candidates cannot (?:be approved|be merged)/i);
+  }
+  for (const tamper of [
+    { previous_source_id: secondCandidateId },
+    { previous_file_id: secondCandidateId },
+    { previous_entry_type: "spell" },
+    { previous_candidate_key: "other-shield" },
+  ]) {
+    row = missingCandidate(tamper);
+    await assert.rejects(service.act(admin, runId, {
+      candidateIds: [candidateId], action: "unpublish", activeRevisionTokens: { [candidateId]: previousEquipmentRevision },
+    }), /source, file, type, and key must match/);
+  }
+  row = missingCandidate();
+  await assert.rejects(service.act(admin, runId, {
+    candidateIds: [candidateId], action: "unpublish", activeRevisionTokens: { [candidateId]: activeRevision },
+  }), /not the displayed canonical CAS target/);
+  assert.deepEqual(mutations, []);
+});
+
+test("missing collector snapshots remain nonpublishable through the previous chain", async () => {
+  const row = missingCandidate({
+    candidate_key: "spells-10195", entry_type: "spell", content: collectorContent, content_sha256: "f".repeat(64),
+    previous_content: collectorContent, previous_content_sha256: "f".repeat(64),
+    previous_candidate_key: "spells-10195", previous_entry_type: "spell", previous_generation_id: null,
+    previous_occurrence_id: occurrenceId, previous_locator: "https://next.dnd.su/spells/10195-hunters-mark",
+    previous_chunk_id: null, previous_chunk_index: null, previous_page_number: null, previous_quote_text: null,
+  });
+  const db = { async query(sql: string) {
+    if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: [row] };
+    return { rows: [], rowCount: 1 };
+  } };
+  const service = new CompendiumImportReviewService(async (callback) => callback(db), {
+    publish: async () => { throw new Error("unused"); }, unpublish: async () => { throw new Error("must not queue"); },
+  }, async () => new Map());
+  await assert.rejects(service.act(admin, runId, {
+    candidateIds: [candidateId], action: "unpublish", activeRevisionTokens: { [candidateId]: activeRevision },
+  }), /complete previous occurrence and chunk evidence chain/);
 });
 
 test("review classifies a real #78 snapshot candidate as requiring extraction", async () => {

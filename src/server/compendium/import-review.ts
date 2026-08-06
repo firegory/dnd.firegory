@@ -53,6 +53,9 @@ export type ImportCandidateReview = Readonly<{
   locator: string | null;
   chunkId: string | null;
   page: number | null;
+  evidenceSourceId: string | null;
+  evidenceFileId: string | null;
+  evidenceGenerationId: string | null;
   activeRevisionToken: string | null;
   payloadOrigin: CandidatePublicationCapability["payloadOrigin"];
   publicationCapability: CandidatePublicationCapability["publicationCapability"];
@@ -78,6 +81,8 @@ export class ImportReviewError extends Error {
 type CandidateRow = QueryResultRow & Readonly<{
   id: string;
   import_run_id: string;
+  occurrence_id: string | null;
+  previous_candidate_id: string | null;
   source_id: string;
   file_id: string;
   generation_id: string | null;
@@ -90,7 +95,25 @@ type CandidateRow = QueryResultRow & Readonly<{
   entry_type: string | null;
   diff_status: string;
   content: Record<string, unknown>;
+  content_sha256: string;
   previous_content: Record<string, unknown> | null;
+  previous_content_sha256: string | null;
+  previous_source_id: string | null;
+  previous_file_id: string | null;
+  previous_generation_id: string | null;
+  previous_candidate_key: string | null;
+  previous_entry_type: string | null;
+  previous_created_at: Date | string | null;
+  previous_occurrence_id: string | null;
+  previous_locator: string | null;
+  previous_chunk_id: string | null;
+  previous_page_number: number | null;
+  previous_chunk_index: number | null;
+  previous_section_heading: string | null;
+  previous_quote_text: string | null;
+  previous_decision: ReviewDecision | null;
+  previous_resolved_content: Record<string, unknown> | null;
+  previous_publication_status: ReviewPublicationStatus | null;
   invalid_reason: string | null;
   locator: string | null;
   chunk_id: string | null;
@@ -195,9 +218,18 @@ export class CompendiumImportReviewService {
       const filter = diffStatus ? `AND candidate.diff_status = $${values.push(diffStatus)}` : "";
       const candidates = await client.query<CandidateRow>(candidateSelect(`${filter} ORDER BY candidate.candidate_order, candidate.id`), values);
       const capabilities = new Map(candidates.rows.map((candidate) => [candidate.id, candidateCapability(candidate)]));
+      const previousRevisionIds = new Map<string, string>();
+      for (const candidate of candidates.rows) {
+        if (capabilities.get(candidate.id)?.publicationCapability !== "can_unpublish") continue;
+        try {
+          previousRevisionIds.set(candidate.id, (await buildPreviousRevision(client, candidate)).revisionId);
+        } catch (error) {
+          capabilities.set(candidate.id, blockedCapability(capabilities.get(candidate.id)!, `Previous publication cannot be reconstructed: ${errorMessage(error)}`));
+        }
+      }
       const entryIds = new Map(candidates.rows.map((candidate) => [
         candidate.id,
-        capabilities.get(candidate.id)?.publicationCapability === "publishable" ? candidateEntryId(candidate) : null,
+        ["publishable", "can_unpublish"].includes(capabilities.get(candidate.id)?.publicationCapability ?? "") ? candidateEntryId(candidate) : null,
       ]));
       const activeRevisionTokens = await this.readActiveRevision([...new Set([...entryIds.values()].filter((entryId): entryId is string => entryId !== null))]);
       const diagnostics = await client.query<QueryResultRow & Record<string, unknown>>(
@@ -213,9 +245,14 @@ export class CompendiumImportReviewService {
         run,
         candidates: candidates.rows.map((candidate) => {
           const entryId = entryIds.get(candidate.id) ?? null;
+          const activeRevisionToken = entryId ? activeRevisionTokens.get(entryId) ?? null : null;
+          const expectedPreviousRevision = previousRevisionIds.get(candidate.id);
+          if (expectedPreviousRevision && activeRevisionToken !== expectedPreviousRevision) {
+            capabilities.set(candidate.id, blockedCapability(capabilities.get(candidate.id)!, "The previous published revision is not the active canonical CAS target."));
+          }
           return {
             ...mapCandidate(candidate), ...capabilities.get(candidate.id)!, entryId,
-            activeRevisionToken: entryId ? activeRevisionTokens.get(entryId) ?? null : null,
+            activeRevisionToken,
           };
         }),
         diagnostics: diagnostics.rows,
@@ -262,11 +299,30 @@ export class CompendiumImportReviewService {
     const prepared = await this.transaction(async (client) => {
       const rows = await client.query<CandidateRow>(candidateSelect("AND candidate.id = ANY($2::uuid[]) ORDER BY candidate.id FOR UPDATE OF candidate"), [runId, ids]);
       if (rows.rows.length !== ids.length) throw new ImportReviewError("One or more candidates were not found in this run.", 404);
+      const capabilities = new Map(rows.rows.map((row) => [row.id, candidateCapability(row)]));
       if (input.action !== "reject") {
-        const blocked = rows.rows.map((row) => ({ row, capability: candidateCapability(row) }))
-          .find(({ capability }) => capability.publicationCapability !== "publishable");
-        if (blocked) {
-          throw new ImportReviewError(`Candidate ${blocked.row.candidate_key} is not publishable: ${blocked.capability.publicationBlockReason}`, 409);
+        for (const row of rows.rows) {
+          const capability = capabilities.get(row.id)!;
+          if (capability.publicationCapability === "requires_extraction") {
+            throw new ImportReviewError(`Candidate ${row.candidate_key} is not publishable: ${capability.publicationBlockReason}`, 409);
+          }
+          if (input.action === "retry" && (!["failed", "pending"].includes(row.publication_status ?? "idle")
+              || !["approved", "merged", "unpublish"].includes(row.decision ?? "pending"))) {
+            throw new ImportReviewError(`Candidate ${row.candidate_key} has no recoverable publication to retry.`, 409);
+          }
+          assertDecisionAllowed(row.diff_status, decisionFor(input.action, row.decision ?? "pending"));
+          const requiredCapability = input.action === "unpublish" || (input.action === "retry" && row.decision === "unpublish")
+            ? "can_unpublish" : "publishable";
+          if (capability.publicationCapability !== requiredCapability) {
+            const reason = capability.publicationBlockReason ?? `Candidate only supports ${capability.publicationCapability === "can_unpublish" ? "unpublication" : "canonical publication"}.`;
+            throw new ImportReviewError(`Candidate ${row.candidate_key} cannot ${input.action}: ${reason}`, 409);
+          }
+          if (requiredCapability === "can_unpublish") {
+            const expectedRevisionId = (await buildPreviousRevision(client, row)).revisionId;
+            if (input.activeRevisionTokens![row.id] !== expectedRevisionId) {
+              throw new ImportReviewError(`Candidate ${row.candidate_key} cannot be unpublished because its previous published revision is not the displayed canonical CAS target.`, 409);
+            }
+          }
         }
       }
       const actions: Array<{ row: CandidateRow; entryId: string | null; key: string | null; revision: CanonicalRevision | null; expectedActiveRevisionId: string | null }> = [];
@@ -365,13 +421,25 @@ export class CompendiumImportReviewService {
 }
 
 function candidateSelect(suffix: string): string {
-  return `SELECT candidate.id, candidate.import_run_id, candidate.source_id, candidate.file_id, candidate.generation_id,
+  return `SELECT candidate.id, candidate.import_run_id, candidate.occurrence_id, candidate.previous_candidate_id,
+                 candidate.source_id, candidate.file_id, candidate.generation_id,
                  candidate.candidate_key, candidate.entry_type,
                  source.edition, source.language, source.access_tier, source.shared, source.owner_user_id,
-                 candidate.diff_status, candidate.content, previous.content AS previous_content,
+                 candidate.diff_status, candidate.content, candidate.content_sha256,
+                 previous.content AS previous_content, previous.content_sha256 AS previous_content_sha256,
+                 previous.source_id AS previous_source_id, previous.file_id AS previous_file_id,
+                 previous.generation_id AS previous_generation_id, previous.candidate_key AS previous_candidate_key,
+                 previous.entry_type AS previous_entry_type, previous.created_at AS previous_created_at,
                  candidate.invalid_reason, candidate.created_at, run.status AS run_status,
-                  occurrence.locator, occurrence.chunk_id, chunk.page_number, chunk.chunk_index,
-                  chunk.section_heading, chunk.quote_text,
+                 occurrence.locator, occurrence.chunk_id, chunk.page_number, chunk.chunk_index,
+                 chunk.section_heading, chunk.quote_text,
+                 previous.occurrence_id AS previous_occurrence_id, previous_occurrence.locator AS previous_locator,
+                 previous_occurrence.chunk_id AS previous_chunk_id,
+                 previous_chunk.page_number AS previous_page_number, previous_chunk.chunk_index AS previous_chunk_index,
+                 previous_chunk.section_heading AS previous_section_heading, previous_chunk.quote_text AS previous_quote_text,
+                 previous_review.decision AS previous_decision,
+                 previous_review.resolved_content AS previous_resolved_content,
+                 previous_review.publication_status AS previous_publication_status,
                  review.decision, review.resolved_content, review.publication_status,
                  review.publication_attempt, review.idempotency_key, review.last_error,
                  review.expected_active_revision_id, review.expected_active_revision_captured,
@@ -382,6 +450,9 @@ function candidateSelect(suffix: string): string {
           LEFT JOIN compendium_import_candidates previous ON previous.id = candidate.previous_candidate_id
           LEFT JOIN compendium_import_occurrences occurrence ON occurrence.id = candidate.occurrence_id
           LEFT JOIN chunks chunk ON chunk.id = occurrence.chunk_id
+          LEFT JOIN compendium_import_occurrences previous_occurrence ON previous_occurrence.id = previous.occurrence_id
+          LEFT JOIN chunks previous_chunk ON previous_chunk.id = previous_occurrence.chunk_id
+          LEFT JOIN compendium_import_candidate_reviews previous_review ON previous_review.candidate_id = previous.id
           LEFT JOIN compendium_import_candidate_reviews review ON review.candidate_id = candidate.id
           WHERE candidate.import_run_id = $1 ${suffix}`;
 }
@@ -447,31 +518,111 @@ async function buildRevision(client: DbClient, candidate: CandidateRow, content:
   }
 }
 
+async function buildPreviousRevision(client: DbClient, row: CandidateRow): Promise<CanonicalRevision> {
+  const evidence = previousEvidence(row);
+  const content = previousPublishedContent(row);
+  if (!evidence || !content || !row.previous_created_at || !row.previous_candidate_key || !row.previous_entry_type) {
+    throw new ImportReviewError("Missing candidate has no complete previous publication evidence.", 409);
+  }
+  return buildRevision(client, {
+    ...row,
+    candidate_key: row.previous_candidate_key,
+    entry_type: row.previous_entry_type,
+    generation_id: evidence.generationId,
+    chunk_id: evidence.chunkId,
+    chunk_index: evidence.chunkIndex,
+    page_number: evidence.page,
+    section_heading: evidence.sectionHeading,
+    quote_text: evidence.quoteText,
+    created_at: row.previous_created_at,
+  }, content);
+}
+
 function mapCandidate(row: CandidateRow): ImportCandidateReview {
+  const evidence = row.diff_status === "missing" ? previousEvidence(row) : currentEvidence(row);
   return { id: row.id, candidateKey: row.candidate_key, entryId: null, entryType: row.entry_type, diffStatus: row.diff_status,
-    content: row.content, previousContent: row.previous_content, invalidReason: row.invalid_reason, locator: row.locator,
-    chunkId: row.chunk_id, page: row.page_number, activeRevisionToken: null, decision: row.decision ?? "pending", resolvedContent: row.resolved_content,
+    content: row.content, previousContent: row.previous_content, invalidReason: row.invalid_reason, locator: evidence?.locator ?? row.locator,
+    chunkId: evidence?.chunkId ?? null, page: evidence?.page ?? null,
+    evidenceSourceId: evidence?.sourceId ?? null, evidenceFileId: evidence?.fileId ?? null, evidenceGenerationId: evidence?.generationId ?? null,
+    activeRevisionToken: null, decision: row.decision ?? "pending", resolvedContent: row.resolved_content,
     payloadOrigin: "unknown", publicationCapability: "requires_extraction", publicationBlockReason: null,
     publicationStatus: row.publication_status ?? "idle", lastError: row.last_error, reviewedBy: row.reviewed_by,
     reviewedAt: row.reviewed_at == null ? null : iso(row.reviewed_at) };
 }
 
 function candidateCapability(row: CandidateRow): CandidatePublicationCapability {
-  return classifyCandidatePublication(row.content, {
+  if (row.diff_status === "missing") return missingCandidateCapability(row);
+  return classifyCandidatePublication(row.content, capabilityContext(row, currentEvidence(row)));
+}
+
+function missingCandidateCapability(row: CandidateRow): CandidatePublicationCapability {
+  const fallback = classifyCandidatePublication(row.previous_content, capabilityContext(row, previousEvidence(row)));
+  const chainError = previousChainError(row);
+  if (chainError) return blockedCapability(fallback, chainError);
+  const content = previousPublishedContent(row);
+  if (!content) return blockedCapability(fallback, "Previous candidate has no completed approved or merged publication.");
+  const capability = classifyCandidatePublication(content, capabilityContext(row, previousEvidence(row)));
+  if (capability.publicationCapability !== "publishable") return capability;
+  return { ...capability, publicationCapability: "can_unpublish" };
+}
+
+function capabilityContext(row: CandidateRow, evidence: ReturnType<typeof currentEvidence>) {
+  return {
     candidateKey: row.candidate_key,
     entryType: row.entry_type,
     sourceId: row.source_id,
     fileId: row.file_id,
-    generationId: row.generation_id,
+    generationId: evidence?.generationId ?? null,
     edition: row.edition,
     language: row.language,
     accessTier: row.access_tier,
     shared: row.shared,
     ownerUserId: row.owner_user_id,
-    chunk: row.chunk_id && row.chunk_index !== null && row.quote_text
-      ? { id: row.chunk_id, chunkIndex: row.chunk_index, pageNumber: row.page_number, sectionHeading: row.section_heading, quoteText: row.quote_text }
+    chunk: evidence
+      ? { id: evidence.chunkId, chunkIndex: evidence.chunkIndex, pageNumber: evidence.page, sectionHeading: evidence.sectionHeading, quoteText: evidence.quoteText }
       : null,
-  });
+  };
+}
+
+function currentEvidence(row: CandidateRow) {
+  return row.chunk_id && row.chunk_index !== null && row.quote_text && row.generation_id
+    ? { sourceId: row.source_id, fileId: row.file_id, generationId: row.generation_id, locator: row.locator, chunkId: row.chunk_id,
+      chunkIndex: row.chunk_index, page: row.page_number, sectionHeading: row.section_heading, quoteText: row.quote_text }
+    : null;
+}
+
+function previousEvidence(row: CandidateRow) {
+  return row.previous_source_id && row.previous_file_id && row.previous_generation_id && row.previous_locator
+    && row.previous_chunk_id && row.previous_chunk_index !== null && row.previous_quote_text
+    ? { sourceId: row.previous_source_id, fileId: row.previous_file_id, generationId: row.previous_generation_id,
+      locator: row.previous_locator, chunkId: row.previous_chunk_id, chunkIndex: row.previous_chunk_index,
+      page: row.previous_page_number, sectionHeading: row.previous_section_heading, quoteText: row.previous_quote_text }
+    : null;
+}
+
+function previousChainError(row: CandidateRow): string | null {
+  if (row.occurrence_id !== null || !row.previous_candidate_id || !row.previous_occurrence_id || !previousEvidence(row)) {
+    return "Missing candidate has no complete previous occurrence and chunk evidence chain.";
+  }
+  if (row.previous_source_id !== row.source_id || row.previous_file_id !== row.file_id
+      || row.previous_entry_type !== row.entry_type || row.previous_candidate_key !== row.candidate_key) {
+    return "Previous candidate source, file, type, and key must match the missing candidate.";
+  }
+  if (!row.content_sha256 || row.content_sha256 !== row.previous_content_sha256) {
+    return "Missing candidate content must retain the immutable previous candidate payload.";
+  }
+  return null;
+}
+
+function previousPublishedContent(row: CandidateRow): Record<string, unknown> | null {
+  if (row.previous_publication_status !== "completed") return null;
+  if (row.previous_decision === "approved") return row.previous_content;
+  if (row.previous_decision === "merged" && isRecord(row.previous_resolved_content)) return row.previous_resolved_content;
+  return null;
+}
+
+function blockedCapability(capability: CandidatePublicationCapability, reason: string): CandidatePublicationCapability {
+  return { ...capability, publicationCapability: "requires_extraction", publicationBlockReason: reason };
 }
 
 function candidateEntryId(row: Pick<CandidateRow, "entry_type" | "candidate_key">): string | null {
@@ -499,6 +650,7 @@ function decisionFor(action: ReviewAction, current: ReviewDecision): ReviewDecis
 
 function assertDecisionAllowed(diffStatus: string, decision: ReviewDecision): void {
   if (decision === "approved" && !["new", "changed", "unchanged"].includes(diffStatus)) throw new ImportReviewError(`${diffStatus} candidates cannot be approved without a merge.`);
+  if (decision === "merged" && diffStatus === "missing") throw new ImportReviewError("Missing candidates cannot be merged as new content.");
   if (decision === "unpublish" && diffStatus !== "missing") throw new ImportReviewError("Only missing candidates can be unpublished.");
 }
 

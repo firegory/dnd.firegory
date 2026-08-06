@@ -29,7 +29,7 @@ export type CandidatePublicationContext = Readonly<{
 
 export type CandidatePublicationCapability = Readonly<{
   payloadOrigin: "pdf_extraction" | "collector_snapshot" | "unknown";
-  publicationCapability: "publishable" | "requires_extraction";
+  publicationCapability: "publishable" | "can_unpublish" | "requires_extraction";
   publicationBlockReason: string | null;
 }>;
 
