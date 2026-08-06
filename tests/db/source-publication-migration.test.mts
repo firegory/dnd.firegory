@@ -22,9 +22,17 @@ test("constraint hardening migration aligns feasible canonical write rules", () 
   assert.match(constraintsSql, /publisher IS NULL OR publisher !~ '\^\[\[:space:\]\]\*\$'/);
   assert.match(constraintsSql, /publication_code ~ '\^\[A-Za-z0-9\]\[A-Za-z0-9\._-\]\{0,127\}\$'/);
   assert.match(constraintsSql, /external_origin_id !~ '\^\[\[:space:\]\]\*\$'/);
-  assert.match(constraintsSql, /external_origin_url ~ '\^https:\/\/\[\^%\[\:space:\]\/\?#\]\+'/);
+  assert.match(constraintsSql, /external_origin_url ~ '\^https\?:\/\/\[\^%\[\:space:\]\/\?#\]\+'/);
   assert.match(constraintsSql, /external_origin_url !~ '\[\[:space:\]\]'/);
   assert.match(constraintsSql, /external_origin_url !~ '%\(/);
+});
+
+test("0003 to 0004 retains persisted HTTP and HTTPS origin compatibility", () => {
+  assert.match(sql, /external_origin_url IS NOT NULL AND external_origin_id IS NOT NULL/);
+  assert.doesNotMatch(sql, /external_origin_url ~ '\^https/);
+  assert.match(constraintsSql, /external_origin_url ~ '\^https\?:\/\//);
+  assert.match(constraintsSql, /Both schemes are retained for lossless upgrades from 0003/);
+  assert.doesNotMatch(constraintsSql, /UPDATE sources[\s\S]*external_origin_url/);
 });
 
 test("constraint hardening SQL is rerunnable but only statically verified", () => {

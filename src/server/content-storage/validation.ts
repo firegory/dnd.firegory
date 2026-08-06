@@ -8,6 +8,7 @@ import addFormats from "ajv-formats";
 import canonicalRevisionSchema from "../../../content-repository/schemas/v1/canonical-revision.schema.json" with { type: "json" };
 import repositoryManifestSchema from "../../../content-repository/schemas/v1/repository-manifest.schema.json" with { type: "json" };
 import sourceSchema from "../../../content-repository/schemas/v1/source.schema.json" with { type: "json" };
+import { normalizeCanonicalHttpUrl } from "../content/canonical-values.ts";
 import {
   canonicalJson,
   hasValidRevisionIdentity,
@@ -76,6 +77,10 @@ export class ContentIntegrityError extends Error {
 export function assertContentSource(document: unknown): asserts document is ContentSource {
   if (!validateSource(document)) {
     throw new ContentSchemaValidationError("Content source", validateSource.errors ?? []);
+  }
+  const originUrl = document.publication.origin?.url;
+  if (originUrl && normalizeCanonicalHttpUrl(originUrl) !== originUrl) {
+    throw new ContentIntegrityError("Source publication origin URL must use canonical WHATWG-normalized spelling.");
   }
   assertUnique(document.files.map((file) => file.fileId), "Source file IDs");
 }

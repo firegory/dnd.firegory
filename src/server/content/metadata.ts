@@ -11,7 +11,7 @@ import {
   type SourceEdition,
   type SourceLanguage,
 } from "../access/retrieval-filter.ts";
-import { normalizeCanonicalHttpsUrl, normalizePlainUuid } from "./canonical-values.ts";
+import { normalizeCanonicalHttpUrl, normalizePlainUuid } from "./canonical-values.ts";
 
 export type Queryable = Readonly<{
   query<T = unknown>(sql: string, values?: readonly unknown[]): Promise<{ rows: T[] }>;
@@ -534,9 +534,9 @@ function normalizeOrigin(origin: PublicationMetadataInput["origin"]): Publicatio
   }
   const url = origin.url;
   const id = requireTrimmed(origin.id, "publication.origin.id");
-  const normalizedUrl = normalizeCanonicalHttpsUrl(url);
+  const normalizedUrl = normalizeCanonicalHttpUrl(url);
   if (!normalizedUrl) {
-    throw new ContentMetadataValidationError("publication.origin.url must be an absolute HTTPS URL with valid encoding and no whitespace.");
+    throw new ContentMetadataValidationError("publication.origin.url must be an absolute HTTP(S) URL with valid encoding and no whitespace.");
   }
   return { url: normalizedUrl, id };
 }

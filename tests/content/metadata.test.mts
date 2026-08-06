@@ -184,7 +184,7 @@ test("content metadata service creates admin-owned source records", async () => 
       publisher: "Wizards of the Coast",
       releaseYear: 2014,
       revision: "first printing",
-      origin: { url: "https://example.com/books/phb", id: "phb-2014" },
+      origin: { url: "HTTPS://EXAMPLE.COM:443/books/./phb", id: "phb-2014" },
       attribution: "Player's Handbook, Wizards of the Coast",
       sourcePriority: 100,
       canonicalBookId: "players-handbook",
@@ -194,6 +194,7 @@ test("content metadata service creates admin-owned source records", async () => 
 
   assert.equal(source.createdByUserId, admin.userId);
   assert.equal(source.accessTier, "open");
+  assert.equal(source.publication.origin?.url, "https://example.com/books/phb");
   assert.match(db.calls[0]?.sql ?? "", /INSERT INTO sources/);
   assert.deepEqual(db.calls[0]?.values, [
     "players-handbook-2014-en",
@@ -333,7 +334,7 @@ test("publication validation rejects malformed and contradictory metadata", () =
   );
   assert.throws(
     () => normalizeSourceInput({ ...base, publication: { origin: { url: "file:\/\/book", id: "book" } } }),
-    /absolute HTTPS URL/,
+    /absolute HTTP\(S\) URL/,
   );
   assert.throws(
     () => normalizeSourceInput({ ...base, canonicalSourceId: "Not Stable" }),

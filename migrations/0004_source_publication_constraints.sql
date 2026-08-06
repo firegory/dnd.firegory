@@ -1,7 +1,9 @@
 -- Harden source projection constraints to match canonical source.json values.
 -- PostgreSQL cannot reproduce full WHATWG URL parsing, but it rejects direct
--- writes that violate the canonical HTTPS scheme, authority, whitespace, and
+-- writes that violate the HTTP(S) scheme, authority, whitespace, and
 -- percent-encoding rules enforced by the application.
+-- Both schemes are retained for lossless upgrades from 0003, which accepted
+-- paired HTTP origins.
 
 ALTER TABLE sources
   DROP CONSTRAINT IF EXISTS sources_publication_text_not_blank,
@@ -26,7 +28,7 @@ ALTER TABLE sources
       external_origin_url IS NOT NULL
       AND external_origin_id IS NOT NULL
       AND external_origin_id !~ '^[[:space:]]*$'
-      AND external_origin_url ~ '^https://[^%[:space:]/?#]+'
+      AND external_origin_url ~ '^https?://[^%[:space:]/?#]+'
       AND external_origin_url !~ '[[:space:]]'
       AND external_origin_url !~ '%([^0-9A-Fa-f]|[0-9A-Fa-f]([^0-9A-Fa-f]|$)|$)'
     )

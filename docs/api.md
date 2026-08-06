@@ -106,7 +106,7 @@ Upload a PDF and start an ingestion job.
 | `publisher` | string | no | Publisher |
 | `releaseYear` | integer | no | Publication year |
 | `revision` | string | no | Printing/revision; requires release year |
-| `originUrl` | string | no | Absolute HTTPS URL; requires origin ID and valid percent encoding |
+| `originUrl` | string | no | Absolute HTTP(S) URL; requires origin ID and valid percent encoding |
 | `originId` | string | no | External provider ID; requires origin URL |
 | `attribution` | string | no | Display attribution |
 | `sourcePriority` | integer | no | 0-1000; defaults to 0 |
@@ -336,7 +336,7 @@ Create a new source metadata record.
 | `publication.publisher` | string or null | no | Publisher |
 | `publication.releaseYear` | integer or null | no | 1974-2100; `5.5e` cannot predate 2024 |
 | `publication.revision` | string or null | no | Printing/revision; requires `releaseYear` |
-| `publication.origin` | object or null | no | Absolute HTTPS `url` and `id`, supplied together; WHATWG-normalized and whitespace-free |
+| `publication.origin` | object or null | no | Absolute HTTP(S) `url` and `id`, supplied together; WHATWG-normalized and whitespace-free |
 | `publication.attribution` | string or null | no | Display attribution |
 | `publication.sourcePriority` | integer | no | 0-1000; defaults to 0 |
 | `publication.canonicalBookId` | string or null | no | Stable conceptual book identity |

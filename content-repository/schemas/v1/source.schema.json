@@ -35,7 +35,7 @@
               "type": "string",
               "format": "uri",
               "allOf": [
-                { "pattern": "^https://[^%\\s/?#]+" },
+                { "pattern": "^https?://[^%\\s/?#]+" },
                 { "pattern": "^(?:[^%\\s]|%[0-9A-Fa-f]{2})+$" }
               ]
             },

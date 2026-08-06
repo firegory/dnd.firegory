@@ -8,20 +8,20 @@ export function normalizePlainUuid(value: string): string | null {
   return value.toLowerCase();
 }
 
-export function normalizeCanonicalHttpsUrl(value: string): string | null {
+export function normalizeCanonicalHttpUrl(value: string): string | null {
   if (
     /\s/.test(value)
     || INVALID_PERCENT_ESCAPE.test(value)
-    || !/^https:\/\/[^%\s/?#]+/i.test(value)
+    || !/^https?:\/\/[^%\s/?#]+/i.test(value)
   ) return null;
 
   let parsed: URL;
   try {
-    parsed = new URL(value.replace(/^https:/i, "https:"));
+    parsed = new URL(value);
   } catch {
     return null;
   }
 
-  if (parsed.protocol !== "https:" || parsed.host === "") return null;
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.host === "") return null;
   return parsed.href;
 }

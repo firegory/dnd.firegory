@@ -215,9 +215,11 @@ test("canonical schema and runtime agree on every publication field contract", a
   }
 });
 
-test("canonical HTTPS URL vectors match schema and runtime", async (t) => {
+test("canonical HTTP(S) URL vectors round-trip identically", async (t) => {
   const source = (await readJson(resolve(dataRoot, "sources/srd-2014/source.json"))) as ContentSource;
   const canonicalUrls = [
+    "http://example.com/",
+    "http://example.com:8080/books/basic-rules",
     "https://example.com/",
     "https://example.com/books/basic-rules",
     "https://example.com/a%20book?q=rules#section",
@@ -232,7 +234,6 @@ test("canonical HTTPS URL vectors match schema and runtime", async (t) => {
   }
 
   const invalidUrls = [
-    "http://example.com/book",
     "ftp://example.com/book",
     "//example.com/book",
     "/relative/book",
@@ -255,13 +256,40 @@ test("canonical HTTPS URL vectors match schema and runtime", async (t) => {
   }
 });
 
-test("runtime normalizes HTTPS URLs to schema-valid canonical values", async () => {
+test("noncanonical HTTP(S) inputs normalize before persistence and canonical files reject them", async (t) => {
   const source = (await readJson(resolve(dataRoot, "sources/srd-2014/source.json"))) as ContentSource;
-  const candidate = sourceWithOriginUrl(source, "HTTPS://EXAMPLE.COM/books/basic-rules");
+  const vectors = [
+    ["http://example.com", "http://example.com/"],
+    ["https://example.com", "https://example.com/"],
+    ["http://example.com:80/path", "http://example.com/path"],
+    ["https://example.com:443/path", "https://example.com/path"],
+    ["https://EXAMPLE.COM/path", "https://example.com/path"],
+    ["https://example.com/a/../b", "https://example.com/b"],
+  ] as const;
+
+  for (const [input, expected] of vectors) {
+    await t.test(input, () => {
+      const candidate = sourceWithOriginUrl(source, input);
+      assert.throws(
+        () => assertContentSource(candidate),
+        (error: unknown) => error instanceof ContentIntegrityError
+          && /canonical WHATWG-normalized spelling/.test(error.message),
+      );
+      assert.equal(candidate.publication.origin?.url, input);
+      const normalizedUrl = runtimeOriginUrl(candidate);
+      assert.equal(normalizedUrl, expected);
+      assertContentSource(sourceWithOriginUrl(source, normalizedUrl));
+    });
+  }
+});
+
+test("case-normalizable HTTP(S) input produces a schema-valid canonical value", async () => {
+  const source = (await readJson(resolve(dataRoot, "sources/srd-2014/source.json"))) as ContentSource;
+  const candidate = sourceWithOriginUrl(source, "HTTP://EXAMPLE.COM/books/basic-rules");
 
   assert.throws(() => assertContentSource(candidate), ContentSchemaValidationError);
   const normalizedUrl = runtimeOriginUrl(candidate);
-  assert.equal(normalizedUrl, "https://example.com/books/basic-rules");
+  assert.equal(normalizedUrl, "http://example.com/books/basic-rules");
   assertContentSource(sourceWithOriginUrl(source, normalizedUrl));
 });
 
