@@ -1,0 +1,7 @@
+Wolf
+Medium beast, unaligned
+Armor Class 13
+Hit Points 11 (2d8 + 2)
+Speed 40 ft.
+Challenge 1/4 (50 XP)
+Keen Hearing and Smell. The wolf has advantage on Wisdom checks.

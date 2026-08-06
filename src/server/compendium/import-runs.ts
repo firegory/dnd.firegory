@@ -338,7 +338,7 @@ export class CompendiumImportRunService {
       }
 
       const baselineRows = await client.query<BaselineCandidateRow>(
-        `SELECT DISTINCT ON (candidate.candidate_key)
+        `SELECT DISTINCT ON (candidate.entry_type, candidate.candidate_key)
                 candidate.id, candidate.candidate_key, candidate.entry_type,
                 candidate.content, candidate.content_sha256
          FROM compendium_import_candidates candidate
@@ -346,10 +346,10 @@ export class CompendiumImportRunService {
          WHERE previous_run.source_id = $1 AND previous_run.file_id = $2
            AND previous_run.id <> $3 AND previous_run.status = 'succeeded'
            AND candidate.diff_status IN ('new', 'unchanged', 'changed')
-         ORDER BY candidate.candidate_key, previous_run.finished_at DESC, candidate.created_at DESC`,
+         ORDER BY candidate.entry_type, candidate.candidate_key, previous_run.finished_at DESC, candidate.created_at DESC`,
         [run.source_id, run.file_id, runId],
       );
-      const baseline = new Map(baselineRows.rows.map((row) => [row.candidate_key, row]));
+      const baseline = new Map(baselineRows.rows.map((row) => [candidateIdentity(row.entry_type!, row.candidate_key), row]));
       const seen = new Set<string>();
       const present = new Set<string>();
       const planned: Array<Readonly<{
@@ -370,18 +370,19 @@ export class CompendiumImportRunService {
           planned.push({ candidateOrder: planned.length, occurrenceId, previous: null, key: key || `invalid:${candidate.occurrenceIndex}`, type, status: "invalid", content: candidate.content, hash, invalidReason });
           continue;
         }
-        present.add(key);
-        if (seen.has(key)) {
+        const identity = candidateIdentity(type!, key);
+        present.add(identity);
+        if (seen.has(identity)) {
           planned.push({ candidateOrder: planned.length, occurrenceId, previous: null, key, type, status: "duplicate", content: candidate.content, hash, invalidReason: null });
           continue;
         }
-        seen.add(key);
-        const previous = baseline.get(key) ?? null;
+        seen.add(identity);
+        const previous = baseline.get(identity) ?? null;
         const status: ImportDiffStatus = !previous ? "new" : previous.content_sha256 === hash && previous.entry_type === type ? "unchanged" : "changed";
         planned.push({ candidateOrder: planned.length, occurrenceId, previous, key, type, status, content: candidate.content, hash, invalidReason: null });
       }
-      for (const [key, previous] of baseline) {
-        if (!present.has(key)) planned.push({ candidateOrder: planned.length, occurrenceId: null, previous, key, type: previous.entry_type, status: "missing", content: previous.content, hash: previous.content_sha256, invalidReason: null });
+      for (const [identity, previous] of baseline) {
+        if (!present.has(identity)) planned.push({ candidateOrder: planned.length, occurrenceId: null, previous, key: previous.candidate_key, type: previous.entry_type, status: "missing", content: previous.content, hash: previous.content_sha256, invalidReason: null });
       }
 
       for (const candidate of planned) {
@@ -390,7 +391,7 @@ export class CompendiumImportRunService {
              (import_run_id, source_id, file_id, generation_id, occurrence_id, previous_candidate_id,
               candidate_order, candidate_key, entry_type, diff_status, content, content_sha256, invalid_reason)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
-           ON CONFLICT (import_run_id, candidate_key, occurrence_id) DO NOTHING
+            ON CONFLICT (import_run_id, entry_type, candidate_key, occurrence_id) DO NOTHING
            RETURNING id, import_run_id, source_id, file_id, generation_id, occurrence_id,
                      previous_candidate_id, candidate_order, candidate_key, entry_type, diff_status,
                      content, content_sha256, invalid_reason, created_at`,
@@ -404,8 +405,9 @@ export class CompendiumImportRunService {
                     previous_candidate_id, candidate_order, candidate_key, entry_type, diff_status,
                     content, content_sha256, invalid_reason, created_at
              FROM compendium_import_candidates
-             WHERE import_run_id = $1 AND candidate_key = $2 AND occurrence_id IS NOT DISTINCT FROM $3`,
-            [runId, candidate.key, candidate.occurrenceId],
+             WHERE import_run_id = $1 AND entry_type IS NOT DISTINCT FROM $2
+               AND candidate_key = $3 AND occurrence_id IS NOT DISTINCT FROM $4`,
+            [runId, candidate.type, candidate.key, candidate.occurrenceId],
           )).rows[0];
         }
         if (!persisted || !candidateMatches(persisted, run, candidate)) {
@@ -736,6 +738,7 @@ function candidateReplayMatches(
 function timestamp(value: string | Date): string { return value instanceof Date ? value.toISOString() : value; }
 
 function sha256Json(value: unknown): string { return createHash("sha256").update(canonicalJson(value)).digest("hex"); }
+function candidateIdentity(type: CompendiumEntryType, key: string): string { return `${type}:${key}`; }
 function validCandidateKey(value: string): boolean { return /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/.test(value); }
 function requireHash(value: string, field: string): void { if (!/^[0-9a-f]{64}$/.test(value)) throw new CompendiumValidationError(`${field} must be a lowercase SHA-256 hash.`); }
 function requireUuid(value: string, field: string): void { if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw new CompendiumValidationError(`${field} must be a UUID.`); }
