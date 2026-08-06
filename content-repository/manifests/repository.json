@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "kind": "repositoryManifest",
+  "repositoryId": "dnd-firegory-example",
+  "schemas": [
+    { "schemaId": "urn:dnd-firegory:schema:content-repository:source:1", "path": "schemas/v1/source.schema.json" },
+    { "schemaId": "urn:dnd-firegory:schema:content-repository:canonical-revision:1", "path": "schemas/v1/canonical-revision.schema.json" },
+    { "schemaId": "urn:dnd-firegory:schema:content-repository:manifest:1", "path": "schemas/v1/repository-manifest.schema.json" }
+  ],
+  "entries": [
+    {
+      "entryId": "dash",
+      "revisionId": "rev-86a7675769cd6b31d06f9eac74b7f88655eb9f8c64a985bdbb2bc7c156c9f19a",
+      "path": "compendium/dash/revisions/rev-86a7675769cd6b31d06f9eac74b7f88655eb9f8c64a985bdbb2bc7c156c9f19a.json",
+      "contentHash": "sha256:86a7675769cd6b31d06f9eac74b7f88655eb9f8c64a985bdbb2bc7c156c9f19a"
+    }
+  ]
+}

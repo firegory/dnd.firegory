@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "kind": "source",
+  "sourceId": "srd-2014",
+  "title": "D&D Basic Rules (2014)",
+  "category": "core_rules",
+  "edition": "5e",
+  "language": "en",
+  "publisher": "Wizards of the Coast",
+  "license": "Open reference example",
+  "files": [
+    {
+      "fileId": "basic-rules-excerpt",
+      "path": "sources/srd-2014/files/basic-rules-excerpt.txt",
+      "mediaType": "text/plain",
+      "contentHash": "sha256:712ae1033a657094dc2b554e7b7ec552e1760eb175fe245d301d61fb12504f31"
+    }
+  ]
+}

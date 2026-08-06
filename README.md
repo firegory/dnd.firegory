@@ -221,6 +221,7 @@ cp .env.example .env.local
 | `LLM_BASE_URL` | no | LLM API base URL (default: `https://api.openai.com/v1`) |
 | `LLM_MODEL` | no | LLM model name (default: `gpt-4o-mini`) |
 | `STORAGE_ROOT` | no | Root directory for file storage (default: `./storage`) |
+| `DND_DATA_ROOT` | for portable content | Root of the versioned canonical content repository; see `content-repository/README.md` |
 | `APP_PORT` | no | Host port for the app in Docker Compose (default: `3000`) |
 | `POSTGRES_DB` | no | PostgreSQL database name (default: `dnd_firegory`) |
 | `POSTGRES_USER` | no | PostgreSQL user (default: `dnd`) |
