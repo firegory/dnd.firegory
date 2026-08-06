@@ -398,6 +398,8 @@ npm run ingest      # CLI ingestion
 npm run content-index -- validate      # Validate canonical NFS content
 npm run content-index -- incremental   # Sync changed managed content
 npm run content-index -- clean         # Reconcile all managed content
+npm run corpus-export -- generate      # Publish a portable Markdown/JSONL corpus
+npm run corpus-export -- validate      # Validate the latest portable corpus
 ```
 
 ## Backups
@@ -405,6 +407,8 @@ npm run content-index -- clean         # Reconcile all managed content
 See [docs/backups.md](docs/backups.md) for backup and restore procedures for PostgreSQL data and file storage.
 
 Canonical NFS index validation, clean/incremental synchronization, dry-run, restart checkpoints, and embedding backfill are documented in [docs/content-index-sync.md](docs/content-index-sync.md).
+
+Database-free deterministic agent corpus generation, incremental/removal manifests, artifact validation, and atomic latest publication are documented in [docs/corpus-exports.md](docs/corpus-exports.md).
 
 ## Project structure
 
