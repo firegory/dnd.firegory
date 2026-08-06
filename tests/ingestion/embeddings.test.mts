@@ -49,7 +49,7 @@ describe("getEmbeddingConfig", () => {
       assert.equal(config.provider, "zai");
       assert.equal(config.model, "z-embedding");
       assert.equal(config.dimensions, 1024);
-      assert.equal(config.baseUrl, "https://api.z.ai/v1");
+      assert.equal(config.baseUrl, "https://api.z.ai/api/paas/v4");
     });
   });
 

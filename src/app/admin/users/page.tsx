@@ -34,7 +34,7 @@ export default async function AdminUsersPage() {
                 <tr className="border-b border-border bg-surface">
                   <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase"><T k="user" /></th>
                   <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase"><T k="currentRole" /></th>
-                  <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase"><T k="changeRole" /></th>
+                  <th className="print-action px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase"><T k="changeRole" /></th>
                   <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase"><T k="activity" /></th>
                 </tr>
               </thead>
@@ -50,7 +50,7 @@ export default async function AdminUsersPage() {
                         {user.role}
                       </span>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="print-action px-4 py-3">
                       <form action={updateUserRoleAction} className="flex items-center gap-2">
                         <input type="hidden" name="userId" value={user.id} />
                         <select

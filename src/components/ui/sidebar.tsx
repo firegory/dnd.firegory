@@ -2,18 +2,25 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 
+import {
+  beginDrawerNavigation,
+  closeModalDrawer,
+  focusMainAfterNavigation,
+  handleModalCancel,
+  openModalDrawer,
+} from "./drawer-behavior";
 import type { AppLayoutRole } from "./navigation";
 import { getNavigationItems, isNavigationItemActive } from "./navigation";
 import { Toggle } from "./toggle";
 import { useUiLanguage, type UiLanguage } from "./i18n";
 
-function Brand({ onNavigate }: { onNavigate?: () => void }) {
+function Brand({ onNavigate }: { onNavigate?: (event: MouseEvent<HTMLAnchorElement>, href: string) => void }) {
   const { t } = useUiLanguage();
 
   return (
-    <Link href="/search" className="brand-lockup" aria-label={`dnd.firegory - ${t("rulesSearch")}`} onClick={onNavigate}>
+    <Link href="/search" className="brand-lockup" aria-label={`dnd.firegory - ${t("rulesSearch")}`} onClick={(event) => onNavigate?.(event, "/search")}>
       <span className="brand-mark" aria-hidden="true">D20</span>
       <span>
         <strong>dnd<span>.firegory</span></strong>
@@ -23,7 +30,7 @@ function Brand({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-function Navigation({ userRole, onNavigate }: { userRole?: AppLayoutRole; onNavigate?: () => void }) {
+function Navigation({ userRole, onNavigate }: { userRole?: AppLayoutRole; onNavigate?: (event: MouseEvent<HTMLAnchorElement>, href: string) => void }) {
   const pathname = usePathname();
   const { t } = useUiLanguage();
 
@@ -39,7 +46,7 @@ function Navigation({ userRole, onNavigate }: { userRole?: AppLayoutRole; onNavi
                 href={item.href}
                 aria-current={active ? "page" : undefined}
                 className={active ? "active" : undefined}
-                onClick={onNavigate}
+                onClick={(event) => onNavigate?.(event, item.href)}
               >
                 <span className="nav-glyph" aria-hidden="true" />
                 {t(item.labelKey)}
@@ -82,58 +89,44 @@ export function Sidebar({ userRole }: { userRole?: AppLayoutRole }) {
 
 export function MobileHeader({ userRole }: { userRole?: AppLayoutRole }) {
   const { t } = useUiLanguage();
+  const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const drawerRef = useRef<HTMLElement>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
 
   function closeDrawer(restoreFocus = true) {
+    closeModalDrawer(dialogRef.current, triggerRef.current, restoreFocus);
     setOpen(false);
-    if (restoreFocus) triggerRef.current?.focus();
+  }
+
+  function handleNavigate(event: MouseEvent<HTMLAnchorElement>, href: string) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const restoreFocus = beginDrawerNavigation(pathname, href, window.sessionStorage);
+    if (restoreFocus) event.preventDefault();
+    closeDrawer(restoreFocus);
   }
 
   useEffect(() => {
     if (!open) return;
 
-    const previousOverflow = document.body.style.overflow;
     const desktopQuery = window.matchMedia("(min-width: 62rem)");
-    document.body.style.overflow = "hidden";
-    drawerRef.current?.querySelector<HTMLElement>("a, button")?.focus();
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    openModalDrawer(dialog, dialog.querySelector<HTMLElement>("a, button"));
 
     function handleDesktopChange(event: MediaQueryListEvent) {
-      if (event.matches) setOpen(false);
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeDrawer();
-        return;
-      }
-      if (event.key !== "Tab" || !drawerRef.current) return;
-
-      const focusable = Array.from(
-        drawerRef.current.querySelectorAll<HTMLElement>('a, button:not([disabled]), [tabindex]:not([tabindex="-1"])'),
-      );
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
+      if (event.matches) closeDrawer(false);
     }
 
     desktopQuery.addEventListener("change", handleDesktopChange);
-    document.addEventListener("keydown", handleKeyDown);
     return () => {
-      document.body.style.overflow = previousOverflow;
       desktopQuery.removeEventListener("change", handleDesktopChange);
-      document.removeEventListener("keydown", handleKeyDown);
     };
   }, [open]);
+
+  useEffect(() => {
+    focusMainAfterNavigation(pathname, window.sessionStorage, document.getElementById("main-content"));
+  }, [pathname]);
 
   return (
     <>
@@ -153,28 +146,28 @@ export function MobileHeader({ userRole }: { userRole?: AppLayoutRole }) {
           <span aria-hidden="true" />
         </button>
       </header>
-      {open ? (
-        <div className="drawer-layer">
-          <button className="drawer-backdrop" type="button" aria-label={t("closeNavigation")} onClick={() => closeDrawer()} />
-          <aside
-            id="mobile-navigation"
-            ref={drawerRef}
-            className="mobile-drawer"
-            role="dialog"
-            aria-modal="true"
-            aria-label={t("primaryNavigation")}
-          >
-            <div className="drawer-heading">
-              <Brand onNavigate={() => closeDrawer(false)} />
-              <button type="button" className="close-button" aria-label={t("closeNavigation")} onClick={() => closeDrawer()}>
-                <span aria-hidden="true">×</span>
-              </button>
-            </div>
-            <Navigation userRole={userRole} onNavigate={() => closeDrawer(false)} />
-            <LanguageToggle />
-          </aside>
-        </div>
-      ) : null}
+      <dialog
+        id="mobile-navigation"
+        ref={dialogRef}
+        className="mobile-dialog"
+        aria-label={t("primaryNavigation")}
+        onCancel={(event) => handleModalCancel(event, () => closeDrawer())}
+        onClose={() => setOpen(false)}
+        onClick={(event) => {
+          if (event.target === event.currentTarget) closeDrawer();
+        }}
+      >
+        <aside className="mobile-drawer">
+          <div className="drawer-heading">
+            <Brand onNavigate={handleNavigate} />
+            <button type="button" className="close-button" aria-label={t("closeNavigation")} onClick={() => closeDrawer()}>
+              <span aria-hidden="true">×</span>
+            </button>
+          </div>
+          <Navigation userRole={userRole} onNavigate={handleNavigate} />
+          <LanguageToggle />
+        </aside>
+      </dialog>
     </>
   );
 }

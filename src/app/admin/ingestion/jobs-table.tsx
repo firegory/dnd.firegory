@@ -163,7 +163,7 @@ export function JobsTable() {
             <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">{t("type")}</th>
             <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">{t("date")}</th>
             <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">{t("error")}</th>
-            <th className="px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">{t("actions")}</th>
+            <th className="print-action px-4 py-3 text-xs font-semibold tracking-wider text-text-muted uppercase">{t("actions")}</th>
           </tr>
         </thead>
         <tbody>
@@ -195,7 +195,7 @@ export function JobsTable() {
               <td className="px-4 py-3 text-xs text-text-muted">{job.kind}</td>
               <td className="px-4 py-3 text-xs whitespace-nowrap text-text-muted">{formatTimestamp(job.queuedAt)}</td>
               <td className="max-w-56 px-4 py-3 text-xs text-danger">{job.errorSummary ?? "—"}</td>
-              <td className="px-4 py-3">
+              <td className="print-action px-4 py-3">
                 <Actions
                   job={job}
                   actionStatus={actionStatus}
