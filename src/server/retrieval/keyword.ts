@@ -60,8 +60,10 @@ export async function keywordSearch(
               1  /* normalize by document length */
             ) AS rank
      FROM chunks c
+     JOIN files f ON f.id = c.file_id AND f.active_generation_id = c.generation_id
      JOIN sources s ON s.id = c.source_id
      WHERE s.deleted_at IS NULL
+       AND f.deleted_at IS NULL
        AND ${accessSql}
        AND to_tsvector('simple', c.text) @@ websearch_to_tsquery('simple', $${queryIdx})
      ORDER BY rank DESC

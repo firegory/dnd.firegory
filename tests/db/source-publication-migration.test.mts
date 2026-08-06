@@ -13,6 +13,7 @@ test("publication migration is registered after existing migrations", () => {
     "0002_telegram_links.sql",
     "0003_source_publication_metadata.sql",
     "0004_source_publication_constraints.sql",
+    "0005_ingestion_generations.sql",
   ]);
 });
 

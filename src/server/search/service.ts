@@ -97,8 +97,10 @@ export async function searchChunks(input: SearchInput): Promise<SearchResult> {
   const countResult = await query<{ count: string }>(
     `SELECT count(*)::text
      FROM chunks c
+     JOIN files f ON f.id = c.file_id AND f.active_generation_id = c.generation_id
      JOIN sources s ON s.id = c.source_id
      WHERE s.deleted_at IS NULL
+       AND f.deleted_at IS NULL
        AND ${accessSql}
        AND to_tsvector('simple', c.text) @@ plainto_tsquery('simple', $${searchParamIdx})`,
     allParams.slice(0, -2), // count doesn't need limit/offset
@@ -111,8 +113,10 @@ export async function searchChunks(input: SearchInput): Promise<SearchResult> {
     `SELECT c.id, c.source_id, c.file_id, c.text, c.quote_text, c.section_heading, c.page_number,
             s.title, s.category, s.edition, s.language, s.access_tier
      FROM chunks c
+     JOIN files f ON f.id = c.file_id AND f.active_generation_id = c.generation_id
      JOIN sources s ON s.id = c.source_id
      WHERE s.deleted_at IS NULL
+       AND f.deleted_at IS NULL
        AND ${accessSql}
        AND to_tsvector('simple', c.text) @@ plainto_tsquery('simple', $${searchParamIdx})
      ORDER BY c.id

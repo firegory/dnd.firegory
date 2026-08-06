@@ -255,7 +255,7 @@ export async function markJobFailed(
   await query(
     `UPDATE ingestion_jobs
      SET status = 'failed', finished_at = now(), error_summary = $2
-     WHERE id = $1`,
+     WHERE id = $1 AND status IN ('queued', 'processing')`,
     [jobId, errorSummary],
   );
 }

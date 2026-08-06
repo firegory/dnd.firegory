@@ -100,12 +100,12 @@ export async function retryFailedJob(
 // ---------------------------------------------------------------------------
 
 /**
- * Reprocesses a source by creating a new "reprocess" job. The original PDF is
- * preserved. Any existing chunks, pages, and documents from previous jobs are
- * removed before the new job runs, ensuring a clean re-ingestion.
+ * Reprocesses a source by creating a new "reprocess" job. The original PDF and
+ * active generation remain available until the replacement is validated and
+ * atomically activated by the worker.
  *
- * The active-jobs check and cleanup+job-creation run inside a single
- * transaction with a row-level lock to prevent concurrent reprocess requests.
+ * The active-jobs check and job creation run inside a single transaction with
+ * row-level locks to prevent concurrent reprocess requests.
  *
  * @returns The new reprocess job record.
  */
@@ -132,9 +132,8 @@ export async function reprocessSource(
   const fileResult = await query<{
     id: string;
     storage_path: string;
-    artifacts_root: string | null;
   }>(
-    `SELECT id, storage_path, processed_artifacts_root AS artifacts_root
+    `SELECT id, storage_path
      FROM files
      WHERE source_id = $1 AND deleted_at IS NULL
      ORDER BY created_at DESC
@@ -149,9 +148,9 @@ export async function reprocessSource(
 
   const file = fileResult.rows[0];
 
-  // Within a transaction: lock active jobs to prevent concurrent reprocess,
-  // remove old artifacts, then create new reprocess job
-  const { job, oldArtifactsRoot } = await withTransaction(async (client) => {
+  // Lock active jobs and create the replacement job atomically. Content and
+  // artifacts are immutable generation data and are not removed here.
+  const job = await withTransaction(async (client) => {
     // Lock any active jobs for this source to prevent concurrent reprocess
     const activeJobs = await client.query<{ id: string; status: string }>(
       `SELECT id, status FROM ingestion_jobs
@@ -166,24 +165,6 @@ export async function reprocessSource(
       );
     }
 
-    // Delete chunks from previous jobs for this source
-    await client.query(
-      `DELETE FROM chunks WHERE source_id = $1`,
-      [sourceId],
-    );
-
-    // Delete pages from previous jobs for this source
-    await client.query(
-      `DELETE FROM pages WHERE source_id = $1`,
-      [sourceId],
-    );
-
-    // Delete documents from previous jobs for this source
-    await client.query(
-      `DELETE FROM documents WHERE source_id = $1`,
-      [sourceId],
-    );
-
     const job = await createIngestionJob({
       kind: "reprocess",
       sourceId,
@@ -193,21 +174,8 @@ export async function reprocessSource(
       client,
     });
 
-    return { job, oldArtifactsRoot: file.artifacts_root };
+    return job;
   });
-
-  // Remove old processed artifacts from disk (outside transaction)
-  if (oldArtifactsRoot) {
-    try {
-      await rm(oldArtifactsRoot, { recursive: true, force: true });
-    } catch (err) {
-      // Non-fatal: artifact cleanup failure should not block reprocessing
-      console.error(
-        `[reprocess] Failed to remove old artifacts at ${oldArtifactsRoot}:`,
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
 
   const queueId = await enqueueJob(job.id);
 

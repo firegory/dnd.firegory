@@ -86,8 +86,10 @@ async function searchByEmbedding(
             s.title, s.category, s.edition, s.language, s.access_tier,
             (c.embedding <=> $${embeddingIdx}::vector) AS distance
      FROM chunks c
+     JOIN files f ON f.id = c.file_id AND f.active_generation_id = c.generation_id
      JOIN sources s ON s.id = c.source_id
      WHERE s.deleted_at IS NULL
+       AND f.deleted_at IS NULL
        AND ${accessSql}
        AND c.embedding IS NOT NULL
      ORDER BY c.embedding <=> $${embeddingIdx}::vector
