@@ -223,11 +223,18 @@ export async function createIngestionJob(input: {
 /**
  * Transitions an ingestion job to processing state.
  */
-export async function markJobProcessing(jobId: string): Promise<void> {
-  await query(
-    `UPDATE ingestion_jobs SET status = 'processing', started_at = now() WHERE id = $1 AND status = 'queued'`,
+export async function markJobProcessing(
+  jobId: string,
+  execute: typeof query = query,
+): Promise<boolean> {
+  const result = await execute<{ id: string }>(
+    `UPDATE ingestion_jobs
+     SET status = 'processing', started_at = now()
+     WHERE id = $1 AND status = 'queued'
+     RETURNING id`,
     [jobId],
   );
+  return result.rows.length === 1;
 }
 
 /**

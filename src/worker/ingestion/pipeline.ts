@@ -37,9 +37,11 @@ import {
 import { artifactsRootPath } from "../../server/ingestion/paths.ts";
 import {
   activateGeneration,
+  ActivationStateUnknownError,
   cleanupStaleGenerations,
   createStagedGeneration,
   discardStagedGeneration,
+  resetStagedGeneration,
 } from "../../server/ingestion/generations.ts";
 
 export type PipelineResult = Readonly<{
@@ -78,7 +80,9 @@ export async function runPipeline(input: {
   }
 
   // Mark as processing
-  await markJobProcessing(jobId);
+  if (!await markJobProcessing(jobId)) {
+    throw new Error(`Job ${jobId} was already claimed or is no longer queued`);
+  }
 
   try {
     await cleanupStaleGenerations(fileId, jobId);
@@ -90,6 +94,7 @@ export async function runPipeline(input: {
     });
     const stagedGenerationId = generation.id;
     generationId = stagedGenerationId;
+    await resetStagedGeneration(stagedGenerationId, jobId);
 
     // === Stage 1: Validate PDF ===
     await updateJobProgress(jobId, 5);
@@ -399,9 +404,9 @@ export async function runPipeline(input: {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (generationId) {
+    if (generationId && !(error instanceof ActivationStateUnknownError)) {
       try {
-        await discardStagedGeneration(generationId, jobArtifactsDir);
+        await discardStagedGeneration(generationId);
       } catch (cleanupError) {
         console.error(
           `[pipeline] Failed to clean staged generation ${generationId}:`,

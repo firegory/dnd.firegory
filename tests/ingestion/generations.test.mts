@@ -9,6 +9,7 @@ import {
   cleanupStaleGenerations,
   createStagedGeneration,
   discardStagedGeneration,
+  resetStagedGeneration,
 } from "../../src/server/ingestion/generations.ts";
 
 const generationRow = {
@@ -39,7 +40,8 @@ test("staging is idempotent for the same ingestion job", async () => {
 
   assert.equal(generation.id, "generation-new");
   assert.match(statements[0], /ON CONFLICT \(ingestion_job_id\) DO NOTHING/);
-  assert.match(statements[1], /WHERE ingestion_job_id = \$1/);
+  assert.match(statements[1], /WHERE g\.ingestion_job_id = \$1/);
+  assert.match(statements[1], /j\.status = 'processing'/);
 });
 
 test("activation archives and switches generations entirely inside one transaction", async () => {
@@ -52,7 +54,7 @@ test("activation archives and switches generations entirely inside one transacti
         return { rows: [{ ...generationRow, job_status: "processing" }] } as never;
       }
       if (sql.includes("SELECT active_generation_id")) {
-        return { rows: [{ active_generation_id: "generation-old" }] } as never;
+        return { rows: [{ active_generation_id: "generation-old", source_id: "source-1" }] } as never;
       }
       return { rows: [], rowCount: 1 } as never;
     },
@@ -78,7 +80,11 @@ test("cancelled jobs cannot activate a staged replacement", async () => {
     },
   };
   await assert.rejects(
-    activateGeneration("generation-new", async (callback) => callback(client as never)),
+    activateGeneration(
+      "generation-new",
+      async (callback) => callback(client as never),
+      (async () => ({ rows: [{ ...generationRow, job_status: "cancelled" }] })) as never,
+    ),
     /not staged for a processing job/,
   );
 });
@@ -90,17 +96,74 @@ test("failed staging cleanup deletes only staged rows and generation artifacts",
   let statement = "";
 
   try {
-    await discardStagedGeneration("generation-new", artifacts, {
+    await discardStagedGeneration("generation-new", {
       execute: (async (sql: string) => {
         statement = sql;
-        return { rows: [], rowCount: 1 } as never;
+        return { rows: [{ artifacts_root: artifacts }], rowCount: 1 } as never;
       }) as never,
     });
-    assert.match(statement, /DELETE FROM ingestion_generations WHERE id = \$1 AND status = 'staged'/);
+    assert.match(statement, /DELETE FROM ingestion_generations[\s\S]*status = 'staged'[\s\S]*RETURNING artifacts_root/);
     await assert.rejects(readFile(artifacts), /ENOENT/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("discard does not remove artifacts when staged delete did not win", async () => {
+  let removed = false;
+  const deleted = await discardStagedGeneration("generation-new", {
+    execute: (async () => ({ rows: [], rowCount: 0 })) as never,
+    remove: (async () => {
+      removed = true;
+    }) as never,
+  });
+  assert.equal(deleted, false);
+  assert.equal(removed, false);
+});
+
+test("ambiguous activation commit preserves active generation artifacts", async () => {
+  const removed: string[] = [];
+  await activateGeneration(
+    "generation-new",
+    async () => {
+      throw new Error("connection lost after COMMIT");
+    },
+    (async () => ({
+      rows: [{ ...generationRow, status: "active", job_status: "succeeded" }],
+    })) as never,
+  );
+  await discardStagedGeneration("generation-new", {
+    execute: (async () => ({ rows: [], rowCount: 0 })) as never,
+    remove: (async (path: string) => removed.push(path)) as never,
+  });
+  assert.deepEqual(removed, []);
+});
+
+test("resumed shorter output clears every staged tail before rewriting", async () => {
+  const statements: string[] = [];
+  const client = {
+    async query(sql: string) {
+      statements.push(sql);
+      if (sql.includes("FROM ingestion_generations")) {
+        return { rows: [{ ...generationRow, job_status: "processing" }] } as never;
+      }
+      return { rows: [], rowCount: 1 } as never;
+    },
+  };
+  await resetStagedGeneration(
+    "generation-new",
+    "job-1",
+    async (callback) => callback(client as never),
+    (async () => {}) as never,
+  );
+  assert.deepEqual(
+    statements.slice(1),
+    [
+      "DELETE FROM chunks WHERE generation_id = $1",
+      "DELETE FROM pages WHERE generation_id = $1",
+      "DELETE FROM documents WHERE generation_id = $1",
+    ],
+  );
 });
 
 test("retry cleanup removes only terminal staged generations", async () => {

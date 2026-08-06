@@ -27,14 +27,10 @@ export async function keywordSearch(
     return [];
   }
 
-  const { limit, accessSql, accessParams } = params;
+  const { limit, generationIds } = params;
+  if (generationIds.length === 0) return [];
   const safeLimit = Math.min(Math.max(1, limit), 200);
-
-  // $N = search query text (appended after access params)
-  const queryIdx = accessParams.length + 1;
-  const limitIdx = accessParams.length + 2;
-
-  const sqlParams = [...accessParams, searchQuery, safeLimit];
+  const sqlParams = [generationIds, searchQuery, safeLimit];
 
   const result = await query<{
     id: string;
@@ -56,18 +52,18 @@ export async function keywordSearch(
             s.title, s.category, s.edition, s.language, s.access_tier,
             ts_rank(
               to_tsvector('simple', c.text),
-              websearch_to_tsquery('simple', $${queryIdx}),
+              websearch_to_tsquery('simple', $2),
               1  /* normalize by document length */
             ) AS rank
      FROM chunks c
-     JOIN files f ON f.id = c.file_id AND f.active_generation_id = c.generation_id
+     JOIN files f ON f.id = c.file_id AND f.source_id = c.source_id
      JOIN sources s ON s.id = c.source_id
      WHERE s.deleted_at IS NULL
        AND f.deleted_at IS NULL
-       AND ${accessSql}
-       AND to_tsvector('simple', c.text) @@ websearch_to_tsquery('simple', $${queryIdx})
+       AND c.generation_id = ANY($1::uuid[])
+       AND to_tsvector('simple', c.text) @@ websearch_to_tsquery('simple', $2)
      ORDER BY rank DESC
-     LIMIT $${limitIdx}`,
+     LIMIT $3`,
     sqlParams,
   );
 

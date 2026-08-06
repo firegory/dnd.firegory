@@ -11,11 +11,11 @@ const actions = await readFile("src/server/ingestion/actions.ts", "utf8");
 const persistence = await readFile("src/server/embeddings/provider.ts", "utf8");
 const pipeline = await readFile("src/worker/ingestion/pipeline.ts", "utf8");
 
-test("all retrieval queries join chunks to the file active generation", () => {
-  const activeJoin = /JOIN files f ON f\.id = c\.file_id AND f\.active_generation_id = c\.generation_id/g;
-  assert.equal((keyword.match(activeJoin) ?? []).length, 1);
-  assert.equal((vector.match(activeJoin) ?? []).length, 1);
-  assert.equal((search.match(activeJoin) ?? []).length, 2, "count and result SQL must use the same snapshot");
+test("all retrieval queries use captured generation IDs instead of mutable active pointers", () => {
+  assert.match(keyword, /c\.generation_id = ANY\(\$1::uuid\[\]\)/);
+  assert.match(vector, /c\.generation_id = ANY\(\$1::uuid\[\]\)/);
+  assert.equal((search.match(/c\.generation_id = ANY\(\$1::uuid\[\]\)/g) ?? []).length, 2);
+  assert.doesNotMatch(keyword + vector + search, /f\.active_generation_id = c\.generation_id/);
 });
 
 test("relevant admin previews and counts exclude staged and archived tails", () => {
@@ -48,5 +48,5 @@ test("pipeline validates quality before atomic activation and cleans failures", 
   const rejectFailed = pipeline.indexOf('qualityReport.overall.status === "failed"');
   const activate = pipeline.indexOf("await activateGeneration(stagedGenerationId)");
   assert.ok(quality < rejectFailed && rejectFailed < activate);
-  assert.match(pipeline, /await discardStagedGeneration\(generationId, jobArtifactsDir\)/);
+  assert.match(pipeline, /await discardStagedGeneration\(generationId\)/);
 });

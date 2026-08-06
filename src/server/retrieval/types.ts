@@ -26,8 +26,6 @@ export type RetrievalCandidate = Readonly<{
 export type RetrievalParams = Readonly<{
   /** Maximum number of candidates to return per strategy. */
   limit: number;
-  /** Access filter SQL fragment (references alias "s"). */
-  accessSql: string;
-  /** Access filter parameter values. */
-  accessParams: readonly unknown[];
+  /** Authorized active generation IDs captured once for this request. */
+  generationIds: readonly string[];
 }>;

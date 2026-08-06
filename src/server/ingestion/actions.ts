@@ -40,55 +40,67 @@ export async function retryFailedJob(
     throw new Error(`Ingestion job not found: ${jobId}`);
   }
 
-  if (originalJob.status !== "failed" && originalJob.status !== "cancelled") {
-    throw new Error(
-      `Cannot retry job ${jobId}: current status is "${originalJob.status}". Only "failed" or "cancelled" jobs can be retried.`,
-    );
-  }
-
   if (!originalJob.sourceId || !originalJob.fileId) {
     throw new Error(
       `Cannot retry job ${jobId}: missing source or file reference.`,
     );
   }
+  const sourceId = originalJob.sourceId;
+  const fileId = originalJob.fileId;
 
-  // Verify source still exists and is not soft-deleted
-  const sourceCheck = await query<{ deleted_at: string | null }>(
-    "SELECT deleted_at FROM sources WHERE id = $1",
-    [originalJob.sourceId],
-  );
-  if (sourceCheck.rows.length === 0) {
-    throw new Error(
-      `Cannot retry job ${jobId}: source ${originalJob.sourceId} no longer exists.`,
-    );
-  }
-  if (sourceCheck.rows[0].deleted_at !== null) {
-    throw new Error(
-      `Cannot retry job ${jobId}: source ${originalJob.sourceId} has been deleted.`,
-    );
-  }
+  let job: IngestionJobRecord;
+  try {
+    job = await withTransaction(async (client) => {
+      const file = await client.query<{ source_id: string; deleted_at: string | null }>(
+        "SELECT source_id, deleted_at FROM files WHERE id = $1 FOR UPDATE",
+        [fileId],
+      );
+      if (!file.rows[0] || file.rows[0].deleted_at !== null) {
+        throw new Error(`Cannot retry job ${jobId}: file ${fileId} no longer exists.`);
+      }
+      if (file.rows[0].source_id !== sourceId) {
+        throw new Error(`Cannot retry job ${jobId}: file ownership does not match the original job.`);
+      }
 
-  // Verify file still exists
-  const fileCheck = await query<{ id: string }>(
-    "SELECT id FROM files WHERE id = $1 AND deleted_at IS NULL",
-    [originalJob.fileId],
-  );
-  if (fileCheck.rows.length === 0) {
-    throw new Error(
-      `Cannot retry job ${jobId}: file ${originalJob.fileId} no longer exists.`,
-    );
-  }
+      const current = await client.query<{ status: string; source_id: string | null; file_id: string | null }>(
+        "SELECT status, source_id, file_id FROM ingestion_jobs WHERE id = $1",
+        [jobId],
+      );
+      if (!current.rows[0]
+        || !["failed", "cancelled"].includes(current.rows[0].status)
+        || current.rows[0].source_id !== sourceId
+        || current.rows[0].file_id !== fileId) {
+        throw new Error(`Cannot retry job ${jobId}: it is no longer a matching failed or cancelled job.`);
+      }
 
-  const job = await createIngestionJob({
-    kind: "retry",
-    sourceId: originalJob.sourceId,
-    fileId: originalJob.fileId,
-    requestedByUserId,
-    metadata: {
-      retryOf: jobId,
-      originalKind: originalJob.kind,
-    },
-  });
+      const source = await client.query<{ deleted_at: string | null }>(
+        "SELECT deleted_at FROM sources WHERE id = $1",
+        [sourceId],
+      );
+      if (!source.rows[0] || source.rows[0].deleted_at !== null) {
+        throw new Error(`Cannot retry job ${jobId}: source ${sourceId} is unavailable.`);
+      }
+
+      const active = await client.query<{ id: string; status: string }>(
+        `SELECT id, status FROM ingestion_jobs
+         WHERE file_id = $1 AND status IN ('queued', 'processing')`,
+        [fileId],
+      );
+      if (active.rows[0]) throw replacementConflict(fileId, active.rows[0]);
+
+      return createIngestionJob({
+        kind: "retry",
+        sourceId,
+        fileId,
+        requestedByUserId,
+        metadata: { retryOf: jobId, originalKind: originalJob.kind },
+        client,
+      });
+    });
+  } catch (error) {
+    if (isActiveJobUniqueViolation(error)) throw replacementConflict(fileId);
+    throw error;
+  }
 
   const queueId = await enqueueJob(job.id);
 
@@ -113,27 +125,11 @@ export async function reprocessSource(
   sourceId: string,
   requestedByUserId: string,
 ): Promise<{ job: IngestionJobRecord; queueId: string }> {
-  // Verify source exists and is not deleted
-  const sourceCheck = await query<{
-    id: string;
-    deleted_at: string | null;
-  }>(
-    "SELECT id, deleted_at FROM sources WHERE id = $1",
-    [sourceId],
-  );
-  if (sourceCheck.rows.length === 0) {
-    throw new Error(`Source not found: ${sourceId}`);
-  }
-  if (sourceCheck.rows[0].deleted_at !== null) {
-    throw new Error(`Source ${sourceId} has been deleted and cannot be reprocessed.`);
-  }
-
   // Find the latest file for this source
   const fileResult = await query<{
     id: string;
-    storage_path: string;
   }>(
-    `SELECT id, storage_path
+    `SELECT id
      FROM files
      WHERE source_id = $1 AND deleted_at IS NULL
      ORDER BY created_at DESC
@@ -150,36 +146,65 @@ export async function reprocessSource(
 
   // Lock active jobs and create the replacement job atomically. Content and
   // artifacts are immutable generation data and are not removed here.
-  const job = await withTransaction(async (client) => {
-    // Lock any active jobs for this source to prevent concurrent reprocess
-    const activeJobs = await client.query<{ id: string; status: string }>(
-      `SELECT id, status FROM ingestion_jobs
-       WHERE source_id = $1 AND status IN ('queued', 'processing')
-       FOR UPDATE`,
-      [sourceId],
-    );
-    if (activeJobs.rows.length > 0) {
-      const active = activeJobs.rows[0];
-      throw new Error(
-        `Cannot reprocess source ${sourceId}: job ${active.id} is currently "${active.status}". Wait for it to finish or cancel it first.`,
+  let job: IngestionJobRecord;
+  try {
+    job = await withTransaction(async (client) => {
+      const lockedFile = await client.query<{ source_id: string; deleted_at: string | null }>(
+        "SELECT source_id, deleted_at FROM files WHERE id = $1 FOR UPDATE",
+        [file.id],
       );
-    }
+      if (!lockedFile.rows[0]
+        || lockedFile.rows[0].source_id !== sourceId
+        || lockedFile.rows[0].deleted_at !== null) {
+        throw new Error(`Cannot reprocess source ${sourceId}: selected file is unavailable.`);
+      }
 
-    const job = await createIngestionJob({
-      kind: "reprocess",
-      sourceId,
-      fileId: file.id,
-      requestedByUserId,
-      metadata: { reprocessOfSource: sourceId },
-      client,
+      const source = await client.query<{ deleted_at: string | null }>(
+        "SELECT deleted_at FROM sources WHERE id = $1",
+        [sourceId],
+      );
+      if (!source.rows[0]) throw new Error(`Source not found: ${sourceId}`);
+      if (source.rows[0].deleted_at !== null) {
+        throw new Error(`Source ${sourceId} has been deleted and cannot be reprocessed.`);
+      }
+
+      const activeJobs = await client.query<{ id: string; status: string }>(
+        `SELECT id, status FROM ingestion_jobs
+         WHERE file_id = $1 AND status IN ('queued', 'processing')`,
+        [file.id],
+      );
+      if (activeJobs.rows[0]) throw replacementConflict(file.id, activeJobs.rows[0]);
+
+      return createIngestionJob({
+        kind: "reprocess",
+        sourceId,
+        fileId: file.id,
+        requestedByUserId,
+        metadata: { reprocessOfSource: sourceId },
+        client,
+      });
     });
-
-    return job;
-  });
+  } catch (error) {
+    if (isActiveJobUniqueViolation(error)) throw replacementConflict(file.id);
+    throw error;
+  }
 
   const queueId = await enqueueJob(job.id);
 
   return { job, queueId };
+}
+
+function replacementConflict(fileId: string, active?: { id: string; status: string }): Error {
+  const detail = active ? `: job ${active.id} is ${active.status}` : "";
+  return new Error(`Cannot create replacement for file ${fileId}; another job is active${detail}.`);
+}
+
+function isActiveJobUniqueViolation(error: unknown): boolean {
+  return error instanceof Error
+    && "code" in error
+    && error.code === "23505"
+    && "constraint" in error
+    && error.constraint === "ingestion_jobs_one_active_file_idx";
 }
 
 // ---------------------------------------------------------------------------

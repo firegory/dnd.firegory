@@ -20,6 +20,8 @@ type GenerationRow = Readonly<{
   artifacts_root: string | null;
 }>;
 
+type GenerationStateRow = GenerationRow & Readonly<{ job_status: string | null }>;
+
 export type IngestionGeneration = Readonly<{
   id: string;
   sourceId: string;
@@ -51,14 +53,24 @@ export async function createStagedGeneration(input: Readonly<{
   const inserted = await db.query<GenerationRow>(
     `INSERT INTO ingestion_generations
        (source_id, file_id, ingestion_job_id, status, artifacts_root)
-     VALUES ($1, $2, $3, 'staged', $4)
+     SELECT j.source_id, j.file_id, j.id, 'staged', $4
+     FROM ingestion_jobs j
+     JOIN files f ON f.id = j.file_id AND f.source_id = j.source_id
+     WHERE j.id = $3 AND j.source_id = $1 AND j.file_id = $2
+       AND j.status = 'processing' AND f.deleted_at IS NULL
      ON CONFLICT (ingestion_job_id) DO NOTHING
      RETURNING id, source_id, file_id, ingestion_job_id, status, artifacts_root`,
     [input.sourceId, input.fileId, input.jobId, input.artifactsRoot],
   );
   const result = inserted.rows[0] ?? (await db.query<GenerationRow>(
-    `SELECT id, source_id, file_id, ingestion_job_id, status, artifacts_root
-     FROM ingestion_generations WHERE ingestion_job_id = $1`,
+    `SELECT g.id, g.source_id, g.file_id, g.ingestion_job_id, g.status, g.artifacts_root
+     FROM ingestion_generations g
+     JOIN ingestion_jobs j
+       ON j.id = g.ingestion_job_id
+      AND j.file_id = g.file_id
+      AND j.source_id = g.source_id
+     JOIN files f ON f.id = g.file_id AND f.source_id = g.source_id
+     WHERE g.ingestion_job_id = $1 AND j.status = 'processing' AND f.deleted_at IS NULL`,
     [input.jobId],
   )).rows[0];
 
@@ -75,27 +87,46 @@ export async function createStagedGeneration(input: Readonly<{
 export async function activateGeneration(
   generationId: string,
   clientFactory: typeof withTransaction = withTransaction,
+  stateQuery: typeof query = query,
 ): Promise<void> {
-  await clientFactory(async (client: PoolClient) => {
-    const staged = await client.query<GenerationRow & { job_status: string }>(
+  try {
+    await clientFactory(async (client: PoolClient) => {
+      const staged = await client.query<GenerationRow & {
+        job_status: string;
+        superseded: boolean;
+      }>(
       `SELECT g.id, g.source_id, g.file_id, g.ingestion_job_id, g.status,
-              g.artifacts_root, j.status AS job_status
+              g.artifacts_root, j.status AS job_status,
+              EXISTS (
+                SELECT 1 FROM ingestion_jobs newer
+                WHERE newer.file_id = j.file_id AND newer.id <> j.id
+                  AND (newer.queued_at, newer.id) > (j.queued_at, j.id)
+                  AND newer.status IN ('queued', 'processing', 'succeeded')
+              ) AS superseded
        FROM ingestion_generations g
-       JOIN ingestion_jobs j ON j.id = g.ingestion_job_id
+       JOIN ingestion_jobs j
+         ON j.id = g.ingestion_job_id
+        AND j.file_id = g.file_id
+        AND j.source_id = g.source_id
        WHERE g.id = $1
        FOR UPDATE OF g, j`,
       [generationId],
     );
     const generation = staged.rows[0];
-    if (!generation || generation.status !== "staged" || generation.job_status !== "processing") {
+    if (!generation
+      || generation.status !== "staged"
+      || generation.job_status !== "processing"
+      || generation.superseded) {
       throw new Error(`Generation ${generationId} is not staged for a processing job`);
     }
 
-    const file = await client.query<{ active_generation_id: string | null }>(
-      "SELECT active_generation_id FROM files WHERE id = $1 FOR UPDATE",
+    const file = await client.query<{ active_generation_id: string | null; source_id: string }>(
+      "SELECT active_generation_id, source_id FROM files WHERE id = $1 FOR UPDATE",
       [generation.file_id],
     );
-    if (!file.rows[0]) throw new Error(`File ${generation.file_id} not found during activation`);
+    if (!file.rows[0] || file.rows[0].source_id !== generation.source_id) {
+      throw new Error(`File ${generation.file_id} ownership changed during activation`);
+    }
 
     if (file.rows[0].active_generation_id) {
       await client.query(
@@ -124,22 +155,87 @@ export async function activateGeneration(
        WHERE id = $1 AND status = 'processing'`,
       [generation.ingestion_job_id, generation.artifacts_root],
     );
+    });
+  } catch (error) {
+    let state: GenerationStateRow | undefined;
+    try {
+      state = (await stateQuery<GenerationStateRow>(
+        `SELECT g.id, g.source_id, g.file_id, g.ingestion_job_id, g.status,
+                g.artifacts_root, j.status AS job_status
+         FROM ingestion_generations g
+         LEFT JOIN ingestion_jobs j ON j.id = g.ingestion_job_id
+         WHERE g.id = $1`,
+        [generationId],
+      )).rows[0];
+    } catch {
+      throw new ActivationStateUnknownError(generationId, error);
+    }
+
+    if (state
+      && (state.status === "active" || state.status === "archived")
+      && state.job_status === "succeeded") return;
+    if (state?.status === "staged"
+      && ["processing", "failed", "cancelled"].includes(state.job_status ?? "")) throw error;
+    throw new ActivationStateUnknownError(generationId, error);
+  }
+}
+
+export class ActivationStateUnknownError extends Error {
+  constructor(generationId: string, options?: unknown) {
+    super(`Activation state for generation ${generationId} is unknown`, { cause: options });
+  }
+}
+
+export async function resetStagedGeneration(
+  generationId: string,
+  jobId: string,
+  clientFactory: typeof withTransaction = withTransaction,
+  remove: typeof rm = rm,
+): Promise<void> {
+  const artifactsRoot = await clientFactory(async (client) => {
+    const result = await client.query<GenerationRow & { job_status: string }>(
+      `SELECT g.id, g.source_id, g.file_id, g.ingestion_job_id, g.status,
+              g.artifacts_root, j.status AS job_status
+       FROM ingestion_generations g
+       JOIN ingestion_jobs j
+         ON j.id = g.ingestion_job_id
+        AND j.file_id = g.file_id
+        AND j.source_id = g.source_id
+       WHERE g.id = $1 AND j.id = $2
+       FOR UPDATE OF g, j`,
+      [generationId, jobId],
+    );
+    const generation = result.rows[0];
+    if (!generation || generation.status !== "staged" || generation.job_status !== "processing") {
+      throw new Error(`Generation ${generationId} cannot be reset`);
+    }
+    await client.query("DELETE FROM chunks WHERE generation_id = $1", [generationId]);
+    await client.query("DELETE FROM pages WHERE generation_id = $1", [generationId]);
+    await client.query("DELETE FROM documents WHERE generation_id = $1", [generationId]);
+    return generation.artifacts_root;
   });
+  if (artifactsRoot) await remove(artifactsRoot, { recursive: true, force: true });
 }
 
 export async function discardStagedGeneration(
   generationId: string,
-  artifactsRoot: string,
   dependencies: Readonly<{
     execute?: typeof query;
     remove?: typeof rm;
   }> = {},
-): Promise<void> {
-  await (dependencies.execute ?? query)(
-    "DELETE FROM ingestion_generations WHERE id = $1 AND status = 'staged'",
+): Promise<boolean> {
+  const result = await (dependencies.execute ?? query)<{ artifacts_root: string | null }>(
+    `DELETE FROM ingestion_generations
+     WHERE id = $1 AND status = 'staged'
+     RETURNING artifacts_root`,
     [generationId],
   );
-  await (dependencies.remove ?? rm)(artifactsRoot, { recursive: true, force: true });
+  const artifactsRoot = result.rows[0]?.artifacts_root;
+  if (!result.rows[0]) return false;
+  if (artifactsRoot) {
+    await (dependencies.remove ?? rm)(artifactsRoot, { recursive: true, force: true });
+  }
+  return true;
 }
 
 export async function cleanupStaleGenerations(

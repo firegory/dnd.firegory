@@ -14,6 +14,12 @@ import {
   type RetrievalUser,
 } from "../access/retrieval-filter";
 import { buildSourceAccessSql } from "../access/access-sql";
+import { captureRetrievalSnapshot } from "../retrieval/snapshot";
+
+export type SearchDependencies = Readonly<{
+  captureSnapshot?: typeof captureRetrievalSnapshot;
+  execute?: typeof query;
+}>;
 
 export type SearchInput = Readonly<{
   query: string;
@@ -72,7 +78,10 @@ type ChunkRow = Readonly<{
  * This is the basic keyword search implementation. Hybrid retrieval
  * (keyword + vector + reranking) will be added in issue #11.
  */
-export async function searchChunks(input: SearchInput): Promise<SearchResult> {
+export async function searchChunks(
+  input: SearchInput,
+  dependencies: SearchDependencies = {},
+): Promise<SearchResult> {
   const { query: searchQuery, user, selection = {}, limit = 20, offset = 0 } = input;
 
   if (!searchQuery.trim()) {
@@ -84,43 +93,42 @@ export async function searchChunks(input: SearchInput): Promise<SearchResult> {
 
   const filter = buildRetrievalAuthorizationFilter(user, selection);
   const { sql: accessSql, params: accessParams } = buildSourceAccessSql(filter);
+  const snapshot = await (dependencies.captureSnapshot ?? captureRetrievalSnapshot)(accessSql, accessParams);
+  if (snapshot.generationIds.length === 0) {
+    return { chunks: [], total: 0, hasMore: false };
+  }
 
-  // $1 = search query text
-  // accessParams start at $2+
-  const searchParamIdx = accessParams.length + 1;
-  const limitIdx = accessParams.length + 2;
-  const offsetIdx = accessParams.length + 3;
-
-  const allParams = [...accessParams, searchQuery, safeLimit, safeOffset];
+  const allParams = [snapshot.generationIds, searchQuery, safeLimit, safeOffset];
 
   // Count query — join chunks with access-filtered sources
-  const countResult = await query<{ count: string }>(
+  const execute = dependencies.execute ?? query;
+  const countResult = await execute<{ count: string }>(
     `SELECT count(*)::text
      FROM chunks c
-     JOIN files f ON f.id = c.file_id AND f.active_generation_id = c.generation_id
+     JOIN files f ON f.id = c.file_id AND f.source_id = c.source_id
      JOIN sources s ON s.id = c.source_id
      WHERE s.deleted_at IS NULL
        AND f.deleted_at IS NULL
-       AND ${accessSql}
-       AND to_tsvector('simple', c.text) @@ plainto_tsquery('simple', $${searchParamIdx})`,
+       AND c.generation_id = ANY($1::uuid[])
+       AND to_tsvector('simple', c.text) @@ plainto_tsquery('simple', $2)`,
     allParams.slice(0, -2), // count doesn't need limit/offset
   );
 
   const total = parseInt(countResult.rows[0]?.count ?? "0", 10);
 
   // Data query — fetch chunks with source metadata in a single query
-  const chunkResult = await query<ChunkRow & SourceRow>(
+  const chunkResult = await execute<ChunkRow & SourceRow>(
     `SELECT c.id, c.source_id, c.file_id, c.text, c.quote_text, c.section_heading, c.page_number,
             s.title, s.category, s.edition, s.language, s.access_tier
      FROM chunks c
-     JOIN files f ON f.id = c.file_id AND f.active_generation_id = c.generation_id
+     JOIN files f ON f.id = c.file_id AND f.source_id = c.source_id
      JOIN sources s ON s.id = c.source_id
      WHERE s.deleted_at IS NULL
        AND f.deleted_at IS NULL
-       AND ${accessSql}
-       AND to_tsvector('simple', c.text) @@ plainto_tsquery('simple', $${searchParamIdx})
-     ORDER BY c.id
-     LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+       AND c.generation_id = ANY($1::uuid[])
+       AND to_tsvector('simple', c.text) @@ plainto_tsquery('simple', $2)
+      ORDER BY c.id
+     LIMIT $3 OFFSET $4`,
     allParams,
   );
 

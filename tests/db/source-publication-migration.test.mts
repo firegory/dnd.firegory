@@ -14,6 +14,7 @@ test("publication migration is registered after existing migrations", () => {
     "0003_source_publication_metadata.sql",
     "0004_source_publication_constraints.sql",
     "0005_ingestion_generations.sql",
+    "0006_ingestion_generation_integrity.sql",
   ]);
 });
 

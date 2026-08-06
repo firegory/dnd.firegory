@@ -19,6 +19,7 @@ import { expandQuery, combinedExpandedQuery, type ExpansionConfig } from "./expa
 import { rewriteQuery, collectVectorQueries, type RewrittenQuery } from "./rewrite";
 import { rerankCandidates, type RerankConfig } from "./rerank";
 import type { RetrievalCandidate, RetrievalParams } from "./types";
+import { captureRetrievalSnapshot, type RetrievalSnapshot } from "./snapshot";
 
 export type {
   RetrievalCandidate,
@@ -65,6 +66,12 @@ export type HybridSearchResult = Readonly<{
   rewrite: RewrittenQuery | null;
 }>;
 
+export type HybridSearchDependencies = Readonly<{
+  captureSnapshot?: (accessSql: string, accessParams: readonly unknown[]) => Promise<RetrievalSnapshot>;
+  keyword?: typeof keywordSearch;
+  vector?: typeof vectorSearch;
+}>;
+
 type RewriteOutput = {
   rewrite: RewrittenQuery;
   vectorQueries: string[];
@@ -84,6 +91,7 @@ type RewriteOutput = {
  */
 export async function hybridSearch(
   input: HybridSearchInput,
+  dependencies: HybridSearchDependencies = {},
 ): Promise<HybridSearchResult> {
   const {
     query: searchQuery,
@@ -106,11 +114,11 @@ export async function hybridSearch(
   // 1. Build access filter
   const filter = buildRetrievalAuthorizationFilter(user, selection);
   const { sql: accessSql, params: accessParams } = buildSourceAccessSql(filter);
+  const snapshot = await (dependencies.captureSnapshot ?? captureRetrievalSnapshot)(accessSql, accessParams);
 
   const retrievalParams: RetrievalParams = {
     limit: strategyLimit,
-    accessSql,
-    accessParams,
+    generationIds: snapshot.generationIds,
   };
 
   // 2. Expand query (static glossary for keyword search)
@@ -130,8 +138,8 @@ export async function hybridSearch(
 
   // 4. Run keyword search in parallel with LLM rewrite + vector search
   const [keywordResults, vectorResults] = await Promise.all([
-    keywordSearch(expandedQueryText, retrievalParams),
-    rewritePromise.then(({ vectorQueries }) => vectorSearch(vectorQueries, retrievalParams)),
+    (dependencies.keyword ?? keywordSearch)(expandedQueryText, retrievalParams),
+    rewritePromise.then(({ vectorQueries }) => (dependencies.vector ?? vectorSearch)(vectorQueries, retrievalParams)),
   ]);
 
   const { rewrite } = await rewritePromise;
