@@ -9,7 +9,11 @@ import {
   publicationGenerationReservationPath,
   publicationSpoolPath,
 } from "./repository.ts";
-import { assertCanonicalRevision, assertRepositoryActivationDelta } from "./validation.ts";
+import {
+  assertCanonicalRevision,
+  validateCanonicalRevisionDependencies,
+  validateRepositoryActivationDelta,
+} from "./validation.ts";
 
 type PublicationGenerationReservationPayload = Readonly<{
   schemaVersion: 1;
@@ -52,8 +56,14 @@ export async function reservePublicationGeneration(options: Readonly<{
   await mkdir(reservationDirectory, { recursive: true, mode: 0o750 });
 
   for (;;) {
-    const maximum = await maximumDurableGeneration(options.spoolRoot, options.dataRoot);
-    const generation = formatPublicationGeneration(maximum + BigInt(1));
+    const floor = await maximumSemanticPublicationGeneration(options.spoolRoot, options.dataRoot);
+    const consumed = await consumedReservationGenerations(reservationDirectory);
+    let candidate = floor + BigInt(1);
+    let generation = formatPublicationGeneration(candidate);
+    while (consumed.has(generation)) {
+      candidate += BigInt(1);
+      generation = formatPublicationGeneration(candidate);
+    }
     await options.beforeCreate?.(generation);
     const path = publicationGenerationReservationPath(options.spoolRoot, generation);
     const temporary = resolve(reservationDirectory, `.${generation}.${randomUUID()}.tmp`);
@@ -75,9 +85,7 @@ export async function reservePublicationGeneration(options: Readonly<{
         await link(temporary, path);
       } catch (error) {
         if (!hasCode(error, "EEXIST")) throw error;
-        if (!await isValidReservationFile(path, generation)) {
-          await quarantineInvalidReservation(options.spoolRoot, path, generation);
-        }
+        // Every recognized reservation name is a permanent consumed tombstone.
         continue;
       }
       await syncDirectory(reservationDirectory);
@@ -88,23 +96,20 @@ export async function reservePublicationGeneration(options: Readonly<{
   }
 }
 
-export async function maximumDurableGeneration(spoolRoot: string, dataRoot: string): Promise<bigint> {
+export async function maximumSemanticPublicationGeneration(spoolRoot: string, dataRoot: string): Promise<bigint> {
   let maximum = BigInt(0);
   const reservationDirectory = dirname(publicationGenerationReservationPath(spoolRoot, "0".repeat(32)));
-  for (const name of await readDirectoryIfPresent(reservationDirectory)) {
-    const match = /^([0-9]{32})\.json$/.exec(name);
-    if (!match || !await isValidReservationFile(resolve(reservationDirectory, name), match[1])) continue;
-    const generation = parsePublicationGeneration(match[1]);
-    if (generation > maximum) maximum = generation;
-  }
+  await consumedReservationGenerations(reservationDirectory);
 
   const activationDirectory = activationDirectoryPath(dataRoot);
   for (const name of await readDirectoryIfPresent(activationDirectory)) {
     const match = /^([0-9]{32})\.json$/.exec(name);
     if (!match) continue;
     try {
-      const value: unknown = JSON.parse(await readFile(resolve(activationDirectory, name), "utf8"));
-      assertRepositoryActivationDelta(value);
+      const value = await validateRepositoryActivationDelta(
+        dataRoot,
+        JSON.parse(await readFile(resolve(activationDirectory, name), "utf8")),
+      );
       if (value.generation !== match[1]) continue;
       const generation = parsePublicationGeneration(value.generation);
       if (generation > maximum) maximum = generation;
@@ -126,6 +131,7 @@ export async function maximumDurableGeneration(spoolRoot: string, dataRoot: stri
         || typeof value.generation !== "string") continue;
       parsePublicationGeneration(value.generation);
       assertCanonicalRevision(value.revision);
+      await validateCanonicalRevisionDependencies(dataRoot, value.revision);
       const generation = parsePublicationGeneration(value.generation);
       if (generation > maximum) maximum = generation;
     } catch {
@@ -133,6 +139,17 @@ export async function maximumDurableGeneration(spoolRoot: string, dataRoot: stri
     }
   }
   return maximum;
+}
+
+async function consumedReservationGenerations(directory: string): Promise<Set<string>> {
+  const consumed = new Set<string>();
+  for (const name of await readDirectoryIfPresent(directory)) {
+    const match = /^([0-9]{32})\.json$/.exec(name);
+    if (!match) continue;
+    consumed.add(match[1]);
+    await isValidReservationFile(resolve(directory, name), match[1]);
+  }
+  return consumed;
 }
 
 async function isValidReservationFile(path: string, expectedGeneration: string): Promise<boolean> {
@@ -177,18 +194,6 @@ async function upgradeLegacyReservation(path: string, reservation: PublicationGe
     await syncDirectory(dirname(path));
   } finally {
     await rm(temporary, { force: true });
-  }
-}
-
-async function quarantineInvalidReservation(spoolRoot: string, path: string, generation: string): Promise<void> {
-  const quarantineDirectory = resolve(spoolRoot, "quarantine", "generation-reservations");
-  await mkdir(quarantineDirectory, { recursive: true, mode: 0o750 });
-  try {
-    await rename(path, resolve(quarantineDirectory, `${generation}-${randomUUID()}.json`));
-    await syncDirectory(quarantineDirectory);
-    await syncDirectory(dirname(path));
-  } catch (error) {
-    if (!hasCode(error, "ENOENT")) throw error;
   }
 }
 

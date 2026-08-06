@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   getPublicationSpoolRoot,
+  loadPublicationCommand,
   markPublicationCompleted,
   markPublicationFailed,
   quarantinePublication,
@@ -70,6 +71,23 @@ export async function processPublicationReservation(options: Readonly<{
   }
 
   const { idempotencyKey, generation, attempt } = reservation.message;
+  let command;
+  try {
+    command = await loadPublicationCommand(idempotencyKey, spoolRoot);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    await markPublicationFailed(idempotencyKey, generation, reason, spoolRoot, now);
+    await quarantinePublication(reservation.deliveryId, reservation.raw, reason, spoolRoot, now);
+    await queue.deadLetter(reservation, reason, now);
+    return "dead-lettered";
+  }
+  if (command.generation !== generation) {
+    const reason = `Queued generation does not match publication command ${idempotencyKey}.`;
+    await quarantinePublication(reservation.deliveryId, reservation.raw, reason, spoolRoot, now);
+    await queue.deadLetter(reservation, reason, now);
+    return "dead-lettered";
+  }
+
   let state;
   try {
     state = await readOutboxState(spoolRoot, idempotencyKey);

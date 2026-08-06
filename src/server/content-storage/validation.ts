@@ -134,6 +134,16 @@ export function assertRepositoryActivationDelta(document: unknown): asserts docu
   }
 }
 
+export async function validateRepositoryActivationDelta(
+  dataRoot: string,
+  document: unknown,
+): Promise<RepositoryActivationDelta> {
+  assertRepositoryActivationDelta(document);
+  const root = await realpath(dataRoot);
+  await validateManifestEntries(root, [document.entry]);
+  return document;
+}
+
 export async function validateContentRepository(dataRoot: string): Promise<void> {
   const root = await realpath(dataRoot);
   await loadResolvedRepositoryManifest(root);
@@ -178,12 +188,13 @@ export async function loadResolvedRepositoryManifest(dataRoot: string): Promise<
   for (const name of activationNames) {
     try {
       const file = await resolveRepositoryFile(root, relative(root, resolve(activationDirectory, name)));
-      const delta = await readJson(file, `Repository activation delta ${name}`);
-      assertRepositoryActivationDelta(delta);
+      const delta = await validateRepositoryActivationDelta(
+        root,
+        await readJson(file, `Repository activation delta ${name}`),
+      );
       if (`${delta.generation}.json` !== name) {
         throw new ContentIntegrityError(`Repository activation generation does not match filename ${name}.`);
       }
-      await validateManifestEntries(root, [delta.entry]);
       const previous = targetGenerations.get(delta.targetEntryId);
       if (!previous || delta.generation > previous) {
         entries.set(delta.targetEntryId, delta.entry);

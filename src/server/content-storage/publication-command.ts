@@ -207,39 +207,51 @@ export async function readOutboxState(
   spoolRoot: string,
   idempotencyKey: string,
 ): Promise<PublicationOutboxState | null> {
-  const directory = publicationOutboxStatePath(resolve(spoolRoot), idempotencyKey);
+  const root = resolve(spoolRoot);
+  let command: PublicationCommand | null = null;
+  try {
+    command = await loadPublicationCommandIfPresent(idempotencyKey, root);
+  } catch {
+    // Command validation is authoritative in the processor; valid events remain inspectable here.
+  }
+  const directory = publicationOutboxStatePath(root, idempotencyKey);
   let names: string[];
   try {
     names = await readdir(directory);
   } catch (error) {
-    if (hasCode(error, "ENOENT")) return null;
+    if (hasCode(error, "ENOENT")) return recoveredPendingState(command);
     throw error;
   }
 
   const events: PublicationOutboxState[] = [];
   for (const name of names) {
     if (!/^[0-9]{32}-(?:pending|queued|completed|failed)-[a-z0-9-]+\.json$/.test(name)) continue;
-    const value: unknown = JSON.parse(await readFile(resolve(directory, name), "utf8"));
-    if (
-      !isRecord(value) ||
-      value.schemaVersion !== 1 ||
-      value.kind !== "publicationOutboxEvent" ||
-      value.idempotencyKey !== idempotencyKey ||
-      !["pending", "queued", "completed", "failed"].includes(String(value.status)) ||
-      typeof value.generation !== "string" ||
-      !/^[0-9]{32}$/.test(value.generation) ||
-      typeof value.eventId !== "string" ||
-      !Number.isSafeInteger(value.updatedAt) ||
-      (value.updatedAt as number) < 0
-    ) {
-      throw new Error(`Publication outbox state ${idempotencyKey} is invalid.`);
+    const path = resolve(directory, name);
+    try {
+      const value: unknown = JSON.parse(await readFile(path, "utf8"));
+      if (
+        !isRecord(value) ||
+        value.schemaVersion !== 1 ||
+        value.kind !== "publicationOutboxEvent" ||
+        value.idempotencyKey !== idempotencyKey ||
+        !["pending", "queued", "completed", "failed"].includes(String(value.status)) ||
+        typeof value.generation !== "string" ||
+        !/^[0-9]{32}$/.test(value.generation) ||
+        typeof value.eventId !== "string" ||
+        !Number.isSafeInteger(value.updatedAt) ||
+        (value.updatedAt as number) < 0 ||
+        (value.lastError !== undefined && typeof value.lastError !== "string") ||
+        `${value.generation}-${value.status}-${value.eventId}.json` !== name ||
+        (command !== null && value.generation !== command.generation)
+      ) {
+        throw new Error(`Publication outbox event is invalid: ${name}`);
+      }
+      events.push(value as PublicationOutboxState);
+    } catch {
+      await quarantineOutboxEvent(root, idempotencyKey, path, name);
     }
-    if (`${value.generation}-${value.status}-${value.eventId}.json` !== name) {
-      throw new Error(`Publication outbox event filename does not match its contents: ${name}`);
-    }
-    events.push(value as PublicationOutboxState);
   }
-  return events.sort(compareOutboxEvents).at(-1) ?? null;
+  return events.sort(compareOutboxEvents).at(-1) ?? recoveredPendingState(command);
 }
 
 export async function markPublicationCompleted(
@@ -441,6 +453,36 @@ function compareOutboxEvents(left: PublicationOutboxState, right: PublicationOut
   return precedence[left.status] - precedence[right.status]
     || left.generation.localeCompare(right.generation)
     || left.eventId.localeCompare(right.eventId);
+}
+
+function recoveredPendingState(command: PublicationCommand | null): PublicationOutboxState | null {
+  if (!command) return null;
+  return {
+    schemaVersion: 1,
+    kind: "publicationOutboxEvent",
+    idempotencyKey: command.idempotencyKey,
+    status: "pending",
+    generation: command.generation,
+    eventId: "recovered-pending",
+    updatedAt: 0,
+  };
+}
+
+async function quarantineOutboxEvent(
+  spoolRoot: string,
+  idempotencyKey: string,
+  path: string,
+  name: string,
+): Promise<void> {
+  const quarantineDirectory = resolve(spoolRoot, "quarantine", "outbox-events", idempotencyKey);
+  await mkdir(quarantineDirectory, { recursive: true, mode: 0o750 });
+  try {
+    await rename(path, resolve(quarantineDirectory, `${name}.${randomUUID()}.invalid`));
+    await syncDirectory(quarantineDirectory);
+    await syncDirectory(dirname(path));
+  } catch (error) {
+    if (!hasCode(error, "ENOENT")) throw error;
+  }
 }
 
 async function loadPublicationCommandIfPresent(

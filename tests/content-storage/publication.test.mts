@@ -155,6 +155,38 @@ test("immutable outbox events prevent completed state from regressing under race
   assert.ok((await readdir(publicationOutboxStatePath(spoolRoot, "outbox-race"))).length >= 3);
 });
 
+test("corrupt outbox events are isolated and immutable command state recovers idempotently", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "dnd-outbox-corruption-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const spoolRoot = resolve(parent, "spool");
+  const revision = await revisionFromFixture("2026-08-06T01:47:00.000Z");
+  await submitPublicationCommand(
+    { idempotencyKey: "outbox-corruption", revision },
+    { spoolRoot, dataRoot: fixtureRoot, now: 100, enqueue: async () => undefined },
+  );
+  const stateDirectory = publicationOutboxStatePath(spoolRoot, "outbox-corruption");
+  const corruptQueued = resolve(stateDirectory, `${generation(1)}-queued-corrupt-event.json`);
+  await writeFile(corruptQueued, "{broken");
+  assert.equal((await readOutboxState(spoolRoot, "outbox-corruption"))?.status, "queued");
+
+  await markPublicationCompleted("outbox-corruption", generation(1), spoolRoot, 200);
+  const completedName = (await readdir(stateDirectory)).find((name) => name.includes("-completed-"));
+  assert.ok(completedName);
+  await writeFile(resolve(stateDirectory, completedName), "{broken");
+  assert.equal((await readOutboxState(spoolRoot, "outbox-corruption"))?.status, "queued");
+
+  await rm(stateDirectory, { recursive: true });
+  await mkdir(stateDirectory, { recursive: true });
+  await writeFile(resolve(stateDirectory, `${generation(1)}-completed-corrupt-only.json`), "{broken");
+  assert.equal((await readOutboxState(spoolRoot, "outbox-corruption"))?.status, "pending");
+  assert.deepEqual(
+    await reconcilePublicationOutbox({ spoolRoot, now: 300, enqueue: async () => undefined }),
+    { enqueued: 1, failed: 0 },
+  );
+  assert.equal((await readOutboxState(spoolRoot, "outbox-corruption"))?.status, "queued");
+  assert.equal((await loadPublicationCommand("outbox-corruption", spoolRoot)).generation, generation(1));
+});
+
 test("durable generation reservations linearize submitters and survive rebuild artifacts", async (t) => {
   const root = await temporaryRepository(t);
   const spoolRoot = resolve(dirname(root), "generation-spool");
@@ -199,19 +231,57 @@ test("durable generation reservations linearize submitters and survive rebuild a
     publicationGenerationReservationPath(spoolRoot, generation(8)),
     JSON.stringify(createPublicationGenerationReservation(generation(8), "rebuilt-command", 1)),
   );
-  await writeFile(publicationGenerationReservationPath(spoolRoot, generation(9)), "partial");
+  await writeFile(publicationGenerationReservationPath(spoolRoot, generation(3)), "live partial reservation");
   await writeFile(publicationGenerationReservationPath(spoolRoot, "9".repeat(32)), "corrupt maximum");
   await writeFile(resolve(dirname(publicationGenerationReservationPath(spoolRoot, generation(1))), `${"9".repeat(33)}.json`), "invalid");
+  const missingRevision = `rev-${"f".repeat(64)}`;
+  const bootstrapEntry = (await readManifest(root)).entries[0];
+  await mkdir(activationDirectoryPath(root), { recursive: true });
+  await writeFile(activationDeltaPath(root, "9".repeat(32)), JSON.stringify({
+    schemaVersion: 1,
+    kind: "repositoryActivationDelta",
+    readerContractVersion: 1,
+    generation: "9".repeat(32),
+    idempotencyKey: "semantic-invalid-maximum",
+    targetEntryId: bootstrapEntry.entryId,
+    entry: {
+      ...bootstrapEntry,
+      revisionId: missingRevision,
+      path: `compendium/${bootstrapEntry.entryId}/revisions/${missingRevision}.json`,
+      contentHash: `sha256:${"f".repeat(64)}`,
+    },
+  }));
   await submitPublicationCommand(
     { idempotencyKey: "generation-after-rebuild", revision },
     { spoolRoot, dataRoot: root, enqueue: async () => undefined },
   );
-  assert.equal((await loadPublicationCommand("generation-after-rebuild", spoolRoot)).generation, generation(9));
+  assert.equal((await loadPublicationCommand("generation-after-rebuild", spoolRoot)).generation, generation(4));
   assert.match(
     JSON.parse(await readFile(publicationGenerationReservationPath(spoolRoot, generation(7)), "utf8")).checksum,
     /^sha256:[0-9a-f]{64}$/,
   );
-  assert.ok((await readdir(resolve(spoolRoot, "quarantine/generation-reservations"))).some((name) => name.startsWith(generation(9))));
+  assert.equal(await readFile(publicationGenerationReservationPath(spoolRoot, generation(3)), "utf8"), "live partial reservation");
+  assert.equal(await readFile(publicationGenerationReservationPath(spoolRoot, "9".repeat(32)), "utf8"), "corrupt maximum");
+
+  let injectedCollision = false;
+  await submitPublicationCommand(
+    { idempotencyKey: "generation-after-collision", revision },
+    {
+      spoolRoot,
+      dataRoot: root,
+      enqueue: async () => undefined,
+      beforeGenerationCreate: async (candidate) => {
+        if (injectedCollision) return;
+        injectedCollision = true;
+        await writeFile(publicationGenerationReservationPath(spoolRoot, candidate), "concurrent partial writer", { flag: "wx" });
+      },
+    },
+  );
+  assert.equal((await loadPublicationCommand("generation-after-collision", spoolRoot)).generation, generation(6));
+  assert.notEqual(
+    (await loadPublicationCommand("generation-after-rebuild", spoolRoot)).generation,
+    (await loadPublicationCommand("generation-after-collision", spoolRoot)).generation,
+  );
 });
 
 test("same-target deltas order by generation while different targets compose", async (t) => {
@@ -558,6 +628,7 @@ test("a mismatched queue generation dead-letters only that delivery", async (t) 
     { idempotencyKey: "generation-mismatch", revision },
     { spoolRoot, dataRoot: fixtureRoot, enqueue: async () => undefined, now: 1 },
   );
+  await rm(publicationOutboxStatePath(spoolRoot, "generation-mismatch"), { recursive: true });
   const actions = queueActionRecorder();
   let publications = 0;
   assert.equal(await processPublicationReservation({
@@ -568,7 +639,7 @@ test("a mismatched queue generation dead-letters only that delivery", async (t) 
     publish: async () => { publications++; throw new Error("must not publish"); },
     queue: actions.queue,
   }), "dead-lettered");
-  assert.equal((await readOutboxState(spoolRoot, "generation-mismatch"))?.status, "queued");
+  assert.equal((await readOutboxState(spoolRoot, "generation-mismatch"))?.status, "pending");
   assert.equal(publications, 0);
 
   assert.equal(await processPublicationReservation({
