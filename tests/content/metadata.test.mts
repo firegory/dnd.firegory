@@ -30,7 +30,20 @@ test("source metadata normalization validates corpus and access tiers", () => {
       edition: "5e",
       language: "en",
       accessTier: "open",
+      canonicalSourceId: null,
       ownerUserId: null,
+      publication: {
+        code: null,
+        title: "Basic Rules",
+        publisher: null,
+        releaseYear: null,
+        revision: null,
+        origin: null,
+        attribution: null,
+        sourcePriority: 0,
+        canonicalBookId: null,
+      },
+      license: null,
       metadata: { publisher: "Wizards" },
       shared: false,
     },
@@ -140,7 +153,21 @@ test("content metadata service requires injected admin context before CRUD", asy
 });
 
 test("content metadata service creates admin-owned source records", async () => {
-  const db = new RecordingDb([[sourceRow({ created_by_user_id: admin.userId })]]);
+  const db = new RecordingDb([[sourceRow({
+    canonical_source_id: "players-handbook-2014-en",
+    publication_code: "PHB-2014",
+    publication_title: "Player's Handbook",
+    publisher: "Wizards of the Coast",
+    release_year: 2014,
+    publication_revision: "first printing",
+    external_origin_url: "https://example.com/books/phb",
+    external_origin_id: "phb-2014",
+    attribution: "Player's Handbook, Wizards of the Coast",
+    source_priority: 100,
+    canonical_book_id: "players-handbook",
+    license: "All rights reserved",
+    created_by_user_id: admin.userId,
+  })]]);
   const service = new ContentMetadataService(db);
 
   const source = await service.createSource(admin, {
@@ -149,12 +176,26 @@ test("content metadata service creates admin-owned source records", async () => 
     edition: "5e",
     language: "en",
     accessTier: "open",
+    canonicalSourceId: "players-handbook-2014-en",
+    publication: {
+      code: "PHB-2014",
+      title: "Player's Handbook",
+      publisher: "Wizards of the Coast",
+      releaseYear: 2014,
+      revision: "first printing",
+      origin: { url: "https://example.com/books/phb", id: "phb-2014" },
+      attribution: "Player's Handbook, Wizards of the Coast",
+      sourcePriority: 100,
+      canonicalBookId: "players-handbook",
+    },
+    license: "All rights reserved",
   });
 
   assert.equal(source.createdByUserId, admin.userId);
   assert.equal(source.accessTier, "open");
   assert.match(db.calls[0]?.sql ?? "", /INSERT INTO sources/);
-  assert.deepEqual(db.calls[0]?.values?.slice(0, 9), [
+  assert.deepEqual(db.calls[0]?.values, [
+    "players-handbook-2014-en",
     "Basic Rules",
     "core_rules",
     "5e",
@@ -162,6 +203,17 @@ test("content metadata service creates admin-owned source records", async () => 
     "open",
     false,
     null,
+    "PHB-2014",
+    "Player's Handbook",
+    "Wizards of the Coast",
+    2014,
+    "first printing",
+    "https://example.com/books/phb",
+    "phb-2014",
+    "Player's Handbook, Wizards of the Coast",
+    100,
+    "players-handbook",
+    "All rights reserved",
     "{}",
     admin.userId,
   ]);
@@ -181,6 +233,30 @@ test("content metadata service soft-deletes sources and files", async () => {
   assert.equal(deletedFile.deletedAt, now.toISOString());
   assert.match(db.calls[0]?.sql ?? "", /UPDATE sources SET deleted_at = now\(\)/);
   assert.match(db.calls[1]?.sql ?? "", /UPDATE files SET deleted_at = now\(\)/);
+});
+
+test("content metadata service deep-merges partial publication updates without loss", async () => {
+  const current = sourceRow({
+    publication_code: "PHB-2014",
+    publisher: "Old publisher",
+    release_year: 2014,
+    external_origin_url: "https://example.com/phb",
+    external_origin_id: "phb",
+    canonical_book_id: "players-handbook",
+  });
+  const db = new RecordingDb([[current], [{ ...current, publisher: "New publisher" }]]);
+  const service = new ContentMetadataService(db);
+
+  const updated = await service.updateSource(admin, "source-1", {
+    publication: { publisher: "New publisher" },
+  });
+
+  assert.equal(updated.publication.publisher, "New publisher");
+  assert.equal(db.calls[1]?.values?.[9], "PHB-2014");
+  assert.equal(db.calls[1]?.values?.[11], "New publisher");
+  assert.equal(db.calls[1]?.values?.[14], "https://example.com/phb");
+  assert.equal(db.calls[1]?.values?.[15], "phb");
+  assert.equal(db.calls[1]?.values?.[18], "players-handbook");
 });
 
 test("content metadata service creates file records linked to a source", async () => {
@@ -222,6 +298,36 @@ test("invalid list filters fail before querying", async () => {
   assert.equal(db.calls.length, 0);
 });
 
+test("publication validation rejects malformed and contradictory metadata", () => {
+  const base = {
+    title: "Rules",
+    category: "core_rules" as const,
+    edition: "5.5e" as const,
+    language: "en" as const,
+    accessTier: "open" as const,
+  };
+  assert.throws(
+    () => normalizeSourceInput({ ...base, publication: { releaseYear: 2014 } }),
+    /cannot be earlier than 2024/,
+  );
+  assert.throws(
+    () => normalizeSourceInput({ ...base, publication: { revision: "reprint" } }),
+    /requires publication.releaseYear/,
+  );
+  assert.throws(
+    () => normalizeSourceInput({ ...base, publication: { origin: { url: "https:\/\/example.com" } } }),
+    /must be provided together/,
+  );
+  assert.throws(
+    () => normalizeSourceInput({ ...base, publication: { origin: { url: "file:\/\/book", id: "book" } } }),
+    /HTTP\(S\)/,
+  );
+  assert.throws(
+    () => normalizeSourceInput({ ...base, canonicalSourceId: "Not Stable" }),
+    /lowercase stable ID/,
+  );
+});
+
 class RecordingDb implements Queryable {
   calls: { sql: string; values?: readonly unknown[] }[] = [];
   private readonly queuedRows: unknown[][];
@@ -239,6 +345,7 @@ class RecordingDb implements Queryable {
 function sourceRow(overrides = {}) {
   return {
     id: "source-1",
+    canonical_source_id: null,
     title: "Basic Rules",
     category: "core_rules",
     edition: "5e",
@@ -246,6 +353,17 @@ function sourceRow(overrides = {}) {
     access_tier: "open",
     shared: false,
     owner_user_id: null,
+    publication_code: null,
+    publication_title: "Basic Rules",
+    publisher: null,
+    release_year: null,
+    publication_revision: null,
+    external_origin_url: null,
+    external_origin_id: null,
+    attribution: null,
+    source_priority: 0,
+    canonical_book_id: null,
+    license: null,
     metadata: {},
     created_by_user_id: null,
     created_at: now,

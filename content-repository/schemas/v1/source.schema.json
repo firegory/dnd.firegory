@@ -4,7 +4,7 @@
   "title": "Content source provenance",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "kind", "sourceId", "title", "category", "edition", "language", "accessTier", "shared", "ownerUserId", "publisher", "files"],
+  "required": ["schemaVersion", "kind", "sourceId", "title", "category", "edition", "language", "accessTier", "shared", "ownerUserId", "publication", "files"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "kind": { "const": "source" },
@@ -16,7 +16,30 @@
     "accessTier": { "enum": ["open", "premium", "personal"] },
     "shared": { "type": "boolean" },
     "ownerUserId": { "anyOf": [{ "$ref": "#/$defs/stableId" }, { "type": "null" }] },
-    "publisher": { "type": "string", "minLength": 1 },
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "title", "publisher", "releaseYear", "sourcePriority", "canonicalBookId"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "publisher": { "type": "string", "minLength": 1 },
+        "releaseYear": { "type": "integer", "minimum": 1974, "maximum": 2100 },
+        "revision": { "type": "string", "minLength": 1 },
+        "origin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "id"],
+          "properties": {
+            "url": { "type": "string", "format": "uri", "pattern": "^https?://" },
+            "id": { "type": "string", "minLength": 1 }
+          }
+        },
+        "attribution": { "type": "string", "minLength": 1 },
+        "sourcePriority": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "canonicalBookId": { "$ref": "#/$defs/stableId" }
+      }
+    },
     "license": { "type": "string", "minLength": 1 },
     "files": {
       "type": "array",
@@ -46,6 +69,10 @@
     {
       "if": { "properties": { "accessTier": { "const": "personal" } }, "required": ["accessTier"] },
       "then": { "properties": { "shared": { "const": false }, "ownerUserId": { "$ref": "#/$defs/stableId" } } }
+    },
+    {
+      "if": { "properties": { "edition": { "const": "5.5e" } }, "required": ["edition"] },
+      "then": { "properties": { "publication": { "type": "object", "properties": { "releaseYear": { "type": "integer", "minimum": 2024 } } } } }
     }
   ],
   "$defs": {

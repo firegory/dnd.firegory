@@ -24,6 +24,10 @@ A canonical revision is self-describing: it embeds source provenance, complete p
 
 Source provenance carries the same authorization meaning as the application model. `open` sources are unowned and not shared, `premium` sources are unowned and shared, and `personal` sources are not shared and require an `ownerUserId`. Portable rebuilds must preserve these fields and apply access filtering before indexing or retrieval.
 
+Each source has a cohesive `publication` object. `canonicalBookId` identifies the conceptual book, while `code`, `releaseYear`, `revision`, `edition`, and `language` identify a particular publication or reprint; this keeps the 2014 and 2024 rules distinct without assigning a new conceptual identity to every printing. External provenance uses an `origin` object whose HTTP(S) `url` and provider `id` must appear together. `sourcePriority` is an integer from 0 through 1000 used to rank otherwise equivalent sources.
+
+PostgreSQL projects these values into typed `sources` columns rather than storing a second publication object. Migration `0003_source_publication_metadata.sql` sets existing rows' `publication_title` to their current display title and `source_priority` to `0`. Other values, including canonical IDs, publisher, release year, revision, origin, attribution, and license, remain `NULL` because they cannot be inferred safely. Such legacy rows remain readable and editable but cannot be serialized as canonical `source.json` until the required canonical publication fields are supplied.
+
 Revisions are immutable. Their `contentHash` is SHA-256 over UTF-8 canonical JSON of every revision property except the derived `revisionId` and `contentHash`. Canonical JSON recursively sorts object keys, preserves array order, and has no insignificant whitespace. `revisionId` is `rev-` followed by the same lowercase SHA-256 digest. Changing any canonical content therefore creates a new deterministic path.
 
 Only documents with a known integer `schemaVersion` are accepted. Schema version 1 uses JSON Schema draft 2020-12; checked examples are validated in the automated test suite.

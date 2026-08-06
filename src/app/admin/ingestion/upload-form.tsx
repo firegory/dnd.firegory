@@ -42,6 +42,18 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
   const [edition, setEdition] = useState<string>("5.5e");
   const [language, setLanguage] = useState<string>("ru");
   const [accessTier, setAccessTier] = useState<string>("open");
+  const [canonicalSourceId, setCanonicalSourceId] = useState("");
+  const [publicationCode, setPublicationCode] = useState("");
+  const [publicationTitle, setPublicationTitle] = useState("");
+  const [publisher, setPublisher] = useState("");
+  const [releaseYear, setReleaseYear] = useState("");
+  const [revision, setRevision] = useState("");
+  const [originUrl, setOriginUrl] = useState("");
+  const [originId, setOriginId] = useState("");
+  const [attribution, setAttribution] = useState("");
+  const [sourcePriority, setSourcePriority] = useState("0");
+  const [canonicalBookId, setCanonicalBookId] = useState("");
+  const [license, setLicense] = useState("");
   const [formStatus, setFormStatus] = useState<FormStatus>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [result, setResult] = useState<{ sourceId: string; jobId: string } | null>(null);
@@ -110,6 +122,18 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
     formData.append("edition", edition);
     formData.append("language", language);
     formData.append("accessTier", accessTier);
+    formData.append("canonicalSourceId", canonicalSourceId);
+    formData.append("publicationCode", publicationCode);
+    formData.append("publicationTitle", publicationTitle || title.trim());
+    formData.append("publisher", publisher);
+    formData.append("releaseYear", releaseYear);
+    formData.append("revision", revision);
+    formData.append("originUrl", originUrl);
+    formData.append("originId", originId);
+    formData.append("attribution", attribution);
+    formData.append("sourcePriority", sourcePriority);
+    formData.append("canonicalBookId", canonicalBookId);
+    formData.append("license", license);
 
     try {
       const response = await fetch("/api/admin/ingestion/upload", {
@@ -205,6 +229,18 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
         <AppSelect label={t("edition")} value={edition} options={editions} onChange={setEdition} disabled={isUploading} />
         <AppSelect label={t("language")} value={language} options={LANGUAGES} onChange={setLanguage} disabled={isUploading} />
         <AppSelect label={t("accessLevel")} value={accessTier} options={accessTiers} onChange={setAccessTier} disabled={isUploading} />
+        <UploadTextField label={t("canonicalSourceId")} value={canonicalSourceId} onChange={setCanonicalSourceId} disabled={isUploading} />
+        <UploadTextField label={t("publicationCode")} value={publicationCode} onChange={setPublicationCode} disabled={isUploading} />
+        <UploadTextField label={t("publicationTitle")} value={publicationTitle} onChange={setPublicationTitle} disabled={isUploading} />
+        <UploadTextField label={t("publisher")} value={publisher} onChange={setPublisher} disabled={isUploading} />
+        <UploadTextField label={t("releaseYear")} value={releaseYear} onChange={setReleaseYear} disabled={isUploading} type="number" />
+        <UploadTextField label={t("revision")} value={revision} onChange={setRevision} disabled={isUploading} />
+        <UploadTextField label={t("externalOriginUrl")} value={originUrl} onChange={setOriginUrl} disabled={isUploading} type="url" />
+        <UploadTextField label={t("externalOriginId")} value={originId} onChange={setOriginId} disabled={isUploading} />
+        <UploadTextField label={t("attribution")} value={attribution} onChange={setAttribution} disabled={isUploading} />
+        <UploadTextField label={t("sourcePriority")} value={sourcePriority} onChange={setSourcePriority} disabled={isUploading} type="number" />
+        <UploadTextField label={t("canonicalBookId")} value={canonicalBookId} onChange={setCanonicalBookId} disabled={isUploading} />
+        <UploadTextField label={t("license")} value={license} onChange={setLicense} disabled={isUploading} />
       </div>
 
       <div className="flex flex-wrap items-center gap-4">
@@ -225,5 +261,32 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
         )}
       </div>
     </form>
+  );
+}
+
+function UploadTextField({
+  label,
+  value,
+  onChange,
+  disabled,
+  type = "text",
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+  type?: "text" | "number" | "url";
+}) {
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-sm font-semibold text-text-secondary">{label}</span>
+      <input
+        type={type}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+        className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:opacity-50"
+      />
+    </label>
   );
 }

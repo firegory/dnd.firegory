@@ -25,6 +25,19 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
   const [edition, setEdition] = useState(source.edition);
   const [language, setLanguage] = useState(source.language);
   const [accessTier, setAccessTier] = useState(source.accessTier);
+  const [ownerUserId, setOwnerUserId] = useState(source.ownerUserId ?? "");
+  const [canonicalSourceId, setCanonicalSourceId] = useState(source.canonicalSourceId ?? "");
+  const [publicationCode, setPublicationCode] = useState(source.publication.code ?? "");
+  const [publicationTitle, setPublicationTitle] = useState(source.publication.title);
+  const [publisher, setPublisher] = useState(source.publication.publisher ?? "");
+  const [releaseYear, setReleaseYear] = useState(source.publication.releaseYear?.toString() ?? "");
+  const [revision, setRevision] = useState(source.publication.revision ?? "");
+  const [originUrl, setOriginUrl] = useState(source.publication.origin?.url ?? "");
+  const [originId, setOriginId] = useState(source.publication.origin?.id ?? "");
+  const [attribution, setAttribution] = useState(source.publication.attribution ?? "");
+  const [sourcePriority, setSourcePriority] = useState(source.publication.sourcePriority.toString());
+  const [canonicalBookId, setCanonicalBookId] = useState(source.publication.canonicalBookId ?? "");
+  const [license, setLicense] = useState(source.license ?? "");
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [message, setMessage] = useState<string | null>(null);
 
@@ -69,7 +82,27 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
       const response = await fetch(`/api/admin/sources/${source.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, category, edition, language, accessTier }),
+        body: JSON.stringify({
+          canonicalSourceId: canonicalSourceId || null,
+          title,
+          category,
+          edition,
+          language,
+          accessTier,
+          ownerUserId: accessTier === "personal" ? ownerUserId || null : null,
+          publication: {
+            code: publicationCode || null,
+            title: publicationTitle,
+            publisher: publisher || null,
+            releaseYear: releaseYear ? Number(releaseYear) : null,
+            revision: revision || null,
+            origin: originUrl || originId ? { url: originUrl || null, id: originId || null } : null,
+            attribution: attribution || null,
+            sourcePriority: Number(sourcePriority),
+            canonicalBookId: canonicalBookId || null,
+          },
+          license: license || null,
+        }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -112,6 +145,19 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
         <AppSelect label={t("edition")} value={edition} options={editionOptions} onChange={(value) => setEdition(value as typeof edition)} />
         <AppSelect label={t("language")} value={language} options={LANGUAGE_OPTIONS} onChange={(value) => setLanguage(value as typeof language)} />
         <AppSelect label={t("access")} value={accessTier} options={accessOptions} onChange={(value) => setAccessTier(value as typeof accessTier)} />
+        <TextField label={t("ownerUserId")} value={ownerUserId} onChange={setOwnerUserId} disabled={accessTier !== "personal"} />
+        <TextField label={t("canonicalSourceId")} value={canonicalSourceId} onChange={setCanonicalSourceId} />
+        <TextField label={t("publicationCode")} value={publicationCode} onChange={setPublicationCode} />
+        <TextField label={t("publicationTitle")} value={publicationTitle} onChange={setPublicationTitle} />
+        <TextField label={t("publisher")} value={publisher} onChange={setPublisher} />
+        <TextField label={t("releaseYear")} value={releaseYear} onChange={setReleaseYear} type="number" />
+        <TextField label={t("revision")} value={revision} onChange={setRevision} />
+        <TextField label={t("externalOriginUrl")} value={originUrl} onChange={setOriginUrl} type="url" />
+        <TextField label={t("externalOriginId")} value={originId} onChange={setOriginId} />
+        <TextField label={t("attribution")} value={attribution} onChange={setAttribution} />
+        <TextField label={t("sourcePriority")} value={sourcePriority} onChange={setSourcePriority} type="number" />
+        <TextField label={t("canonicalBookId")} value={canonicalBookId} onChange={setCanonicalBookId} />
+        <TextField label={t("license")} value={license} onChange={setLicense} />
       </div>
 
       <div className="mt-5 flex gap-3">
@@ -131,6 +177,19 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
             setEdition(source.edition);
             setLanguage(source.language);
             setAccessTier(source.accessTier);
+            setOwnerUserId(source.ownerUserId ?? "");
+            setCanonicalSourceId(source.canonicalSourceId ?? "");
+            setPublicationCode(source.publication.code ?? "");
+            setPublicationTitle(source.publication.title);
+            setPublisher(source.publication.publisher ?? "");
+            setReleaseYear(source.publication.releaseYear?.toString() ?? "");
+            setRevision(source.publication.revision ?? "");
+            setOriginUrl(source.publication.origin?.url ?? "");
+            setOriginId(source.publication.origin?.id ?? "");
+            setAttribution(source.publication.attribution ?? "");
+            setSourcePriority(source.publication.sourcePriority.toString());
+            setCanonicalBookId(source.publication.canonicalBookId ?? "");
+            setLicense(source.license ?? "");
             setStatus("idle");
             setMessage(null);
           }}
@@ -140,5 +199,32 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
         </button>
       </div>
     </section>
+  );
+}
+
+function TextField({
+  label,
+  value,
+  onChange,
+  type = "text",
+  disabled = false,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  type?: "text" | "number" | "url";
+  disabled?: boolean;
+}) {
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-xs font-semibold tracking-wide text-text-muted uppercase">{label}</span>
+      <input
+        type={type}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+        className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:opacity-50"
+      />
+    </label>
   );
 }

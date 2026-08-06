@@ -29,6 +29,7 @@ export function getContentMetadataDb(): Queryable {
 
 export type SourceMetadataRecord = Readonly<{
   id: string;
+  canonicalSourceId: string | null;
   title: string;
   category: SourceCategory;
   edition: SourceEdition;
@@ -36,11 +37,42 @@ export type SourceMetadataRecord = Readonly<{
   accessTier: AccessTier;
   shared: boolean;
   ownerUserId: string | null;
+  publication: PublicationMetadata;
+  license: string | null;
   metadata: JsonObject;
   createdByUserId: string | null;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
+}>;
+
+export type PublicationOrigin = Readonly<{
+  url: string;
+  id: string;
+}>;
+
+export type PublicationMetadata = Readonly<{
+  code: string | null;
+  title: string;
+  publisher: string | null;
+  releaseYear: number | null;
+  revision: string | null;
+  origin: PublicationOrigin | null;
+  attribution: string | null;
+  sourcePriority: number;
+  canonicalBookId: string | null;
+}>;
+
+export type PublicationMetadataInput = Readonly<{
+  code?: string | null;
+  title?: string;
+  publisher?: string | null;
+  releaseYear?: number | null;
+  revision?: string | null;
+  origin?: Readonly<{ url?: string | null; id?: string | null }> | null;
+  attribution?: string | null;
+  sourcePriority?: number;
+  canonicalBookId?: string | null;
 }>;
 
 export type FileMetadataRecord = Readonly<{
@@ -58,12 +90,15 @@ export type FileMetadataRecord = Readonly<{
 }>;
 
 export type CreateSourceMetadataInput = Readonly<{
+  canonicalSourceId?: string | null;
   title: string;
   category: SourceCategory;
   edition: SourceEdition;
   language: SourceLanguage;
   accessTier: AccessTier;
   ownerUserId?: string | null;
+  publication?: PublicationMetadataInput;
+  license?: string | null;
   metadata?: JsonObject;
 }>;
 
@@ -93,6 +128,7 @@ export type JsonObject = Readonly<Record<string, unknown>>;
 
 type SourceRow = Readonly<{
   id: string;
+  canonical_source_id: string | null;
   title: string;
   category: SourceCategory;
   edition: SourceEdition;
@@ -100,6 +136,17 @@ type SourceRow = Readonly<{
   access_tier: AccessTier;
   shared: boolean;
   owner_user_id: string | null;
+  publication_code: string | null;
+  publication_title: string;
+  publisher: string | null;
+  release_year: number | null;
+  publication_revision: string | null;
+  external_origin_url: string | null;
+  external_origin_id: string | null;
+  attribution: string | null;
+  source_priority: number;
+  canonical_book_id: string | null;
+  license: string | null;
   metadata: JsonObject;
   created_by_user_id: string | null;
   created_at: Date | string;
@@ -182,11 +229,15 @@ export class ContentMetadataService {
     const source = normalizeSourceInput(input);
     const result = await this.db.query<SourceRow>(
       `INSERT INTO sources (
-        title, category, edition, language, access_tier, shared,
-        owner_user_id, metadata, created_by_user_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+        canonical_source_id, title, category, edition, language, access_tier, shared,
+        owner_user_id, publication_code, publication_title, publisher, release_year,
+        publication_revision, external_origin_url, external_origin_id, attribution,
+        source_priority, canonical_book_id, license, metadata, created_by_user_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, $18, $19, $20::jsonb, $21)
       RETURNING *`,
       [
+        source.canonicalSourceId,
         source.title,
         source.category,
         source.edition,
@@ -194,6 +245,17 @@ export class ContentMetadataService {
         source.accessTier,
         source.shared,
         source.ownerUserId,
+        source.publication.code,
+        source.publication.title,
+        source.publication.publisher,
+        source.publication.releaseYear,
+        source.publication.revision,
+        source.publication.origin?.url ?? null,
+        source.publication.origin?.id ?? null,
+        source.publication.attribution,
+        source.publication.sourcePriority,
+        source.publication.canonicalBookId,
+        source.license,
         JSON.stringify(source.metadata),
         admin.userId,
       ],
@@ -208,22 +270,42 @@ export class ContentMetadataService {
   ): Promise<SourceMetadataRecord> {
     assertAdminContext(admin);
     const current = await this.getSource(admin, sourceId);
-    const merged = normalizeSourceInput({ ...current, ...input });
+    const publication = input.publication === undefined
+      ? current.publication
+      : {
+          ...current.publication,
+          ...input.publication,
+          origin: input.publication.origin === undefined ? current.publication.origin : input.publication.origin,
+        };
+    const merged = normalizeSourceInput({ ...current, ...input, publication });
     const result = await this.db.query<SourceRow>(
       `UPDATE sources
-      SET title = $2,
-          category = $3,
-          edition = $4,
-          language = $5,
-          access_tier = $6,
-          shared = $7,
-          owner_user_id = $8,
-          metadata = $9::jsonb,
+      SET canonical_source_id = $2,
+          title = $3,
+          category = $4,
+          edition = $5,
+          language = $6,
+          access_tier = $7,
+          shared = $8,
+          owner_user_id = $9,
+          publication_code = $10,
+          publication_title = $11,
+          publisher = $12,
+          release_year = $13,
+          publication_revision = $14,
+          external_origin_url = $15,
+          external_origin_id = $16,
+          attribution = $17,
+          source_priority = $18,
+          canonical_book_id = $19,
+          license = $20,
+          metadata = $21::jsonb,
           updated_at = now()
       WHERE id = $1 AND deleted_at IS NULL
       RETURNING *`,
       [
         sourceId,
+        merged.canonicalSourceId,
         merged.title,
         merged.category,
         merged.edition,
@@ -231,6 +313,17 @@ export class ContentMetadataService {
         merged.accessTier,
         merged.shared,
         merged.ownerUserId,
+        merged.publication.code,
+        merged.publication.title,
+        merged.publication.publisher,
+        merged.publication.releaseYear,
+        merged.publication.revision,
+        merged.publication.origin?.url ?? null,
+        merged.publication.origin?.id ?? null,
+        merged.publication.attribution,
+        merged.publication.sourcePriority,
+        merged.publication.canonicalBookId,
+        merged.license,
         JSON.stringify(merged.metadata),
       ],
     );
@@ -350,27 +443,98 @@ export class ContentMetadataService {
   }
 }
 
-export function normalizeSourceInput(input: CreateSourceMetadataInput): CreateSourceMetadataInput & { shared: boolean } {
+export function normalizeSourceInput(input: CreateSourceMetadataInput): Omit<Required<CreateSourceMetadataInput>, "publication"> & { publication: PublicationMetadata; shared: boolean } {
   const title = requireTrimmed(input.title, "title");
   validateEnum(input.category, SOURCE_CATEGORIES, "category");
   validateEnum(input.edition, SOURCE_EDITIONS, "edition");
   validateEnum(input.language, SOURCE_LANGUAGES, "language");
   validateEnum(input.accessTier, ACCESS_TIERS, "accessTier");
   const metadata = normalizeMetadata(input.metadata);
+  const canonicalSourceId = optionalStableId(input.canonicalSourceId, "canonicalSourceId");
+  const publication = normalizePublication(input.publication, title, input.edition);
+  const license = optionalTrimmed(input.license, "license");
   const ownerUserId = input.ownerUserId ? requireTrimmed(input.ownerUserId, "ownerUserId") : null;
 
   if (input.accessTier === "open") {
     if (ownerUserId) throw new ContentMetadataValidationError("Open/SRD sources cannot have an owner.");
-    return { title, category: input.category, edition: input.edition, language: input.language, accessTier: "open", ownerUserId: null, metadata, shared: false };
+    return { canonicalSourceId, title, category: input.category, edition: input.edition, language: input.language, accessTier: "open", ownerUserId: null, publication, license, metadata, shared: false };
   }
 
   if (input.accessTier === "premium") {
     if (ownerUserId) throw new ContentMetadataValidationError("Shared premium sources cannot have an owner.");
-    return { title, category: input.category, edition: input.edition, language: input.language, accessTier: "premium", ownerUserId: null, metadata, shared: true };
+    return { canonicalSourceId, title, category: input.category, edition: input.edition, language: input.language, accessTier: "premium", ownerUserId: null, publication, license, metadata, shared: true };
   }
 
   if (!ownerUserId) throw new ContentMetadataValidationError("Personal sources require ownerUserId.");
-  return { title, category: input.category, edition: input.edition, language: input.language, accessTier: "personal", ownerUserId, metadata, shared: false };
+  return { canonicalSourceId, title, category: input.category, edition: input.edition, language: input.language, accessTier: "personal", ownerUserId, publication, license, metadata, shared: false };
+}
+
+function normalizePublication(input: PublicationMetadataInput | undefined, sourceTitle: string, edition: SourceEdition): PublicationMetadata {
+  const publication = input ?? {};
+  if (!isRecord(publication)) throw new ContentMetadataValidationError("publication must be an object.");
+  const allowed = new Set(["code", "title", "publisher", "releaseYear", "revision", "origin", "attribution", "sourcePriority", "canonicalBookId"]);
+  for (const key of Object.keys(publication)) {
+    if (!allowed.has(key)) throw new ContentMetadataValidationError(`publication.${key} is not supported.`);
+  }
+
+  const releaseYear = publication.releaseYear ?? null;
+  if (releaseYear !== null && (!Number.isSafeInteger(releaseYear) || releaseYear < 1974 || releaseYear > 2100)) {
+    throw new ContentMetadataValidationError("publication.releaseYear must be an integer between 1974 and 2100.");
+  }
+  if (edition === "5.5e" && releaseYear !== null && releaseYear < 2024) {
+    throw new ContentMetadataValidationError("D&D 5.5e publication.releaseYear cannot be earlier than 2024.");
+  }
+
+  const revision = optionalTrimmed(publication.revision, "publication.revision");
+  if (revision && releaseYear === null) {
+    throw new ContentMetadataValidationError("publication.revision requires publication.releaseYear.");
+  }
+
+  const sourcePriority = publication.sourcePriority ?? 0;
+  if (!Number.isSafeInteger(sourcePriority) || sourcePriority < 0 || sourcePriority > 1000) {
+    throw new ContentMetadataValidationError("publication.sourcePriority must be an integer between 0 and 1000.");
+  }
+
+  const code = optionalTrimmed(publication.code, "publication.code");
+  if (code && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(code)) {
+    throw new ContentMetadataValidationError("publication.code may contain only letters, numbers, dots, underscores, and hyphens.");
+  }
+
+  return {
+    code,
+    title: publication.title === undefined ? sourceTitle : requireTrimmed(publication.title, "publication.title"),
+    publisher: optionalTrimmed(publication.publisher, "publication.publisher"),
+    releaseYear,
+    revision,
+    origin: normalizeOrigin(publication.origin),
+    attribution: optionalTrimmed(publication.attribution, "publication.attribution"),
+    sourcePriority,
+    canonicalBookId: optionalStableId(publication.canonicalBookId, "publication.canonicalBookId"),
+  };
+}
+
+function normalizeOrigin(origin: PublicationMetadataInput["origin"]): PublicationOrigin | null {
+  if (origin === undefined || origin === null) return null;
+  if (!isRecord(origin)) throw new ContentMetadataValidationError("publication.origin must be an object.");
+  for (const key of Object.keys(origin)) {
+    if (key !== "url" && key !== "id") throw new ContentMetadataValidationError(`publication.origin.${key} is not supported.`);
+  }
+  const url = optionalTrimmed(origin.url, "publication.origin.url");
+  const id = optionalTrimmed(origin.id, "publication.origin.id");
+  if ((url === null) !== (id === null)) {
+    throw new ContentMetadataValidationError("publication.origin.url and publication.origin.id must be provided together.");
+  }
+  if (!url || !id) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new ContentMetadataValidationError("publication.origin.url must be a valid HTTP(S) URL.");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new ContentMetadataValidationError("publication.origin.url must be a valid HTTP(S) URL.");
+  }
+  return { url, id };
 }
 
 export function normalizeFileInput(input: CreateFileMetadataInput): Required<CreateFileMetadataInput> {
@@ -405,9 +569,24 @@ function validateId(value: string, field: string): void {
 }
 
 function requireTrimmed(value: string, field: string): string {
+  if (typeof value !== "string") throw new ContentMetadataValidationError(`${field} must be a string.`);
   const trimmed = value?.trim();
   if (!trimmed) throw new ContentMetadataValidationError(`${field} is required.`);
   return trimmed;
+}
+
+function optionalTrimmed(value: string | null | undefined, field: string): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") throw new ContentMetadataValidationError(`${field} must be a string or null.`);
+  return requireTrimmed(value, field);
+}
+
+function optionalStableId(value: string | null | undefined, field: string): string | null {
+  const id = optionalTrimmed(value, field);
+  if (id !== null && !/^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/.test(id)) {
+    throw new ContentMetadataValidationError(`${field} must be a lowercase stable ID.`);
+  }
+  return id;
 }
 
 function validateEnum<T extends readonly string[]>(value: string, allowed: T, field: string): asserts value is T[number] {
@@ -428,9 +607,14 @@ function normalizeMetadata(metadata: JsonObject | undefined): JsonObject {
   return metadata;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function mapSourceRow(row: SourceRow): SourceMetadataRecord {
   return {
     id: row.id,
+    canonicalSourceId: row.canonical_source_id,
     title: row.title,
     category: row.category,
     edition: row.edition,
@@ -438,6 +622,20 @@ function mapSourceRow(row: SourceRow): SourceMetadataRecord {
     accessTier: row.access_tier,
     shared: row.shared,
     ownerUserId: row.owner_user_id,
+    publication: {
+      code: row.publication_code,
+      title: row.publication_title,
+      publisher: row.publisher,
+      releaseYear: row.release_year,
+      revision: row.publication_revision,
+      origin: row.external_origin_url && row.external_origin_id
+        ? { url: row.external_origin_url, id: row.external_origin_id }
+        : null,
+      attribution: row.attribution,
+      sourcePriority: row.source_priority,
+      canonicalBookId: row.canonical_book_id,
+    },
+    license: row.license,
     metadata: row.metadata,
     createdByUserId: row.created_by_user_id,
     createdAt: toIso(row.created_at),

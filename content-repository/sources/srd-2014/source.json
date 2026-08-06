@@ -9,7 +9,20 @@
   "accessTier": "open",
   "shared": false,
   "ownerUserId": null,
-  "publisher": "Wizards of the Coast",
+  "publication": {
+    "code": "BR-2014",
+    "title": "D&D Basic Rules",
+    "publisher": "Wizards of the Coast",
+    "releaseYear": 2014,
+    "revision": "2014 release",
+    "origin": {
+      "url": "https://dnd.wizards.com/what-is-dnd/basic-rules",
+      "id": "basic-rules-2014"
+    },
+    "attribution": "Dungeons & Dragons Basic Rules (2014), Wizards of the Coast",
+    "sourcePriority": 100,
+    "canonicalBookId": "basic-rules"
+  },
   "license": "Open reference example",
   "files": [
     {

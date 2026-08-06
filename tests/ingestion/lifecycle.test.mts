@@ -218,7 +218,8 @@ describe("ingestion: source record creation", () => {
 
     assert.equal(sourceId, "source-1");
     assert.match(calls[0]?.sql ?? "", /shared/);
-    assert.deepEqual(calls[0]?.params.slice(4, 8), ["premium", true, null, "admin-1"]);
+    assert.deepEqual(calls[0]?.params.slice(5, 8), ["premium", true, null]);
+    assert.equal(calls[0]?.params[19], "admin-1");
   });
 
   it("sets shared=false and owner when inserting a personal source", async () => {
@@ -241,7 +242,8 @@ describe("ingestion: source record creation", () => {
       client: client as never,
     });
 
-    assert.deepEqual(calls[0]?.params.slice(4, 8), ["personal", false, "user-1", "admin-1"]);
+    assert.deepEqual(calls[0]?.params.slice(5, 8), ["personal", false, "user-1"]);
+    assert.equal(calls[0]?.params[19], "admin-1");
   });
 });
 

@@ -35,6 +35,11 @@ import {
   ContentSchemaValidationError,
   validateContentRepository,
 } from "../../src/server/content-storage/validation.ts";
+import {
+  contentSourceFromMetadataRecord,
+  sourceMetadataInputFromContentSource,
+} from "../../src/server/content/source-projection.ts";
+import { normalizeSourceInput, type SourceMetadataRecord } from "../../src/server/content/metadata.ts";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const dataRoot = resolve(repositoryRoot, "content-repository");
@@ -143,6 +148,36 @@ test("source authorization metadata enforces current access invariants", async (
     { ...open, accessTier: "personal", ownerUserId: "user-1", shared: true },
   ];
   for (const source of invalid) assert.throws(() => assertContentSource(source), ContentSchemaValidationError);
+});
+
+test("source publication metadata round-trips through the database projection", async () => {
+  const source = (await readJson(resolve(dataRoot, "sources/srd-2014/source.json"))) as ContentSource;
+  const normalized = normalizeSourceInput(sourceMetadataInputFromContentSource(source));
+  const record: SourceMetadataRecord = {
+    id: "00000000-0000-0000-0000-000000000001",
+    ...normalized,
+    createdByUserId: null,
+    createdAt: "2026-08-06T00:00:00.000Z",
+    updatedAt: "2026-08-06T00:00:00.000Z",
+    deletedAt: null,
+  };
+
+  assert.deepEqual(contentSourceFromMetadataRecord(record, source.files), source);
+});
+
+test("source schema rejects contradictory publication metadata", async () => {
+  const source = (await readJson(resolve(dataRoot, "sources/srd-2014/source.json"))) as ContentSource;
+  assert.throws(
+    () => assertContentSource({ ...source, edition: "5.5e", publication: { ...source.publication, releaseYear: 2014 } }),
+    ContentSchemaValidationError,
+  );
+  assert.throws(
+    () => assertContentSource({
+      ...source,
+      publication: { ...source.publication, origin: { url: "file:///book", id: "book" } },
+    }),
+    ContentSchemaValidationError,
+  );
 });
 
 test("canonical validation rejects content that does not match its hashes", async () => {
@@ -366,7 +401,14 @@ function canonicalInput() {
       accessTier: "open" as const,
       shared: false,
       ownerUserId: null,
-      publisher: "Publisher",
+      publication: {
+        code: "BR-2014",
+        title: "Basic Rules",
+        publisher: "Publisher",
+        releaseYear: 2014,
+        sourcePriority: 100,
+        canonicalBookId: "basic-rules",
+      },
       files: [{
         fileId: "rules",
         path: "sources/srd-2014/files/rules.pdf",
