@@ -15,6 +15,7 @@ import {
   submitPublicationCommand,
   type PublicationCommand,
 } from "../../src/server/content-storage/publication-command.ts";
+import { createPublicationGenerationReservation } from "../../src/server/content-storage/publication-generation.ts";
 import {
   activationDirectoryPath,
   activationDeltaPath,
@@ -23,7 +24,7 @@ import {
   publicationOutboxStatePath,
   publicationQuarantinePath,
   createCanonicalRevision,
-  manifestPath,
+  repositoryBootstrapPath,
   publicationSpoolPath,
   publicationStagingPath,
   type CanonicalRevision,
@@ -31,7 +32,7 @@ import {
   type RepositoryManifest,
 } from "../../src/server/content-storage/repository.ts";
 import { type PublicationReservation } from "../../src/server/content-storage/publication-queue.ts";
-import { loadActiveRepositoryManifest, validateContentRepository } from "../../src/server/content-storage/validation.ts";
+import { loadResolvedRepositoryManifest, validateContentRepository } from "../../src/server/content-storage/validation.ts";
 import { PostgresPublicationFenceManager, type PublicationFenceManager } from "../../src/worker/publication/fence.ts";
 import { RedisPublicationLeaseManager } from "../../src/worker/publication/lease.ts";
 import { processPublicationReservation } from "../../src/worker/publication/processor.ts";
@@ -48,7 +49,7 @@ test("read-only app submission durably records intent and reconciliation closes 
   const root = await temporaryRepository(t);
   const spoolRoot = resolve(dirname(root), "spool");
   const revision = await nextRevision(root, "2026-08-06T01:00:00.000Z");
-  const manifestBefore = await readFile(manifestPath(root), "utf8");
+  const manifestBefore = await readFile(repositoryBootstrapPath(root), "utf8");
   const queued: string[] = [];
   await chmod(root, 0o555);
 
@@ -68,7 +69,7 @@ test("read-only app submission durably records intent and reconciliation closes 
 
   assert.equal((await readOutboxState(spoolRoot, "publish-dash-v2"))?.status, "pending");
   assert.deepEqual((await loadPublicationCommand("publish-dash-v2", spoolRoot)).revision, revision);
-  assert.equal(await readFile(manifestPath(root), "utf8"), manifestBefore);
+  assert.equal(await readFile(repositoryBootstrapPath(root), "utf8"), manifestBefore);
   assert.deepEqual(queued, ["publish-dash-v2"]);
 
   assert.deepEqual(
@@ -187,13 +188,30 @@ test("durable generation reservations linearize submitters and survive rebuild a
   assert.equal((await loadPublicationCommand("generation-second", spoolRoot)).generation, generation(1));
   assert.equal((await loadPublicationCommand("generation-first", spoolRoot)).generation, generation(2));
 
-  await writeFile(publicationGenerationReservationPath(spoolRoot, generation(8)), "partial");
+  await writeFile(publicationGenerationReservationPath(spoolRoot, generation(7)), JSON.stringify({
+    schemaVersion: 1,
+    kind: "publicationGenerationReservation",
+    generation: generation(7),
+    idempotencyKey: "legacy-reservation",
+    reservedAt: 1,
+  }));
+  await writeFile(
+    publicationGenerationReservationPath(spoolRoot, generation(8)),
+    JSON.stringify(createPublicationGenerationReservation(generation(8), "rebuilt-command", 1)),
+  );
+  await writeFile(publicationGenerationReservationPath(spoolRoot, generation(9)), "partial");
+  await writeFile(publicationGenerationReservationPath(spoolRoot, "9".repeat(32)), "corrupt maximum");
   await writeFile(resolve(dirname(publicationGenerationReservationPath(spoolRoot, generation(1))), `${"9".repeat(33)}.json`), "invalid");
   await submitPublicationCommand(
     { idempotencyKey: "generation-after-rebuild", revision },
     { spoolRoot, dataRoot: root, enqueue: async () => undefined },
   );
   assert.equal((await loadPublicationCommand("generation-after-rebuild", spoolRoot)).generation, generation(9));
+  assert.match(
+    JSON.parse(await readFile(publicationGenerationReservationPath(spoolRoot, generation(7)), "utf8")).checksum,
+    /^sha256:[0-9a-f]{64}$/,
+  );
+  assert.ok((await readdir(resolve(spoolRoot, "quarantine/generation-reservations"))).some((name) => name.startsWith(generation(9))));
 });
 
 test("same-target deltas order by generation while different targets compose", async (t) => {
@@ -254,7 +272,7 @@ test("higher per-target generation remains active when a stale writer resumes", 
     leaseTtlMs: 100,
   });
   assert.equal(newer.revisionId, secondRevision.revisionId);
-  assert.equal((await loadActiveRepositoryManifest(root)).generation, generation(2));
+  assert.equal((await loadResolvedRepositoryManifest(root)).generation, generation(2));
 
   resumeFirst();
   await first;
@@ -265,16 +283,76 @@ test("higher per-target generation remains active when a stale writer resumes", 
   assert.equal((await readManifest(root)).entries[0].revisionId, secondRevision.revisionId);
 });
 
+test("same revision at generation three fences a delayed generation-two replacement", async (t) => {
+  const root = await temporaryRepository(t);
+  const original = await currentRevision(root);
+  const replacement = await nextRevision(root, "2026-08-06T03:05:00.000Z");
+  let now = 0;
+  const leases = memoryLeaseCommands(() => now);
+  const fenceState = { owner: null as symbol | null };
+  let resumeOlder!: () => void;
+  const blocked = new Promise<void>((resolveBlocked) => { resumeOlder = resolveBlocked; });
+  let olderPaused!: () => void;
+  const reached = new Promise<void>((resolveReached) => { olderPaused = resolveReached; });
+
+  const older = publishCanonicalRevision({
+    dataRoot: root,
+    command: publicationCommand("delayed-generation-two", replacement, 2),
+    leaseManager: new RedisPublicationLeaseManager(leases),
+    fenceManager: memoryFenceManager(fenceState),
+    leaseTtlMs: 100,
+    hooks: {
+      beforeActivationInstall: async () => {
+        fenceState.owner = null;
+        olderPaused();
+        await blocked;
+      },
+    },
+  });
+  await reached;
+  now = 101;
+  const fencingResult = await publishCanonicalRevision({
+    dataRoot: root,
+    command: publicationCommand("fencing-generation-three", original, 3),
+    leaseManager: new RedisPublicationLeaseManager(leases),
+    fenceManager: memoryFenceManager(fenceState),
+    leaseTtlMs: 100,
+  });
+  assert.equal(fencingResult.alreadyActive, false, "an active revision still installs its command generation delta");
+  resumeOlder();
+  await older;
+  assert.equal((await readManifest(root)).entries[0].revisionId, original.revisionId);
+  assert.deepEqual(await readdir(activationDirectoryPath(root)), [`${generation(2)}.json`, `${generation(3)}.json`]);
+  assert.equal((await publish(root, publicationCommand("fencing-generation-three", original, 3))).alreadyActive, true);
+});
+
+test("a newer delta can replace a corrupt bootstrap target but unreplaced corruption still fails", async (t) => {
+  const root = await temporaryRepository(t);
+  const replacement = await nextRevision(root, "2026-08-06T03:10:00.000Z");
+  const bootstrap = JSON.parse(await readFile(repositoryBootstrapPath(root), "utf8")) as RepositoryManifest;
+  const corrupt = {
+    ...bootstrap,
+    entries: bootstrap.entries.map((entry) => entry.entryId === replacement.entryId
+      ? { ...entry, path: `compendium/${entry.entryId}/revisions/${`rev-${"0".repeat(64)}`}.json`, revisionId: `rev-${"0".repeat(64)}`, contentHash: `sha256:${"0".repeat(64)}` }
+      : entry),
+  };
+  await writeFile(repositoryBootstrapPath(root), `${JSON.stringify(corrupt, null, 2)}\n`);
+  await assert.rejects(() => loadResolvedRepositoryManifest(root), /ENOENT|not readable/);
+  await publish(root, publicationCommand("repair-bootstrap-target", replacement, 1));
+  assert.equal((await readManifest(root)).entries[0].revisionId, replacement.revisionId);
+  await validateContentRepository(root);
+});
+
 test("activation resolution skips corrupt higher files", async (t) => {
   const root = await temporaryRepository(t);
   const firstRevision = await nextRevision(root, "2026-08-06T03:15:00.000Z");
   await publish(root, publicationCommand("activation-one", firstRevision, 1));
   await writeFile(activationDeltaPath(root, generation(2)), "{broken");
-  assert.equal((await loadActiveRepositoryManifest(root)).generation, generation(1));
+  assert.equal((await loadResolvedRepositoryManifest(root)).generation, generation(1));
 
   const secondRevision = await nextRevision(root, "2026-08-06T03:30:00.000Z");
   await publish(root, publicationCommand("activation-three", secondRevision, 3));
-  const active = await loadActiveRepositoryManifest(root);
+  const active = await loadResolvedRepositoryManifest(root);
   assert.equal(active.generation, generation(3));
   assert.equal(active.manifest.entries[0].revisionId, secondRevision.revisionId);
   await writeFile(activationDeltaPath(root, generation(4)), JSON.stringify({
@@ -282,7 +360,7 @@ test("activation resolution skips corrupt higher files", async (t) => {
     kind: "repositoryActivationDelta",
     generation: generation(4),
   }));
-  assert.equal((await loadActiveRepositoryManifest(root)).generation, generation(3), "schema-invalid deltas are inert");
+  assert.equal((await loadResolvedRepositoryManifest(root)).generation, generation(3), "schema-invalid deltas are inert");
 });
 
 test("PostgreSQL fence holds one dedicated session through verification and release", async () => {
@@ -471,6 +549,43 @@ test("processor owns acknowledgements, handles duplicates, and quarantines perma
   assert.equal(actions.deadLettered.length, 2);
 });
 
+test("a mismatched queue generation dead-letters only that delivery", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "dnd-generation-mismatch-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const spoolRoot = resolve(parent, "spool");
+  const revision = await revisionFromFixture("2026-08-06T09:30:00.000Z");
+  await submitPublicationCommand(
+    { idempotencyKey: "generation-mismatch", revision },
+    { spoolRoot, dataRoot: fixtureRoot, enqueue: async () => undefined, now: 1 },
+  );
+  const actions = queueActionRecorder();
+  let publications = 0;
+  assert.equal(await processPublicationReservation({
+    reservation: reservation("wrong-generation", "wrong-reservation", "generation-mismatch", 0, 2),
+    dataRoot: "/unused",
+    spoolRoot,
+    now: 2,
+    publish: async () => { publications++; throw new Error("must not publish"); },
+    queue: actions.queue,
+  }), "dead-lettered");
+  assert.equal((await readOutboxState(spoolRoot, "generation-mismatch"))?.status, "queued");
+  assert.equal(publications, 0);
+
+  assert.equal(await processPublicationReservation({
+    reservation: reservation("correct-generation", "correct-reservation", "generation-mismatch", 0, 1),
+    dataRoot: "/unused",
+    spoolRoot,
+    now: 3,
+    publish: async () => {
+      publications++;
+      return { entryId: revision.entryId, revisionId: revision.revisionId, alreadyActive: false };
+    },
+    queue: actions.queue,
+  }), "completed");
+  assert.equal(publications, 1);
+  assert.equal((await readOutboxState(spoolRoot, "generation-mismatch"))?.status, "completed");
+});
+
 test("processor applies bounded exponential retry and dead-letters the final attempt", async (t) => {
   const parent = await mkdtemp(join(tmpdir(), "dnd-retries-"));
   t.after(() => rm(parent, { recursive: true, force: true }));
@@ -598,13 +713,17 @@ async function temporaryRepository(t: TestContext): Promise<string> {
 }
 
 async function readManifest(root: string): Promise<RepositoryManifest> {
-  return (await loadActiveRepositoryManifest(root)).manifest;
+  return (await loadResolvedRepositoryManifest(root)).manifest;
 }
 
 async function nextRevision(root: string, createdAt: string): Promise<CanonicalRevision> {
-  const manifest = await readManifest(root);
-  const current = JSON.parse(await readFile(resolve(root, manifest.entries[0].path), "utf8")) as CanonicalRevision;
+  const current = await currentRevision(root);
   return revise(current, createdAt);
+}
+
+async function currentRevision(root: string): Promise<CanonicalRevision> {
+  const manifest = await readManifest(root);
+  return JSON.parse(await readFile(resolve(root, manifest.entries[0].path), "utf8")) as CanonicalRevision;
 }
 
 async function revisionFromFixture(createdAt: string): Promise<CanonicalRevision> {

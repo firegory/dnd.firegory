@@ -1,13 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:dnd-firegory:schema:content-repository:manifest:1",
-  "title": "Content repository manifest",
+  "title": "Content repository bootstrap descriptor",
+  "description": "Bootstrap metadata for readerContractVersion 1. Active entries require folding valid activation deltas by target generation.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "kind", "repositoryId", "schemas", "entries"],
+  "required": ["schemaVersion", "kind", "readerContractVersion", "repositoryId", "schemas", "entries"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "kind": { "const": "repositoryManifest" },
+    "readerContractVersion": { "const": 1 },
     "repositoryId": { "$ref": "#/$defs/stableId" },
     "schemas": {
       "type": "array",

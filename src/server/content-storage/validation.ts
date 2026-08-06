@@ -13,7 +13,7 @@ import {
   canonicalJson,
   activationDirectoryPath,
   hasValidRevisionIdentity,
-  manifestPath,
+  repositoryBootstrapPath,
   sourceMetadataPath,
   type CanonicalRevision,
   type ContentSource,
@@ -136,18 +136,30 @@ export function assertRepositoryActivationDelta(document: unknown): asserts docu
 
 export async function validateContentRepository(dataRoot: string): Promise<void> {
   const root = await realpath(dataRoot);
-  await loadActiveRepositoryManifest(root);
+  await loadResolvedRepositoryManifest(root);
 }
 
-export async function loadActiveRepositoryManifest(dataRoot: string): Promise<Readonly<{
+export async function loadRepositoryBootstrapDescriptor(dataRoot: string): Promise<RepositoryManifest> {
+  const root = await realpath(dataRoot);
+  const bootstrapFile = await resolveRepositoryFile(root, relative(root, repositoryBootstrapPath(root)));
+  const bootstrap = await readJson(bootstrapFile, "Repository bootstrap descriptor");
+  assertRepositoryManifest(bootstrap);
+  await validateSchemaDeclarations(root, bootstrap);
+  const activationSchema = bootstrap.schemas.find(
+    (declaration) => declaration.schemaId === repositoryActivationDeltaSchema.$id,
+  );
+  if (activationSchema?.path !== "schemas/v1/repository-activation-delta.schema.json") {
+    throw new ContentIntegrityError("Repository bootstrap descriptor must declare the activation-delta reader contract schema.");
+  }
+  return bootstrap;
+}
+
+export async function loadResolvedRepositoryManifest(dataRoot: string): Promise<Readonly<{
   manifest: RepositoryManifest;
   generation: string | null;
 }>> {
   const root = await realpath(dataRoot);
-  const manifestFile = await resolveRepositoryFile(root, relative(root, manifestPath(root)));
-  const bootstrap = await readJson(manifestFile, "Repository manifest");
-  assertRepositoryManifest(bootstrap);
-  await validateManifestContents(root, bootstrap);
+  const bootstrap = await loadRepositoryBootstrapDescriptor(root);
 
   const activationDirectory = activationDirectoryPath(root);
   let activationNames: string[] = [];
@@ -171,7 +183,7 @@ export async function loadActiveRepositoryManifest(dataRoot: string): Promise<Re
       if (`${delta.generation}.json` !== name) {
         throw new ContentIntegrityError(`Repository activation generation does not match filename ${name}.`);
       }
-      await validateManifestContents(root, { ...bootstrap, entries: [delta.entry] });
+      await validateManifestEntries(root, [delta.entry]);
       const previous = targetGenerations.get(delta.targetEntryId);
       if (!previous || delta.generation > previous) {
         entries.set(delta.targetEntryId, delta.entry);
@@ -187,11 +199,11 @@ export async function loadActiveRepositoryManifest(dataRoot: string): Promise<Re
     ...bootstrap,
     entries: [...entries.values()].sort((left, right) => left.entryId.localeCompare(right.entryId)),
   };
-  await validateManifestContents(root, manifest);
+  await validateManifestEntries(root, manifest.entries);
   return { manifest, generation: highestGeneration };
 }
 
-async function validateManifestContents(root: string, manifest: RepositoryManifest): Promise<void> {
+async function validateSchemaDeclarations(root: string, manifest: RepositoryManifest): Promise<void> {
   for (const declaration of manifest.schemas) {
     const file = await resolveRepositoryFile(root, declaration.path);
     const schema = await readJson(file, `Schema ${declaration.schemaId}`);
@@ -202,9 +214,11 @@ async function validateManifestContents(root: string, manifest: RepositoryManife
       throw new ContentIntegrityError(`Schema ${declaration.schemaId} is not a valid JSON Schema: ${ajv.errorsText()}`);
     }
   }
+}
 
+async function validateManifestEntries(root: string, entries: RepositoryManifest["entries"]): Promise<void> {
   const sources = new Map<string, ContentSource>();
-  for (const entry of manifest.entries) {
+  for (const entry of entries) {
     const expectedPath = `compendium/${entry.entryId}/revisions/${entry.revisionId}.json`;
     if (entry.path !== expectedPath) {
       throw new ContentIntegrityError(`Manifest entry ${entry.entryId} does not use its deterministic canonical path.`);

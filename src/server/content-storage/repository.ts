@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 export const CONTENT_SCHEMA_VERSION = 1 as const;
+export const REPOSITORY_READER_CONTRACT_VERSION = 1 as const;
 
 const STABLE_ID = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
 const REVISION_ID = /^rev-[0-9a-f]{64}$/;
@@ -55,6 +56,7 @@ export type RepositoryManifestEntry = Readonly<{
 export type RepositoryManifest = Readonly<{
   schemaVersion: typeof CONTENT_SCHEMA_VERSION;
   kind: "repositoryManifest";
+  readerContractVersion: typeof REPOSITORY_READER_CONTRACT_VERSION;
   repositoryId: string;
   schemas: readonly Readonly<{ schemaId: string; path: string }>[];
   entries: readonly RepositoryManifestEntry[];
@@ -63,6 +65,7 @@ export type RepositoryManifest = Readonly<{
 export type RepositoryActivationDelta = Readonly<{
   schemaVersion: typeof CONTENT_SCHEMA_VERSION;
   kind: "repositoryActivationDelta";
+  readerContractVersion: typeof REPOSITORY_READER_CONTRACT_VERSION;
   generation: string;
   idempotencyKey: string;
   targetEntryId: string;
@@ -75,7 +78,7 @@ export function getDataRoot(environment: NodeJS.ProcessEnv = process.env): strin
   return resolve(root);
 }
 
-export function manifestPath(root: string): string {
+export function repositoryBootstrapPath(root: string): string {
   return resolve(root, "manifests", "repository.json");
 }
 

@@ -82,7 +82,6 @@ export async function processPublicationReservation(options: Readonly<{
   }
   if (state && state.generation !== generation) {
     const reason = `Queued generation does not match outbox state ${idempotencyKey}.`;
-    await markPublicationFailed(idempotencyKey, generation, reason, spoolRoot, now);
     await quarantinePublication(reservation.deliveryId, reservation.raw, reason, spoolRoot, now);
     await queue.deadLetter(reservation, reason, now);
     return "dead-lettered";

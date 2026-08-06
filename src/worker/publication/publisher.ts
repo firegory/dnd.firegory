@@ -20,7 +20,7 @@ import {
 import {
   assertCanonicalRevision,
   ContentIntegrityError,
-  loadActiveRepositoryManifest,
+  loadRepositoryBootstrapDescriptor,
   validateCanonicalRevisionDependencies,
 } from "../../server/content-storage/validation.ts";
 import {
@@ -83,12 +83,11 @@ export async function publishCanonicalRevision(options: Readonly<{
 }>): Promise<PublicationResult> {
   assertCanonicalRevision(options.command.revision);
   const root = await canonicalRoot(options.dataRoot);
-  const initialActive = await loadActiveRepositoryManifest(root);
-  const initialManifest = initialActive.manifest;
+  const initialBootstrap = await loadRepositoryBootstrapDescriptor(root);
   const leaseManager = options.leaseManager ?? new RedisPublicationLeaseManager();
   const leaseTtlMs = options.leaseTtlMs ?? 30_000;
-  const lease = await leaseManager.acquire(initialManifest.repositoryId, leaseTtlMs);
-  if (!lease) throw new PublicationLeaseUnavailableError(initialManifest.repositoryId);
+  const lease = await leaseManager.acquire(initialBootstrap.repositoryId, leaseTtlMs);
+  if (!lease) throw new PublicationLeaseUnavailableError(initialBootstrap.repositoryId);
 
   let leaseLost = false;
   const renewal = setInterval(() => {
@@ -98,26 +97,20 @@ export async function publishCanonicalRevision(options: Readonly<{
 
   try {
     const fenceManager = options.fenceManager ?? new PostgresPublicationFenceManager();
-    const fence = await fenceManager.acquire(initialManifest.repositoryId);
-    if (!fence) throw new PublicationFenceUnavailableError(initialManifest.repositoryId);
+    const fence = await fenceManager.acquire(initialBootstrap.repositoryId);
+    if (!fence) throw new PublicationFenceUnavailableError(initialBootstrap.repositoryId);
 
     try {
       options.hooks?.onCanonicalPhase?.(true);
       await assertLease(lease, leaseLost);
       await fence.verify();
-      const active = await loadActiveRepositoryManifest(root);
-      const manifest = active.manifest;
-      if (manifest.repositoryId !== initialManifest.repositoryId) {
+      const bootstrap = await loadRepositoryBootstrapDescriptor(root);
+      if (bootstrap.repositoryId !== initialBootstrap.repositoryId) {
         throw new ContentIntegrityError("Repository identity changed while acquiring its publication fence.");
       }
 
       const revision = options.command.revision;
       await validateCanonicalRevisionDependencies(root, revision);
-      const activeEntry = manifest.entries.find((entry) => entry.entryId === revision.entryId);
-      if (activeEntry?.revisionId === revision.revisionId) {
-        return { entryId: revision.entryId, revisionId: revision.revisionId, alreadyActive: true };
-      }
-
       const stagingFile = publicationStagingPath(root, revision.entryId, revision.revisionId);
       const revisionFile = canonicalRevisionPath(root, revision.entryId, revision.revisionId);
       const stagingDirectory = dirname(stagingFile);
@@ -159,11 +152,12 @@ export async function publishCanonicalRevision(options: Readonly<{
 
       await assertLease(lease, leaseLost);
       await options.hooks?.beforeActivationInstall?.(options.command.generation);
-      await installActivationDelta(
+      const alreadyActive = await installActivationDelta(
         root,
         {
           schemaVersion: 1,
           kind: "repositoryActivationDelta",
+          readerContractVersion: 1,
           generation: options.command.generation,
           idempotencyKey: options.command.idempotencyKey,
           targetEntryId: revision.entryId,
@@ -179,7 +173,7 @@ export async function publishCanonicalRevision(options: Readonly<{
         options.hooks?.afterActivationTemporarySynced,
       );
 
-      return { entryId: revision.entryId, revisionId: revision.revisionId, alreadyActive: false };
+      return { entryId: revision.entryId, revisionId: revision.revisionId, alreadyActive };
     } finally {
       try {
         options.hooks?.onCanonicalPhase?.(false);
@@ -260,7 +254,14 @@ async function promoteRevision(root: string, stagingFile: string, revisionFile: 
   await assertCanonicalRegularFile(root, stagingFile);
   await assertCanonicalAncestors(root, revisionFile);
   if (await regularFileExists(root, revisionFile)) {
-    if (await readFile(revisionFile, "utf8") !== contents) {
+    let existing: unknown;
+    try {
+      existing = JSON.parse(await readFile(revisionFile, "utf8"));
+      assertCanonicalRevision(existing);
+    } catch {
+      throw new ContentIntegrityError(`Immutable revision path does not contain a valid canonical revision: ${revisionFile}`);
+    }
+    if (`${canonicalJson(existing as unknown as JsonValue)}\n` !== contents) {
       throw new ContentIntegrityError(`Immutable revision path contains different bytes: ${revisionFile}`);
     }
     await rm(stagingFile);
@@ -278,7 +279,7 @@ async function installActivationDelta(
   ownerId: string,
   createdAt: number,
   afterTemporarySynced?: () => void | Promise<void>,
-): Promise<void> {
+): Promise<boolean> {
   const activationFile = activationDeltaPath(root, activation.generation);
   const temporary = activationTemporaryPath(root, activation.generation, createdAt, ownerId);
   const contents = `${JSON.stringify(activation, null, 2)}\n`;
@@ -296,10 +297,11 @@ async function installActivationDelta(
       if (await readFile(activationFile, "utf8") !== contents) {
         throw new ContentIntegrityError(`Publication generation is already bound to another activation: ${activation.generation}`);
       }
-      return;
+      return true;
     }
     await rename(temporary, activationFile);
     await syncDirectory(dirname(activationFile));
+    return false;
   } finally {
     await rm(temporary, { force: true });
   }
