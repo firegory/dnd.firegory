@@ -68,14 +68,12 @@ async function searchByEmbedding(
   embedding: readonly number[],
   params: RetrievalParams,
 ): Promise<readonly RetrievalCandidate[]> {
-  const { limit, accessSql, accessParams } = params;
+  const { limit, generationIds } = params;
+  if (generationIds.length === 0) return [];
   const safeLimit = Math.min(Math.max(1, limit), 200);
 
-  const embeddingIdx = accessParams.length + 1;
-  const limitIdx = accessParams.length + 2;
-
   const sqlParams = [
-    ...accessParams,
+    generationIds,
     `[${embedding.join(",")}]`,
     safeLimit,
   ];
@@ -84,14 +82,16 @@ async function searchByEmbedding(
     `SELECT c.id, c.source_id, c.file_id, c.text, c.quote_text,
             c.section_heading, c.page_number,
             s.title, s.category, s.edition, s.language, s.access_tier,
-            (c.embedding <=> $${embeddingIdx}::vector) AS distance
+            (c.embedding <=> $2::vector) AS distance
      FROM chunks c
+     JOIN files f ON f.id = c.file_id AND f.source_id = c.source_id
      JOIN sources s ON s.id = c.source_id
      WHERE s.deleted_at IS NULL
-       AND ${accessSql}
+       AND f.deleted_at IS NULL
+       AND c.generation_id = ANY($1::uuid[])
        AND c.embedding IS NOT NULL
-     ORDER BY c.embedding <=> $${embeddingIdx}::vector
-     LIMIT $${limitIdx}`,
+     ORDER BY c.embedding <=> $2::vector
+     LIMIT $3`,
     sqlParams,
   );
 

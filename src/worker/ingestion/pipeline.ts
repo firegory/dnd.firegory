@@ -30,12 +30,19 @@ import {
 } from "./quality-report.ts";
 import {
   markJobProcessing,
-  markJobSucceeded,
   markJobFailed,
   updateJobProgress,
   getIngestionJob,
 } from "../../server/ingestion/storage.ts";
 import { artifactsRootPath } from "../../server/ingestion/paths.ts";
+import {
+  activateGeneration,
+  ActivationStateUnknownError,
+  cleanupStaleGenerations,
+  createStagedGeneration,
+  discardStagedGeneration,
+  resetStagedGeneration,
+} from "../../server/ingestion/generations.ts";
 
 export type PipelineResult = Readonly<{
   jobId: string;
@@ -63,6 +70,7 @@ export async function runPipeline(input: {
 }): Promise<PipelineResult> {
   const { jobId, sourceId, fileId, originalPdfPath } = input;
   const artifactsRoot = artifactsRootPath(sourceId, fileId);
+  let generationId: string | null = null;
   const jobArtifactsDir = join(artifactsRoot, jobId);
 
   // Verify job exists and is in correct state
@@ -72,9 +80,22 @@ export async function runPipeline(input: {
   }
 
   // Mark as processing
-  await markJobProcessing(jobId);
+  if (!await markJobProcessing(jobId)) {
+    throw new Error(`Job ${jobId} was already claimed or is no longer queued`);
+  }
 
   try {
+    await cleanupStaleGenerations(fileId, jobId);
+    const generation = await createStagedGeneration({
+      sourceId,
+      fileId,
+      jobId,
+      artifactsRoot: jobArtifactsDir,
+    });
+    const stagedGenerationId = generation.id;
+    generationId = stagedGenerationId;
+    await resetStagedGeneration(stagedGenerationId, jobId);
+
     // === Stage 1: Validate PDF ===
     await updateJobProgress(jobId, 5);
 
@@ -229,6 +250,7 @@ export async function runPipeline(input: {
 
     const chunksWithEmbeddings: Array<{
       sourceId: string;
+      generationId: string;
       fileId: string;
       jobId: string;
       chunkIndex: number;
@@ -255,6 +277,7 @@ export async function runPipeline(input: {
         for (let i = 0; i < chunks.length; i++) {
           if (i < embeddingResults.length) {
             chunksWithEmbeddings.push({
+              generationId: stagedGenerationId,
               sourceId,
               fileId,
               jobId,
@@ -293,6 +316,7 @@ export async function runPipeline(input: {
     // === Stage 7: Persist to database ===
     // Persist pages
     const pagesToPersist = extractionResult.pages.map((page) => ({
+      generationId: stagedGenerationId,
       sourceId,
       fileId,
       jobId,
@@ -311,6 +335,7 @@ export async function runPipeline(input: {
     // Persist chunks without embeddings (if embedding failed but we still want chunks for full-text search)
     if (embeddingsSkipped > 0 && chunksWithEmbeddings.length === 0) {
       const chunkInputs = chunks.map((c) => ({
+        generationId: stagedGenerationId,
         sourceId,
         fileId,
         jobId,
@@ -361,10 +386,12 @@ export async function runPipeline(input: {
     });
 
     await saveQualityReport(qualityReport, jobArtifactsDir);
+    if (qualityReport.overall.status === "failed") {
+      throw new Error(`Ingestion quality validation failed: ${qualityReport.overall.warnings.join("; ")}`);
+    }
 
     // === Stage 9: Finalize ===
-    await updateJobProgress(jobId, 100);
-    await markJobSucceeded(jobId, artifactsRoot);
+    await activateGeneration(stagedGenerationId);
 
     return {
       jobId,
@@ -377,6 +404,16 @@ export async function runPipeline(input: {
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (generationId && !(error instanceof ActivationStateUnknownError)) {
+      try {
+        await discardStagedGeneration(generationId);
+      } catch (cleanupError) {
+        console.error(
+          `[pipeline] Failed to clean staged generation ${generationId}:`,
+          cleanupError instanceof Error ? cleanupError.message : cleanupError,
+        );
+      }
+    }
     await markJobFailed(jobId, message);
     throw error;
   }

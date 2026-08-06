@@ -74,10 +74,11 @@ type ChunkRow = Readonly<{
 
 export async function listSourceChunkPreviews(sourceId: string, limit = 5): Promise<SourceChunkPreview[]> {
   const result = await getContentMetadataDb().query<ChunkRow>(
-    `SELECT id, text, quote_text, page_number, section_heading
-     FROM chunks
-     WHERE source_id = $1
-     ORDER BY chunk_index ASC
+    `SELECT c.id, c.text, c.quote_text, c.page_number, c.section_heading
+     FROM chunks c
+     JOIN files f ON f.id = c.file_id AND f.active_generation_id = c.generation_id
+     WHERE c.source_id = $1 AND f.deleted_at IS NULL
+     ORDER BY c.chunk_index ASC
      LIMIT $2`,
     [sourceId, limit],
   );
@@ -101,18 +102,20 @@ async function getStats(sourceIds: readonly string[]): Promise<Map<string, Sourc
        WHERE deleted_at IS NULL AND source_id = ANY($1::uuid[])
        GROUP BY source_id
      ), page_counts AS (
-       SELECT source_id, count(*) AS total_pages
-       FROM pages
-       WHERE source_id = ANY($1::uuid[])
-       GROUP BY source_id
+       SELECT p.source_id, count(*) AS total_pages
+        FROM pages p
+        JOIN files f ON f.id = p.file_id AND f.active_generation_id = p.generation_id
+        WHERE p.source_id = ANY($1::uuid[]) AND f.deleted_at IS NULL
+        GROUP BY p.source_id
      ), chunk_counts AS (
-       SELECT source_id,
+       SELECT c.source_id,
               count(*) AS total_chunks,
-              count(*) FILTER (WHERE embedding IS NOT NULL) AS embeddings_generated,
-              count(*) FILTER (WHERE embedding IS NULL) AS embeddings_skipped
-       FROM chunks
-       WHERE source_id = ANY($1::uuid[])
-       GROUP BY source_id
+              count(*) FILTER (WHERE c.embedding IS NOT NULL) AS embeddings_generated,
+              count(*) FILTER (WHERE c.embedding IS NULL) AS embeddings_skipped
+        FROM chunks c
+        JOIN files f ON f.id = c.file_id AND f.active_generation_id = c.generation_id
+        WHERE c.source_id = ANY($1::uuid[]) AND f.deleted_at IS NULL
+        GROUP BY c.source_id
      ), latest_jobs AS (
        SELECT DISTINCT ON (source_id)
               source_id,

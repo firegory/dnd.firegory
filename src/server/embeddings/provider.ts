@@ -371,6 +371,7 @@ export async function generateEmbeddings(
  */
 export async function persistChunksWithEmbeddings(
   chunks: readonly Readonly<{
+    generationId: string;
     sourceId: string;
     fileId: string;
     jobId: string;
@@ -400,11 +401,12 @@ export async function persistChunksWithEmbeddings(
 
     for (let j = 0; j < batch.length; j++) {
       const chunk = batch[j];
-      const base = j * 13;
+      const base = j * 14;
       valueGroups.push(
-        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, NULL, $${base + 11}::vector, $${base + 12}, $${base + 13}::jsonb)`,
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, NULL, $${base + 12}::vector, $${base + 13}, $${base + 14}::jsonb)`,
       );
       params.push(
+        chunk.generationId,
         chunk.sourceId,
         chunk.fileId,
         chunk.jobId,
@@ -422,12 +424,12 @@ export async function persistChunksWithEmbeddings(
     }
 
     const sql = `INSERT INTO chunks (
-          source_id, file_id, ingestion_job_id, chunk_index,
+          generation_id, source_id, file_id, ingestion_job_id, chunk_index,
           text, quote_text, section_heading, page_number,
           text_span_start, text_span_end,
           token_count, embedding, embedding_model, bbox
         ) VALUES ${valueGroups.join(", ")}
-        ON CONFLICT (file_id, chunk_index) DO UPDATE SET
+        ON CONFLICT (generation_id, chunk_index) DO UPDATE SET
           source_id = EXCLUDED.source_id,
           ingestion_job_id = EXCLUDED.ingestion_job_id,
           text = EXCLUDED.text,
@@ -455,6 +457,7 @@ export async function persistChunksWithEmbeddings(
  */
 export async function persistChunksWithoutEmbeddings(
   chunks: readonly Readonly<{
+    generationId: string;
     sourceId: string;
     fileId: string;
     jobId: string;
@@ -481,11 +484,12 @@ export async function persistChunksWithoutEmbeddings(
 
     for (let j = 0; j < batch.length; j++) {
       const chunk = batch[j];
-      const base = j * 11;
+      const base = j * 12;
       valueGroups.push(
-        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}::jsonb)`,
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}::jsonb)`,
       );
       params.push(
+        chunk.generationId,
         chunk.sourceId,
         chunk.fileId,
         chunk.jobId,
@@ -501,11 +505,11 @@ export async function persistChunksWithoutEmbeddings(
     }
 
     const sql = `INSERT INTO chunks (
-          source_id, file_id, ingestion_job_id, chunk_index,
+          generation_id, source_id, file_id, ingestion_job_id, chunk_index,
           text, quote_text, section_heading, page_number,
           text_span_start, text_span_end, bbox
         ) VALUES ${valueGroups.join(", ")}
-        ON CONFLICT (file_id, chunk_index) DO UPDATE SET
+        ON CONFLICT (generation_id, chunk_index) DO UPDATE SET
           source_id = EXCLUDED.source_id,
           ingestion_job_id = EXCLUDED.ingestion_job_id,
           text = EXCLUDED.text,
@@ -528,6 +532,7 @@ export async function persistChunksWithoutEmbeddings(
  */
 export async function persistPages(
   pages: readonly Readonly<{
+    generationId: string;
     sourceId: string;
     fileId: string;
     jobId: string;
@@ -549,11 +554,12 @@ export async function persistPages(
 
     for (let j = 0; j < batch.length; j++) {
       const page = batch[j];
-      const base = j * 6;
+      const base = j * 7;
       valueGroups.push(
-        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`,
+        `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`,
       );
       params.push(
+        page.generationId,
         page.sourceId,
         page.fileId,
         page.jobId,
@@ -564,10 +570,10 @@ export async function persistPages(
     }
 
     const sql = `INSERT INTO pages (
-        source_id, file_id, ingestion_job_id,
+        generation_id, source_id, file_id, ingestion_job_id,
         page_number, section_heading, text
       ) VALUES ${valueGroups.join(", ")}
-      ON CONFLICT (file_id, page_number) DO UPDATE SET
+      ON CONFLICT (generation_id, page_number) DO UPDATE SET
         source_id = EXCLUDED.source_id,
         ingestion_job_id = EXCLUDED.ingestion_job_id,
         section_heading = EXCLUDED.section_heading,
