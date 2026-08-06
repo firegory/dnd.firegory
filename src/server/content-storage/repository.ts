@@ -98,6 +98,18 @@ export function publicationStagingPath(root: string, entryId: string, revisionId
   return resolve(root, ".publication-staging", entryId, `${revisionId}.json`);
 }
 
+export function publicationStagingTemporaryPath(
+  root: string,
+  entryId: string,
+  revisionId: string,
+  temporaryId: string,
+): string {
+  assertStableId(entryId, "entryId");
+  assertRevisionId(revisionId);
+  assertStableId(temporaryId, "temporaryId");
+  return resolve(root, ".publication-staging", entryId, `.${revisionId}.${temporaryId}.tmp`);
+}
+
 export function publicationManifestTemporaryPath(root: string, ownerId: string): string {
   assertStableId(ownerId, "ownerId");
   return resolve(root, "manifests", `.repository-${ownerId}.tmp`);
@@ -105,7 +117,17 @@ export function publicationManifestTemporaryPath(root: string, ownerId: string):
 
 export function publicationSpoolPath(root: string, idempotencyKey: string): string {
   assertStableId(idempotencyKey, "idempotencyKey");
-  return resolve(root, `${idempotencyKey}.json`);
+  return resolve(root, "commands", `${idempotencyKey}.json`);
+}
+
+export function publicationOutboxStatePath(root: string, idempotencyKey: string): string {
+  assertStableId(idempotencyKey, "idempotencyKey");
+  return resolve(root, "state", `${idempotencyKey}.json`);
+}
+
+export function publicationQuarantinePath(root: string, deliveryId: string): string {
+  assertStableId(deliveryId, "deliveryId");
+  return resolve(root, "quarantine", `${deliveryId}.json`);
 }
 
 export function generationPath(root: string, generationId: string): string {
