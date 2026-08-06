@@ -26,3 +26,14 @@ COPY . .
 
 EXPOSE 3000
 CMD ["npm", "run", "dev", "--", "--hostname", "0.0.0.0"]
+
+FROM dev AS agent-gateway
+
+ENV AGENT_GATEWAY_HOST=0.0.0.0
+EXPOSE 8787
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD ["npm", "run", "agent-healthcheck"]
+CMD ["npm", "run", "agent-gateway"]
+
+# Preserve the application image as the default build target. Select the
+# standalone gateway explicitly with --target agent-gateway.
+FROM dev AS app
