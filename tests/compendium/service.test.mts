@@ -57,6 +57,10 @@ test("draft validator rejects normalized slug/alias conflicts", () => {
     () => validateDraft({ ...draft, aliases: ["Magic Missile"] }),
     /conflict after normalization/,
   );
+  assert.throws(
+    () => validateDraft({ ...draft, slug: "cafe", aliases: ["caf\u00e9", "cafe\u0301"] }),
+    /conflict after normalization/,
+  );
 });
 
 test("projection validators enforce ranges and matching types", () => {
@@ -78,8 +82,25 @@ test("citation validator uses half-open spans and exact quote snapshots", () => 
   const citation = draft.citations![0];
   validateCitation(citation, "Three glowing darts strike.");
   assert.throws(() => validateCitation(citation, "Three burning darts strike."), /exactly match/);
-  assert.throws(() => validateCitation({ ...citation, quoteSpanEnd: 18 }), /length must equal/);
+  assert.throws(() => validateCitation({ ...citation, quoteSpanEnd: 18 }), /code-point length must equal/);
   assert.throws(() => validateCitation({ ...citation, kind: "block", fieldPath: "$.body" }), /cannot have fieldPath/);
+  validateCitation({ ...citation, quote: "glowing \ud83c\udfaf", quoteSpanStart: 2, quoteSpanEnd: 11 }, "\ud83d\udca5 glowing \ud83c\udfaf now");
+  assert.throws(
+    () => validateCitation({ ...citation, quote: "glowing \ud83c\udfaf", quoteSpanStart: 3, quoteSpanEnd: 12 }, "\ud83d\udca5 glowing \ud83c\udfaf now"),
+    /exactly match/,
+  );
+});
+
+test("projection numeric validators match PostgreSQL precision and integer bounds", () => {
+  const creature = { type: "creature", size: "medium", creatureType: "beast", armorClass: 12, hitPoints: 10, challengeRating: 0.125, speed: "30 ft." } as const;
+  assert.doesNotThrow(() => validateDraft({ ...draft, entryType: "creature", projection: creature }));
+  assert.throws(() => validateDraft({ ...draft, entryType: "creature", projection: { ...creature, challengeRating: 0.13 } }), /challengeRating/);
+  assert.throws(() => validateDraft({ ...draft, entryType: "creature", projection: { ...creature, hitPoints: 2147483648 } }), /2147483647/);
+  const equipment = { type: "equipment", category: "tool", costCp: 2147483647, weightLb: 9999999.999 } as const;
+  assert.doesNotThrow(() => validateDraft({ ...draft, entryType: "equipment", projection: equipment }));
+  assert.throws(() => validateDraft({ ...draft, entryType: "equipment", projection: { ...equipment, costCp: 2147483648 } }), /2147483647/);
+  assert.throws(() => validateDraft({ ...draft, entryType: "equipment", projection: { ...equipment, weightLb: 1.0001 } }), /at most 3 decimal places/);
+  assert.throws(() => validateDraft({ ...draft, entryType: "equipment", projection: { ...equipment, weightLb: 10000000 } }), /9999999\.999/);
 });
 
 test("createDraft rejects a source/file corpus boundary mismatch before writes", async () => {
@@ -97,10 +118,10 @@ test("createDraft writes all records transactionally and validates chunk ownersh
     async query(sql: string) {
       statements.push(sql);
       if (sql.includes("FROM files f JOIN sources")) return { rows: [{ source_id: ids.source, edition: "5.5e", language: "en" }] } as never;
-      if (sql.includes("WITH inserted AS")) return { rows: [{ id: ids.entry }] } as never;
-      if (sql.includes("INSERT INTO compendium_versions")) return { rows: [{ id: ids.version }] } as never;
+      if (sql.includes("INSERT INTO compendium_entries")) return { rows: [{ id: ids.entry }] } as never;
+      if (sql.includes("INSERT INTO compendium_versions")) return { rows: [{ id: ids.version, active_revision_id: ids.revision }] } as never;
       if (sql.includes("INSERT INTO compendium_revisions")) return { rows: [{ id: ids.revision }] } as never;
-      if (sql.includes("SELECT quote_text FROM chunks")) return { rows: [{ quote_text: "Three glowing darts strike." }] } as never;
+      if (sql.includes("SELECT c.quote_text")) return { rows: [{ quote_text: "Three glowing darts strike.", generation_status: "active" }] } as never;
       return { rows: [], rowCount: 1 } as never;
     },
   }));
@@ -108,6 +129,12 @@ test("createDraft writes all records transactionally and validates chunk ownersh
   assert.equal(statements.filter((sql) => sql.includes("INSERT INTO compendium_names")).length, 2);
   assert.ok(statements.some((sql) => sql.includes("INSERT INTO compendium_spells")));
   assert.ok(statements.some((sql) => sql.includes("INSERT INTO compendium_citations")));
+  assert.ok(statements.some((sql) => sql.includes("g.status IN ('active', 'archived')") && sql.includes("FOR SHARE OF c, g")));
+  const entryStatement = statements.find((sql) => sql.includes("INSERT INTO compendium_entries"))!;
+  assert.match(entryStatement, /ON CONFLICT[\s\S]*DO UPDATE[\s\S]*RETURNING id/);
+  assert.doesNotMatch(entryStatement, /DO NOTHING/);
+  assert.ok(statements.some((sql) => /active_revision_id\)[\s\S]*gen_random_uuid/.test(sql)));
+  assert.ok(statements.some((sql) => /INSERT INTO compendium_revisions[\s\S]*\(id, version_id/.test(sql)));
 });
 
 test("createDraft rejects a citation from another source instead of inserting it", async () => {
@@ -116,10 +143,10 @@ test("createDraft rejects a citation from another source instead of inserting it
     async query(sql: string) {
       statements.push(sql);
       if (sql.includes("FROM files f JOIN sources")) return { rows: [{ source_id: ids.source, edition: "5.5e", language: "en" }] } as never;
-      if (sql.includes("WITH inserted AS")) return { rows: [{ id: ids.entry }] } as never;
-      if (sql.includes("INSERT INTO compendium_versions")) return { rows: [{ id: ids.version }] } as never;
+      if (sql.includes("INSERT INTO compendium_entries")) return { rows: [{ id: ids.entry }] } as never;
+      if (sql.includes("INSERT INTO compendium_versions")) return { rows: [{ id: ids.version, active_revision_id: ids.revision }] } as never;
       if (sql.includes("INSERT INTO compendium_revisions")) return { rows: [{ id: ids.revision }] } as never;
-      if (sql.includes("SELECT quote_text FROM chunks")) return { rows: [] } as never;
+      if (sql.includes("SELECT c.quote_text")) return { rows: [] } as never;
       return { rows: [] } as never;
     },
   }));
@@ -133,13 +160,44 @@ test("publishing locks ownership and transitions revision before active pointer"
     async query(sql: string) {
       statements.push(sql);
       if (sql.includes("SELECT v.lifecycle")) return { rows: [{ version_lifecycle: "draft", revision_lifecycle: "draft" }] } as never;
+      if (sql.includes("SELECT g.status")) return { rows: [{ status: "archived" }] } as never;
       return { rows: [], rowCount: 1 } as never;
     },
   }));
   await service.publishRevision(ids.version, ids.revision);
   assert.match(statements[0], /FOR UPDATE OF v, r/);
-  assert.match(statements[1], /UPDATE compendium_revisions SET lifecycle = 'published'/);
-  assert.match(statements[2], /active_revision_id = \$2/);
+  assert.match(statements[1], /FOR SHARE OF g/);
+  assert.match(statements[2], /UPDATE compendium_revisions SET lifecycle = 'published'/);
+  assert.match(statements[3], /active_revision_id = \$2/);
+});
+
+test("publishing rejects and transactionally locks staged citation generations", async () => {
+  const service = new CompendiumService(async (callback) => callback({
+    async query(sql: string) {
+      if (sql.includes("SELECT v.lifecycle")) return { rows: [{ version_lifecycle: "draft", revision_lifecycle: "draft" }] } as never;
+      if (sql.includes("SELECT g.status")) return { rows: [{ status: "staged" }] } as never;
+      return { rows: [] } as never;
+    },
+  }));
+  await assert.rejects(service.publishRevision(ids.version, ids.revision), /active or archived generations/);
+});
+
+test("new revisions replace draft active content instead of mutating children", async () => {
+  const statements: string[] = [];
+  const service = new CompendiumService(async (callback) => callback({
+    async query(sql: string) {
+      statements.push(sql);
+      if (sql.includes("FROM compendium_versions WHERE")) return { rows: [{ entry_type: "spell", lifecycle: "draft", source_id: ids.source, file_id: ids.file }] } as never;
+      if (sql.includes("coalesce(max(revision_number)")) return { rows: [{ revision_number: 2 }] } as never;
+      if (sql.includes("INSERT INTO compendium_revisions")) return { rows: [{ id: ids.target }] } as never;
+      return { rows: [], rowCount: 1 } as never;
+    },
+  }));
+  const revisionId = await service.createRevision(ids.version, { title: draft.title, body: draft.body, projection: draft.projection });
+  assert.equal(revisionId, ids.target);
+  assert.ok(statements.some((sql) => sql.includes("INSERT INTO compendium_spells")));
+  assert.ok(statements.some((sql) => sql.includes("UPDATE compendium_versions SET active_revision_id")));
+  assert.ok(!statements.some((sql) => /^UPDATE compendium_(?:spells|citations)/.test(sql)));
 });
 
 test("relations reject cross-edition targets", async () => {

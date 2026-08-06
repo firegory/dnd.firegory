@@ -55,6 +55,15 @@ export type CreateCompendiumDraftInput = Readonly<{
   citations?: readonly CitationInput[];
 }>;
 
+export type CreateCompendiumRevisionInput = Readonly<{
+  title: string;
+  summary?: string | null;
+  body: string;
+  extensionData?: ExtensionData;
+  projection: ProjectionInput;
+  citations?: readonly CitationInput[];
+}>;
+
 export type CreatedCompendiumDraft = Readonly<{ entryId: string; versionId: string; revisionId: string }>;
 
 export class CompendiumValidationError extends Error {
@@ -87,30 +96,28 @@ export class CompendiumService {
       }
 
       const entry = await client.query<{ id: string }>(
-        `WITH inserted AS (
-           INSERT INTO compendium_entries (canonical_key, entry_type, edition)
-           VALUES ($1, $2, $3) ON CONFLICT (entry_type, edition, canonical_key) DO NOTHING
-           RETURNING id
-         )
-         SELECT id FROM inserted
-         UNION ALL
-         SELECT id FROM compendium_entries WHERE canonical_key = $1 AND entry_type = $2 AND edition = $3
-         LIMIT 1`,
+        `INSERT INTO compendium_entries (canonical_key, entry_type, edition)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (entry_type, edition, canonical_key)
+         DO UPDATE SET canonical_key = EXCLUDED.canonical_key
+         RETURNING id`,
         [input.canonicalKey, input.entryType, input.edition],
       );
       const entryId = requiredRow(entry.rows[0], "Unable to create or resolve compendium entry.").id;
-      const version = await client.query<{ id: string }>(
+      const version = await client.query<{ id: string; active_revision_id: string }>(
         `INSERT INTO compendium_versions
-           (entry_id, entry_type, edition, language, source_id, file_id, lifecycle)
-         VALUES ($1, $2, $3, $4, $5, $6, 'draft') RETURNING id`,
+           (entry_id, entry_type, edition, language, source_id, file_id, lifecycle, active_revision_id)
+         VALUES ($1, $2, $3, $4, $5, $6, 'draft', gen_random_uuid())
+         RETURNING id, active_revision_id`,
         [entryId, input.entryType, input.edition, input.language, input.sourceId, input.fileId],
       );
-      const versionId = requiredRow(version.rows[0], "Unable to create compendium version.").id;
+      const versionRow = requiredRow(version.rows[0], "Unable to create compendium version.");
+      const versionId = versionRow.id;
       const revision = await client.query<{ id: string }>(
         `INSERT INTO compendium_revisions
-           (version_id, entry_type, revision_number, lifecycle, title, summary, body, extension_data)
-         VALUES ($1, $2, 1, 'draft', $3, $4, $5, $6::jsonb) RETURNING id`,
-        [versionId, input.entryType, input.title.trim(), input.summary?.trim() || null, input.body, json(input.extensionData)],
+           (id, version_id, entry_type, revision_number, lifecycle, title, summary, body, extension_data)
+         VALUES ($1, $2, $3, 1, 'draft', $4, $5, $6, $7::jsonb) RETURNING id`,
+        [versionRow.active_revision_id, versionId, input.entryType, input.title.trim(), input.summary?.trim() || null, input.body, json(input.extensionData)],
       );
       const revisionId = requiredRow(revision.rows[0], "Unable to create compendium revision.").id;
 
@@ -144,6 +151,16 @@ export class CompendiumService {
       const state = result.rows[0];
       if (!state) throw new CompendiumValidationError("Revision does not belong to the requested version.");
       if (state.version_lifecycle === "retired") throw new CompendiumValidationError("A retired version cannot be published.");
+      const generationStates = await client.query<{ status: string }>(
+        `SELECT g.status FROM compendium_citations c
+         JOIN ingestion_generations g ON g.id = c.generation_id
+         WHERE c.revision_id = $1
+         FOR SHARE OF g`,
+        [revisionId],
+      );
+      if (generationStates.rows.some(({ status }) => status !== "active" && status !== "archived")) {
+        throw new CompendiumValidationError("Revision citations must remain in active or archived generations.");
+      }
       if (state.revision_lifecycle === "draft") {
         await client.query(
           `UPDATE compendium_revisions SET lifecycle = 'published', published_at = now()
@@ -159,6 +176,50 @@ export class CompendiumService {
          WHERE id = $1`,
         [versionId, revisionId],
       );
+    });
+  }
+
+  async createRevision(versionId: string, input: CreateCompendiumRevisionInput): Promise<string> {
+    requireUuid(versionId, "versionId");
+    validateRevision(input);
+    return this.transaction(async (client) => {
+      const version = await client.query<{
+        entry_type: CompendiumEntryType;
+        lifecycle: string;
+        source_id: string;
+        file_id: string;
+      }>(
+        `SELECT entry_type, lifecycle, source_id, file_id
+         FROM compendium_versions WHERE id = $1 FOR UPDATE`,
+        [versionId],
+      );
+      const owner = requiredRow(version.rows[0], "Compendium version was not found.");
+      if (owner.lifecycle === "retired") throw new CompendiumValidationError("A retired version cannot receive revisions.");
+      if (input.projection.type !== owner.entry_type) throw new CompendiumValidationError("Projection type must match the version entry type.");
+      const sequence = await client.query<{ revision_number: number }>(
+        `SELECT coalesce(max(revision_number), 0) + 1 AS revision_number
+         FROM compendium_revisions WHERE version_id = $1`,
+        [versionId],
+      );
+      const revisionNumber = requiredRow(sequence.rows[0], "Unable to allocate revision number.").revision_number;
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO compendium_revisions
+           (version_id, entry_type, revision_number, lifecycle, title, summary, body, extension_data)
+         VALUES ($1, $2, $3, 'draft', $4, $5, $6, $7::jsonb) RETURNING id`,
+        [versionId, owner.entry_type, revisionNumber, input.title.trim(), input.summary?.trim() || null, input.body, json(input.extensionData)],
+      );
+      const revisionId = requiredRow(inserted.rows[0], "Unable to create compendium revision.").id;
+      await insertProjection(client, revisionId, input.projection);
+      for (const citation of input.citations ?? []) {
+        await insertCitation(client, revisionId, versionId, owner.source_id, owner.file_id, citation);
+      }
+      if (owner.lifecycle === "draft") {
+        await client.query(
+          "UPDATE compendium_versions SET active_revision_id = $2 WHERE id = $1 AND lifecycle = 'draft'",
+          [versionId, revisionId],
+        );
+      }
+      return revisionId;
     });
   }
 
@@ -196,12 +257,10 @@ export function validateDraft(input: CreateCompendiumDraftInput): void {
   enumValue(input.language, ["en", "ru"], "language");
   if (!/^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/.test(input.canonicalKey)) throw new CompendiumValidationError("canonicalKey must be a stable lowercase key.");
   if (!/^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/.test(input.slug)) throw new CompendiumValidationError("slug must be a stable lowercase slug.");
-  if (!input.title?.trim() || !input.body?.trim()) throw new CompendiumValidationError("title and body are required.");
   requireUuid(input.sourceId, "sourceId");
   requireUuid(input.fileId, "fileId");
-  validateObject(input.extensionData, "extensionData");
   if (input.projection.type !== input.entryType) throw new CompendiumValidationError("Projection type must match entry type.");
-  validateProjection(input.projection);
+  validateRevision(input);
   const normalized = new Set<string>();
   for (const name of [input.slug, ...(input.aliases ?? [])]) {
     const key = normalizeName(name);
@@ -209,18 +268,25 @@ export function validateDraft(input: CreateCompendiumDraftInput): void {
     if (normalized.has(key)) throw new CompendiumValidationError("Slug and aliases conflict after normalization.");
     normalized.add(key);
   }
+}
+
+function validateRevision(input: CreateCompendiumRevisionInput): void {
+  if (!input.title?.trim() || !input.body?.trim()) throw new CompendiumValidationError("title and body are required.");
+  validateObject(input.extensionData, "extensionData");
+  validateProjection(input.projection);
   for (const citation of input.citations ?? []) validateCitation(citation);
 }
 
 export function validateCitation(citation: CitationInput, chunkQuote?: string): void {
   requireUuid(citation.chunkId, "citation.chunkId");
   requireUuid(citation.generationId, "citation.generationId");
-  if (!Number.isSafeInteger(citation.blockOrder) || citation.blockOrder < 0) throw new CompendiumValidationError("Citation blockOrder must be nonnegative.");
+  if (!Number.isSafeInteger(citation.blockOrder) || citation.blockOrder < 0 || citation.blockOrder > 2147483647) throw new CompendiumValidationError("Citation blockOrder must fit a nonnegative PostgreSQL integer.");
   if (citation.kind === "field" && !/^\$(\.[A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\])*$/.test(citation.fieldPath ?? "")) throw new CompendiumValidationError("Field citations require a JSON-style fieldPath.");
   if (citation.kind === "block" && citation.fieldPath != null) throw new CompendiumValidationError("Block citations cannot have fieldPath.");
   if (!Number.isSafeInteger(citation.quoteSpanStart) || !Number.isSafeInteger(citation.quoteSpanEnd) || citation.quoteSpanStart < 0 || citation.quoteSpanEnd <= citation.quoteSpanStart) throw new CompendiumValidationError("Citation spans must be positive half-open offsets.");
-  if (!citation.quote || citation.quote.length !== citation.quoteSpanEnd - citation.quoteSpanStart) throw new CompendiumValidationError("Citation quote length must equal its span.");
-  if (chunkQuote !== undefined && chunkQuote.slice(citation.quoteSpanStart, citation.quoteSpanEnd) !== citation.quote) throw new CompendiumValidationError("Citation quote must exactly match chunk quote_text at its span.");
+  const quoteCodePoints = Array.from(citation.quote);
+  if (quoteCodePoints.length === 0 || quoteCodePoints.length !== citation.quoteSpanEnd - citation.quoteSpanStart) throw new CompendiumValidationError("Citation quote code-point length must equal its span.");
+  if (chunkQuote !== undefined && Array.from(chunkQuote).slice(citation.quoteSpanStart, citation.quoteSpanEnd).join("") !== citation.quote) throw new CompendiumValidationError("Citation quote must exactly match chunk quote_text at its code-point span.");
 }
 
 function validateProjection(projection: ProjectionInput): void {
@@ -232,21 +298,25 @@ function validateProjection(projection: ProjectionInput): void {
       requireText(projection.castingTime, "spell.castingTime"); requireText(projection.range, "spell.range"); requireText(projection.duration, "spell.duration"); requireText(projection.components, "spell.components"); return;
     case "creature":
       enumValue(projection.size, ["tiny", "small", "medium", "large", "huge", "gargantuan"], "creature.size");
-      integerRange(projection.armorClass, 0, 50, "creature.armorClass"); integerRange(projection.hitPoints, 1, Number.MAX_SAFE_INTEGER, "creature.hitPoints"); numberRange(projection.challengeRating, 0, 30, "creature.challengeRating"); requireText(projection.creatureType, "creature.creatureType"); requireText(projection.speed, "creature.speed"); return;
+      integerRange(projection.armorClass, 0, 50, "creature.armorClass"); integerRange(projection.hitPoints, 1, 2147483647, "creature.hitPoints"); challengeRating(projection.challengeRating); requireText(projection.creatureType, "creature.creatureType"); requireText(projection.speed, "creature.speed"); return;
     case "class": if (![6, 8, 10, 12].includes(projection.hitDie)) throw new CompendiumValidationError("class.hitDie must be d6, d8, d10, or d12."); requireText(projection.primaryAbility, "class.primaryAbility"); return;
     case "feature": integerRange(projection.level, 1, 20, "feature.level"); requireText(projection.featureKind, "feature.featureKind"); return;
-    case "species": enumValue(projection.size, ["tiny", "small", "medium", "large", "huge", "gargantuan"], "species.size"); integerRange(projection.speed, 1, Number.MAX_SAFE_INTEGER, "species.speed"); return;
+    case "species": enumValue(projection.size, ["tiny", "small", "medium", "large", "huge", "gargantuan"], "species.size"); integerRange(projection.speed, 1, 2147483647, "species.speed"); return;
     case "background": requireText(projection.abilityScores, "background.abilityScores"); requireText(projection.skillProficiencies, "background.skillProficiencies"); return;
     case "feat": enumValue(projection.category, ["origin", "general", "fighting_style", "epic_boon"], "feat.category"); if (projection.prerequisiteLevel != null) integerRange(projection.prerequisiteLevel, 1, 20, "feat.prerequisiteLevel"); return;
-    case "equipment": enumValue(projection.category, ["adventuring_gear", "ammunition", "armor", "focus", "mount", "tool", "vehicle", "weapon", "other"], "equipment.category"); if (projection.costCp != null) integerRange(projection.costCp, 0, Number.MAX_SAFE_INTEGER, "equipment.costCp"); if (projection.weightLb != null) numberRange(projection.weightLb, 0, Number.MAX_SAFE_INTEGER, "equipment.weightLb"); return;
+    case "equipment": enumValue(projection.category, ["adventuring_gear", "ammunition", "armor", "focus", "mount", "tool", "vehicle", "weapon", "other"], "equipment.category"); if (projection.costCp != null) integerRange(projection.costCp, 0, 2147483647, "equipment.costCp"); if (projection.weightLb != null) decimalRange(projection.weightLb, 0, 9999999.999, 3, "equipment.weightLb"); return;
     case "item": enumValue(projection.category, ["armor", "potion", "ring", "rod", "scroll", "staff", "wand", "weapon", "wondrous", "other"], "item.category"); enumValue(projection.rarity, ["common", "uncommon", "rare", "very_rare", "legendary", "artifact", "varies"], "item.rarity"); return;
   }
 }
 
 async function insertCitation(client: DbClient, revisionId: string, versionId: string, sourceId: string, fileId: string, citation: CitationInput): Promise<void> {
-  const chunk = await client.query<{ quote_text: string }>(
-    `SELECT quote_text FROM chunks
-     WHERE id = $1 AND generation_id = $2 AND file_id = $3 AND source_id = $4`,
+  const chunk = await client.query<{ quote_text: string; generation_status: string }>(
+    `SELECT c.quote_text, g.status AS generation_status FROM chunks c
+     JOIN ingestion_generations g
+       ON g.id = c.generation_id AND g.file_id = c.file_id AND g.source_id = c.source_id
+     WHERE c.id = $1 AND c.generation_id = $2 AND c.file_id = $3 AND c.source_id = $4
+       AND g.status IN ('active', 'archived')
+     FOR SHARE OF c, g`,
     [citation.chunkId, citation.generationId, fileId, sourceId],
   );
   if (!chunk.rows[0]) throw new CompendiumValidationError("Citation chunk is outside the version source/file boundary.");
@@ -275,11 +345,13 @@ async function insertProjection(client: DbClient, revisionId: string, projection
   }
 }
 
-function normalizeName(value: string): string { return typeof value === "string" ? value.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/g, "") : ""; }
+function normalizeName(value: string): string { return typeof value === "string" ? value.normalize("NFC").trim().toLowerCase().replace(/[\s._,/:;!?()-]+/gu, "-").replace(/^-|-$/g, "") : ""; }
 function requireUuid(value: string, field: string): void { if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw new CompendiumValidationError(`${field} must be a UUID.`); }
 function requireText(value: string, field: string): void { if (typeof value !== "string" || !value.trim()) throw new CompendiumValidationError(`${field} is required.`); }
 function integerRange(value: number, min: number, max: number, field: string): void { if (!Number.isSafeInteger(value) || value < min || value > max) throw new CompendiumValidationError(`${field} must be an integer between ${min} and ${max}.`); }
 function numberRange(value: number, min: number, max: number, field: string): void { if (!Number.isFinite(value) || value < min || value > max) throw new CompendiumValidationError(`${field} must be between ${min} and ${max}.`); }
+function decimalRange(value: number, min: number, max: number, scale: number, field: string): void { numberRange(value, min, max, field); if (!Number.isInteger(value * 10 ** scale)) throw new CompendiumValidationError(`${field} supports at most ${scale} decimal places.`); }
+function challengeRating(value: number): void { if (![0, 0.125, 0.25, 0.5].includes(value) && (!Number.isInteger(value) || value < 1 || value > 30)) throw new CompendiumValidationError("creature.challengeRating must be 0, 1/8, 1/4, 1/2, or an integer from 1 to 30."); }
 function validateObject(value: ExtensionData | undefined, field: string): void { if (value !== undefined && (value === null || Array.isArray(value) || typeof value !== "object")) throw new CompendiumValidationError(`${field} must be an object.`); }
 function enumValue(value: string, allowed: readonly string[], field: string): void { if (!allowed.includes(value)) throw new CompendiumValidationError(`${field} must be one of: ${allowed.join(", ")}.`); }
 function json(value: ExtensionData | undefined): string { return JSON.stringify(value ?? {}); }

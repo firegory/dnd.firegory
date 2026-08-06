@@ -34,6 +34,12 @@ DO $$ BEGIN CREATE TYPE equipment_category AS ENUM (
   'adventuring_gear', 'ammunition', 'armor', 'focus', 'mount', 'tool', 'vehicle', 'weapon', 'other'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+DO $$ BEGIN
+  IF current_setting('server_encoding') <> 'UTF8' THEN
+    RAISE EXCEPTION 'compendium name normalization requires UTF8 server_encoding';
+  END IF;
+END $$;
+
 -- Composite candidate keys let every downstream FK prove corpus ownership.
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sources_id_edition_language_unique') THEN
@@ -68,7 +74,7 @@ CREATE TABLE IF NOT EXISTS compendium_versions (
   source_id uuid NOT NULL,
   file_id uuid NOT NULL,
   lifecycle compendium_version_lifecycle NOT NULL DEFAULT 'draft',
-  active_revision_id uuid,
+  active_revision_id uuid NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   published_at timestamptz,
   retired_at timestamptz,
@@ -79,7 +85,7 @@ CREATE TABLE IF NOT EXISTS compendium_versions (
   CONSTRAINT compendium_versions_file_source_fk FOREIGN KEY (file_id, source_id)
     REFERENCES files(id, source_id),
   CONSTRAINT compendium_versions_active_policy CHECK (
-    (lifecycle = 'draft' AND active_revision_id IS NULL AND published_at IS NULL AND retired_at IS NULL)
+    (lifecycle = 'draft' AND published_at IS NULL AND retired_at IS NULL)
     OR (lifecycle = 'published' AND active_revision_id IS NOT NULL AND published_at IS NOT NULL AND retired_at IS NULL)
     OR (lifecycle = 'retired' AND active_revision_id IS NOT NULL AND published_at IS NOT NULL AND retired_at IS NOT NULL)
   ),
@@ -87,6 +93,7 @@ CREATE TABLE IF NOT EXISTS compendium_versions (
   CONSTRAINT compendium_versions_id_entry_type_unique UNIQUE (id, entry_type),
   CONSTRAINT compendium_versions_id_entry_unique UNIQUE (id, entry_id),
   CONSTRAINT compendium_versions_id_source_file_unique UNIQUE (id, source_id, file_id),
+  CONSTRAINT compendium_versions_import_owner_unique UNIQUE (id, entry_id, source_id, file_id),
   CONSTRAINT compendium_versions_name_owner_unique UNIQUE (id, entry_id, entry_type, edition, language)
 );
 
@@ -103,7 +110,7 @@ CREATE TABLE IF NOT EXISTS compendium_revisions (
   created_at timestamptz NOT NULL DEFAULT now(),
   published_at timestamptz,
   CONSTRAINT compendium_revisions_version_type_fk FOREIGN KEY (version_id, entry_type)
-    REFERENCES compendium_versions(id, entry_type),
+    REFERENCES compendium_versions(id, entry_type) DEFERRABLE INITIALLY DEFERRED,
   CONSTRAINT compendium_revisions_number_positive CHECK (revision_number > 0),
   CONSTRAINT compendium_revisions_text_not_blank CHECK (btrim(title) <> '' AND btrim(body) <> ''),
   CONSTRAINT compendium_revisions_extension_object CHECK (jsonb_typeof(extension_data) = 'object'),
@@ -127,7 +134,7 @@ END $$;
 
 CREATE OR REPLACE FUNCTION compendium_normalize_name(value text) RETURNS text
 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
-  SELECT trim(BOTH '-' FROM regexp_replace(lower(btrim(value)), '[^[:alnum:]]+', '-', 'g'))
+  SELECT trim(BOTH '-' FROM regexp_replace(lower(btrim(normalize(value, NFC))), '[-_[:space:].,/:;!?()]+', '-', 'g'))
 $$;
 
 -- Slugs and aliases intentionally share one registry and one conflict scope:
@@ -170,7 +177,8 @@ CREATE TABLE IF NOT EXISTS compendium_entry_relations (
   CONSTRAINT compendium_relations_target_edition_fk FOREIGN KEY (target_entry_id, edition)
     REFERENCES compendium_entries(id, edition) ON DELETE CASCADE,
   CONSTRAINT compendium_relations_not_self CHECK (source_entry_id <> target_entry_id),
-  CONSTRAINT compendium_relations_unique UNIQUE (source_entry_id, target_entry_id, relation_type)
+  CONSTRAINT compendium_relations_unique UNIQUE (source_entry_id, target_entry_id, relation_type),
+  CONSTRAINT compendium_relations_id_source_unique UNIQUE (id, source_entry_id)
 );
 CREATE INDEX IF NOT EXISTS compendium_relations_target_idx
   ON compendium_entry_relations(target_entry_id, relation_type);
@@ -199,7 +207,8 @@ CREATE TABLE IF NOT EXISTS compendium_import_runs (
     OR (status = 'running' AND started_at IS NOT NULL AND finished_at IS NULL)
     OR (status IN ('succeeded', 'failed', 'cancelled') AND started_at IS NOT NULL AND finished_at IS NOT NULL)
   ),
-  CONSTRAINT compendium_import_runs_id_source_file_unique UNIQUE (id, source_id, file_id)
+  CONSTRAINT compendium_import_runs_id_source_file_unique UNIQUE (id, source_id, file_id),
+  CONSTRAINT compendium_import_runs_generation_owner_unique UNIQUE (id, source_id, file_id, generation_id)
 );
 CREATE INDEX IF NOT EXISTS compendium_import_runs_source_created_idx
   ON compendium_import_runs(source_id, created_at DESC);
@@ -209,43 +218,94 @@ CREATE TABLE IF NOT EXISTS compendium_import_occurrences (
   import_run_id uuid NOT NULL REFERENCES compendium_import_runs(id) ON DELETE CASCADE,
   source_id uuid NOT NULL,
   file_id uuid NOT NULL,
-  generation_id uuid NOT NULL,
+  generation_id uuid,
   chunk_id uuid,
   occurrence_index integer NOT NULL,
   locator text NOT NULL,
   fingerprint_sha256 text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT compendium_import_occurrences_run_owner_fk
-    FOREIGN KEY (import_run_id, source_id, file_id) REFERENCES compendium_import_runs(id, source_id, file_id),
+    FOREIGN KEY (import_run_id, source_id, file_id)
+    REFERENCES compendium_import_runs(id, source_id, file_id),
+  CONSTRAINT compendium_import_occurrences_run_generation_fk
+    FOREIGN KEY (import_run_id, source_id, file_id, generation_id)
+    REFERENCES compendium_import_runs(id, source_id, file_id, generation_id),
   CONSTRAINT compendium_import_occurrences_generation_owner_fk
     FOREIGN KEY (generation_id, file_id, source_id)
     REFERENCES ingestion_generations(id, file_id, source_id),
   CONSTRAINT compendium_import_occurrences_chunk_owner_fk
     FOREIGN KEY (chunk_id, generation_id, file_id, source_id)
     REFERENCES chunks(id, generation_id, file_id, source_id),
+  CONSTRAINT compendium_import_occurrences_chunk_generation CHECK (chunk_id IS NULL OR generation_id IS NOT NULL),
   CONSTRAINT compendium_import_occurrences_index_nonnegative CHECK (occurrence_index >= 0),
   CONSTRAINT compendium_import_occurrences_locator_not_blank CHECK (btrim(locator) <> ''),
   CONSTRAINT compendium_import_occurrences_fingerprint CHECK (fingerprint_sha256 ~ '^[0-9a-f]{64}$'),
-  CONSTRAINT compendium_import_occurrences_run_index_unique UNIQUE (import_run_id, occurrence_index)
+  CONSTRAINT compendium_import_occurrences_run_index_unique UNIQUE (import_run_id, occurrence_index),
+  CONSTRAINT compendium_import_occurrences_id_source_file_unique UNIQUE (id, source_id, file_id)
 );
 CREATE INDEX IF NOT EXISTS compendium_import_occurrences_chunk_idx
   ON compendium_import_occurrences(chunk_id) WHERE chunk_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS compendium_import_occurrences_generation_idx
+  ON compendium_import_occurrences(generation_id) WHERE generation_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION compendium_validate_occurrence_generation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE run_generation uuid;
+BEGIN
+  SELECT generation_id INTO run_generation FROM compendium_import_runs
+  WHERE id = NEW.import_run_id AND source_id = NEW.source_id AND file_id = NEW.file_id
+  FOR SHARE;
+  IF NOT FOUND OR run_generation IS DISTINCT FROM NEW.generation_id THEN
+    RAISE EXCEPTION 'import occurrence generation must exactly match its run generation';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS compendium_import_occurrences_generation_match ON compendium_import_occurrences;
+CREATE TRIGGER compendium_import_occurrences_generation_match
+BEFORE INSERT OR UPDATE ON compendium_import_occurrences
+FOR EACH ROW EXECUTE FUNCTION compendium_validate_occurrence_generation();
+
+CREATE OR REPLACE FUNCTION compendium_guard_import_run_generation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.generation_id IS DISTINCT FROM NEW.generation_id
+     AND EXISTS (SELECT 1 FROM compendium_import_occurrences WHERE import_run_id = OLD.id) THEN
+    RAISE EXCEPTION 'import run generation is immutable after its first occurrence';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS compendium_import_runs_generation_immutable ON compendium_import_runs;
+CREATE TRIGGER compendium_import_runs_generation_immutable BEFORE UPDATE ON compendium_import_runs
+FOR EACH ROW EXECUTE FUNCTION compendium_guard_import_run_generation();
 
 CREATE TABLE IF NOT EXISTS compendium_import_links (
-  occurrence_id uuid NOT NULL REFERENCES compendium_import_occurrences(id) ON DELETE CASCADE,
-  entry_id uuid REFERENCES compendium_entries(id),
-  version_id uuid REFERENCES compendium_versions(id),
-  revision_id uuid REFERENCES compendium_revisions(id),
-  relation_id uuid REFERENCES compendium_entry_relations(id),
+  occurrence_id uuid NOT NULL,
+  source_id uuid NOT NULL,
+  file_id uuid NOT NULL,
+  evidence_version_id uuid NOT NULL,
+  evidence_entry_id uuid NOT NULL,
+  revision_id uuid,
+  relation_id uuid,
   created_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT compendium_import_links_one_target CHECK (
-    num_nonnulls(entry_id, version_id, revision_id, relation_id) = 1
-  ),
+  CONSTRAINT compendium_import_links_occurrence_owner_fk
+    FOREIGN KEY (occurrence_id, source_id, file_id)
+    REFERENCES compendium_import_occurrences(id, source_id, file_id) ON DELETE CASCADE,
+  CONSTRAINT compendium_import_links_version_owner_fk
+    FOREIGN KEY (evidence_version_id, evidence_entry_id, source_id, file_id)
+    REFERENCES compendium_versions(id, entry_id, source_id, file_id),
+  CONSTRAINT compendium_import_links_revision_owner_fk
+    FOREIGN KEY (revision_id, evidence_version_id)
+    REFERENCES compendium_revisions(id, version_id),
+  CONSTRAINT compendium_import_links_relation_owner_fk
+    FOREIGN KEY (relation_id, evidence_entry_id)
+    REFERENCES compendium_entry_relations(id, source_entry_id),
+  CONSTRAINT compendium_import_links_one_target CHECK (num_nonnulls(revision_id, relation_id) <= 1),
   CONSTRAINT compendium_import_links_unique UNIQUE NULLS NOT DISTINCT
-    (occurrence_id, entry_id, version_id, revision_id, relation_id)
+    (occurrence_id, evidence_version_id, revision_id, relation_id)
 );
-CREATE INDEX IF NOT EXISTS compendium_import_links_version_idx ON compendium_import_links(version_id) WHERE version_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS compendium_import_links_version_idx ON compendium_import_links(evidence_version_id);
 CREATE INDEX IF NOT EXISTS compendium_import_links_revision_idx ON compendium_import_links(revision_id) WHERE revision_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS compendium_import_links_relation_idx ON compendium_import_links(relation_id) WHERE relation_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS compendium_citations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -282,6 +342,7 @@ CREATE TABLE IF NOT EXISTS compendium_citations (
     (revision_id, kind, field_path, block_order)
 );
 CREATE INDEX IF NOT EXISTS compendium_citations_chunk_idx ON compendium_citations(chunk_id);
+CREATE INDEX IF NOT EXISTS compendium_citations_generation_idx ON compendium_citations(generation_id);
 CREATE INDEX IF NOT EXISTS compendium_citations_revision_idx ON compendium_citations(revision_id, block_order);
 
 -- Typed projections. extension_data is reserved for namespaced, non-core
@@ -313,13 +374,14 @@ CREATE TABLE IF NOT EXISTS compendium_creatures (
   alignment text,
   armor_class smallint NOT NULL,
   hit_points integer NOT NULL,
-  challenge_rating numeric(5,2) NOT NULL,
+  challenge_rating numeric(5,3) NOT NULL,
   speed text NOT NULL,
   extension_data jsonb NOT NULL DEFAULT '{}'::jsonb,
   FOREIGN KEY (revision_id, entry_type) REFERENCES compendium_revisions(id, entry_type) ON DELETE CASCADE,
   CHECK (btrim(creature_type) <> '' AND btrim(speed) <> ''),
   CHECK (armor_class BETWEEN 0 AND 50), CHECK (hit_points > 0),
-  CHECK (challenge_rating BETWEEN 0 AND 30), CHECK (jsonb_typeof(extension_data) = 'object')
+  CHECK (challenge_rating IN (0, 0.125, 0.25, 0.5) OR challenge_rating BETWEEN 1 AND 30 AND challenge_rating = trunc(challenge_rating)),
+  CHECK (jsonb_typeof(extension_data) = 'object')
 );
 CREATE INDEX IF NOT EXISTS compendium_creatures_browse_idx ON compendium_creatures(challenge_rating, creature_type);
 
@@ -401,10 +463,11 @@ CREATE TABLE IF NOT EXISTS compendium_equipment (
   entry_type compendium_entry_type GENERATED ALWAYS AS ('equipment'::compendium_entry_type) STORED,
   category equipment_category NOT NULL,
   cost_cp integer,
-  weight_lb numeric(8,2),
+  weight_lb numeric(10,3),
   extension_data jsonb NOT NULL DEFAULT '{}'::jsonb,
   FOREIGN KEY (revision_id, entry_type) REFERENCES compendium_revisions(id, entry_type) ON DELETE CASCADE,
-  CHECK (cost_cp IS NULL OR cost_cp >= 0), CHECK (weight_lb IS NULL OR weight_lb >= 0),
+  CHECK (cost_cp IS NULL OR cost_cp BETWEEN 0 AND 2147483647),
+  CHECK (weight_lb IS NULL OR weight_lb BETWEEN 0 AND 9999999.999),
   CHECK (jsonb_typeof(extension_data) = 'object')
 );
 CREATE INDEX IF NOT EXISTS compendium_equipment_browse_idx ON compendium_equipment(category, cost_cp);
@@ -463,17 +526,31 @@ $$;
 
 CREATE OR REPLACE FUNCTION compendium_validate_active_revision() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE active_type compendium_entry_type;
+DECLARE
+  target_version uuid;
+  version_lifecycle compendium_version_lifecycle;
+  active_revision uuid;
+  active_type compendium_entry_type;
+  active_lifecycle compendium_revision_lifecycle;
 BEGIN
-  IF NEW.lifecycle IN ('published', 'retired') THEN
-    SELECT r.entry_type INTO active_type FROM compendium_revisions r
-    WHERE r.id = NEW.active_revision_id AND r.version_id = NEW.id AND r.lifecycle = 'published';
-    IF active_type IS NULL THEN
-      RAISE EXCEPTION 'published or retired versions require their own published active revision';
-    END IF;
-    IF NOT compendium_revision_has_projection(NEW.active_revision_id, active_type) THEN
-      RAISE EXCEPTION 'a published active revision requires its matching typed projection';
-    END IF;
+  target_version := CASE WHEN TG_TABLE_NAME = 'compendium_versions' THEN NEW.id ELSE NEW.version_id END;
+  SELECT v.lifecycle, v.active_revision_id
+    INTO version_lifecycle, active_revision
+  FROM compendium_versions v WHERE v.id = target_version;
+  IF NOT FOUND THEN RETURN NEW; END IF;
+
+  SELECT r.entry_type, r.lifecycle INTO active_type, active_lifecycle
+  FROM compendium_revisions r
+  WHERE r.id = active_revision AND r.version_id = target_version;
+  IF active_type IS NULL THEN
+    RAISE EXCEPTION 'every compendium version requires its own active revision';
+  END IF;
+  IF (version_lifecycle = 'draft' AND active_lifecycle <> 'draft')
+     OR (version_lifecycle IN ('published', 'retired') AND active_lifecycle <> 'published') THEN
+    RAISE EXCEPTION 'active revision lifecycle must match its version lifecycle';
+  END IF;
+  IF NOT compendium_revision_has_projection(active_revision, active_type) THEN
+    RAISE EXCEPTION 'an active revision requires its matching typed projection';
   END IF;
   RETURN NEW;
 END $$;
@@ -481,14 +558,27 @@ DROP TRIGGER IF EXISTS compendium_versions_active_revision_valid ON compendium_v
 CREATE CONSTRAINT TRIGGER compendium_versions_active_revision_valid
 AFTER INSERT OR UPDATE ON compendium_versions DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION compendium_validate_active_revision();
+DROP TRIGGER IF EXISTS compendium_revisions_active_revision_valid ON compendium_revisions;
+CREATE CONSTRAINT TRIGGER compendium_revisions_active_revision_valid
+AFTER INSERT OR UPDATE ON compendium_revisions DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION compendium_validate_active_revision();
 
 CREATE OR REPLACE FUNCTION compendium_validate_citation_quote() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE chunk_quote text;
+DECLARE
+  chunk_quote text;
+  generation_status text;
 BEGIN
-  SELECT c.quote_text INTO chunk_quote FROM chunks c
+  SELECT c.quote_text, g.status INTO chunk_quote, generation_status
+  FROM chunks c
+  JOIN ingestion_generations g
+    ON g.id = c.generation_id AND g.file_id = c.file_id AND g.source_id = c.source_id
   WHERE c.id = NEW.chunk_id AND c.generation_id = NEW.generation_id
-    AND c.file_id = NEW.file_id AND c.source_id = NEW.source_id;
+    AND c.file_id = NEW.file_id AND c.source_id = NEW.source_id
+  FOR SHARE OF c, g;
+  IF generation_status NOT IN ('active', 'archived') THEN
+    RAISE EXCEPTION 'citations require chunks from active or archived generations';
+  END IF;
   IF chunk_quote IS NULL OR NEW.quote_span_end > char_length(chunk_quote)
      OR substring(chunk_quote FROM NEW.quote_span_start + 1
                   FOR NEW.quote_span_end - NEW.quote_span_start) <> NEW.quote THEN
@@ -500,15 +590,23 @@ DROP TRIGGER IF EXISTS compendium_citations_exact_quote ON compendium_citations;
 CREATE TRIGGER compendium_citations_exact_quote BEFORE INSERT OR UPDATE ON compendium_citations
 FOR EACH ROW EXECUTE FUNCTION compendium_validate_citation_quote();
 
-CREATE OR REPLACE FUNCTION compendium_guard_published_revision_children() RETURNS trigger
+CREATE OR REPLACE FUNCTION compendium_guard_revision_children_immutability() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE target_revision uuid;
+DECLARE
+  old_revision uuid;
+  new_revision uuid;
 BEGIN
-  target_revision := CASE WHEN TG_OP = 'DELETE' THEN OLD.revision_id ELSE NEW.revision_id END;
-  IF EXISTS (SELECT 1 FROM compendium_revisions WHERE id = target_revision AND lifecycle = 'published') THEN
-    RAISE EXCEPTION 'published revision citations and projections are immutable';
+  IF TG_OP = 'INSERT' THEN
+    IF EXISTS (
+      SELECT 1 FROM compendium_revisions r
+      WHERE r.id = NEW.revision_id AND r.lifecycle = 'draft'
+        AND r.created_at = transaction_timestamp()
+    ) THEN RETURN NEW; END IF;
+    RAISE EXCEPTION 'revision children may only be inserted in the revision creation transaction';
   END IF;
-  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+  old_revision := OLD.revision_id;
+  new_revision := CASE WHEN TG_OP = 'UPDATE' THEN NEW.revision_id ELSE NULL END;
+  RAISE EXCEPTION 'revision children are immutable; old revision %, new revision %', old_revision, new_revision;
 END $$;
 
 DO $$
@@ -520,12 +618,47 @@ BEGIN
     'compendium_feats', 'compendium_equipment'
   ] LOOP
     EXECUTE format('DROP TRIGGER IF EXISTS compendium_published_child_immutable ON %I', table_name);
+    EXECUTE format('DROP TRIGGER IF EXISTS compendium_revision_child_immutable ON %I', table_name);
     EXECUTE format(
-      'CREATE TRIGGER compendium_published_child_immutable BEFORE INSERT OR UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION compendium_guard_published_revision_children()',
+      'CREATE TRIGGER compendium_revision_child_immutable BEFORE INSERT OR UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION compendium_guard_revision_children_immutability()',
       table_name
     );
   END LOOP;
 END $$;
+
+CREATE OR REPLACE FUNCTION compendium_guard_cited_chunk() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM compendium_citations WHERE chunk_id = OLD.id) THEN
+    IF TG_OP = 'DELETE' THEN
+      RAISE EXCEPTION 'referenced citation chunk text and ownership are immutable';
+    ELSIF (OLD.text, OLD.quote_text, OLD.generation_id, OLD.file_id, OLD.source_id)
+          IS DISTINCT FROM (NEW.text, NEW.quote_text, NEW.generation_id, NEW.file_id, NEW.source_id) THEN
+      RAISE EXCEPTION 'referenced citation chunk text and ownership are immutable';
+    END IF;
+  END IF;
+  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END $$;
+DROP TRIGGER IF EXISTS chunks_citation_immutable ON chunks;
+CREATE TRIGGER chunks_citation_immutable BEFORE UPDATE OR DELETE ON chunks
+FOR EACH ROW EXECUTE FUNCTION compendium_guard_cited_chunk();
+
+CREATE OR REPLACE FUNCTION compendium_guard_cited_generation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM compendium_citations WHERE generation_id = OLD.id) THEN
+    IF TG_OP = 'DELETE' THEN
+      RAISE EXCEPTION 'a cited generation cannot be deleted or returned to staged';
+    ELSIF NEW.status IS DISTINCT FROM OLD.status
+          AND NOT (OLD.status = 'active' AND NEW.status = 'archived') THEN
+      RAISE EXCEPTION 'a cited generation only permits the active to archived transition';
+    END IF;
+  END IF;
+  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+END $$;
+DROP TRIGGER IF EXISTS ingestion_generations_citation_lifecycle ON ingestion_generations;
+CREATE TRIGGER ingestion_generations_citation_lifecycle BEFORE UPDATE OR DELETE ON ingestion_generations
+FOR EACH ROW EXECUTE FUNCTION compendium_guard_cited_generation();
 
 CREATE INDEX IF NOT EXISTS compendium_entries_browse_idx
   ON compendium_entries(entry_type, edition, canonical_key);
