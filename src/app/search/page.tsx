@@ -8,7 +8,7 @@ export default async function SearchPage() {
   return (
     <AppLayout userRole={user.role}>
       <div className="space-y-8">
-        <SearchForm />
+        <SearchForm isAdmin={user.role === "admin"} />
       </div>
     </AppLayout>
   );

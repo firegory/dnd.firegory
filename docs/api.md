@@ -80,6 +80,38 @@ When `language` is not specified, query expansion includes bilingual English↔R
 
 ---
 
+## Compendium
+
+All compendium reads apply the same source predicate as search and citation previews before selecting or grouping versions. Inaccessible UUID, slug, alias, source, and preview lookups return `404`.
+
+### GET `/api/compendium/entries`
+
+Lists published entries and returns an authorization-filtered `count`. Query parameters are `type`, `edition`, `language`, `category`, `limit` (1-200), and `offset`. If multiple sources publish the same conceptual entry and language, fields and aliases come from one highest-priority accessible version; values are never combined across versions.
+
+### GET `/api/compendium/entries/[identifier]`
+
+Returns a published entry by UUID or slug, including only source-bound aliases, relations to accessible entries, accessible source versions, and citations from the selected version and revision.
+
+### GET `/api/compendium/aliases/[alias]`
+
+Resolves an alias only when the alias belongs to the caller's selected accessible version. Supports the same `edition`, `language`, and `category` narrowing parameters.
+
+### GET `/api/sources/[sourceId]`
+
+Returns the caller-visible source attribution and publication fields. This non-admin route never emits ownership, raw metadata, storage paths, uploader/creator identity, or administrative timestamps. Full source metadata and mutations remain under `/api/admin/sources`.
+
+**Role matrix**:
+
+| Context | Open | Shared premium | Own personal | Other personal |
+| --- | --- | --- | --- | --- |
+| `user` | yes | no | no | no |
+| `premium` owner | yes | yes | yes | no |
+| `premium` non-owner | yes | yes | no | no |
+| `admin` | yes | yes | yes | yes |
+| Caller with zero matching sources | empty list/count 0 | empty | empty | empty |
+
+---
+
 ## Admin: Ingestion
 
 ### POST `/api/admin/ingestion/upload`
