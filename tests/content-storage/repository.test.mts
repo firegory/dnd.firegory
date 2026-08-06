@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cp, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -40,6 +40,7 @@ import {
   ContentIntegrityError,
   ContentSchemaValidationError,
   loadRepositoryBootstrapDescriptor,
+  loadResolvedRepositoryManifest,
   validateContentRepository,
 } from "../../src/server/content-storage/validation.ts";
 import {
@@ -187,6 +188,27 @@ test("new readers support replacement v1 and deletion v2 while emission requires
   assert.equal((await loadRepositoryBootstrapDescriptor(oldRoot)).readerContractVersion, 1);
   await assert.rejects(() => assertDeletionContractSupported(oldRoot), /do not yet support deletion/);
   await assert.doesNotReject(() => assertDeletionContractSupported(dataRoot));
+
+  const rollbackRoot = await temporaryRepository(t);
+  const rollbackBootstrap = await readJson(repositoryBootstrapPath(rollbackRoot)) as { readerContractVersion: number; schemas: Array<{ schemaId: string; path: string }>; entries: Array<Record<string, unknown>> };
+  const target = rollbackBootstrap.entries[0];
+  await mkdir(dirname(activationDeltaPath(rollbackRoot, formatPublicationGeneration(BigInt(1)))), { recursive: true });
+  await writeJson(activationDeltaPath(rollbackRoot, formatPublicationGeneration(BigInt(1))), {
+    schemaVersion: 1, kind: "repositoryActivationDelta", readerContractVersion: 1,
+    generation: formatPublicationGeneration(BigInt(1)), idempotencyKey: "rollback-v1", targetEntryId: target.entryId, entry: target,
+  });
+  await writeJson(activationDeltaPath(rollbackRoot, formatPublicationGeneration(BigInt(2))), {
+    schemaVersion: 1, kind: "repositoryActivationDelta", readerContractVersion: 2,
+    generation: formatPublicationGeneration(BigInt(2)), idempotencyKey: "rollback-v2", targetEntryId: target.entryId, entry: null,
+  });
+  assert.equal((await loadResolvedRepositoryManifest(rollbackRoot)).manifest.entries.length, 0);
+  rollbackBootstrap.readerContractVersion = 1;
+  rollbackBootstrap.schemas = rollbackBootstrap.schemas.filter((schema) => !schema.schemaId.endsWith(":2"));
+  rollbackBootstrap.schemas.push({ schemaId: "urn:dnd-firegory:schema:content-repository:manifest:1", path: "schemas/v1/repository-manifest.schema.json" });
+  await writeJson(repositoryBootstrapPath(rollbackRoot), rollbackBootstrap);
+  const rolledBack = await loadResolvedRepositoryManifest(rollbackRoot);
+  assert.equal(rolledBack.manifest.entries[0].entryId, target.entryId);
+  assert.equal(rolledBack.generation, formatPublicationGeneration(BigInt(1)), "unsupported v2 deletion is inert after rollback");
 });
 
 test("source authorization metadata enforces current access invariants", async () => {

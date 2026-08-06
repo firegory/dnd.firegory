@@ -98,7 +98,12 @@ BEGIN
   END IF;
   IF TG_OP = 'UPDATE' AND OLD.expected_active_revision_captured
      AND (NEW.expected_active_revision_captured, NEW.expected_active_revision_id)
-         IS DISTINCT FROM (OLD.expected_active_revision_captured, OLD.expected_active_revision_id) THEN
+         IS DISTINCT FROM (OLD.expected_active_revision_captured, OLD.expected_active_revision_id)
+     AND NOT (
+       OLD.publication_status = 'failed' AND NEW.publication_status = 'pending'
+       AND NEW.publication_attempt = OLD.publication_attempt + 1
+       AND NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
+     ) THEN
     RAISE EXCEPTION 'captured active revision expectation is immutable';
   END IF;
   RETURN NEW;

@@ -47,6 +47,7 @@ export type ImportCandidateReview = Readonly<{
   locator: string | null;
   chunkId: string | null;
   page: number | null;
+  activeRevisionToken: string | null;
   decision: ReviewDecision;
   resolvedContent: Record<string, unknown> | null;
   publicationStatus: ReviewPublicationStatus;
@@ -95,7 +96,7 @@ type Submitters = Readonly<{
   publish: typeof submitPublicationCommand;
   unpublish: typeof submitUnpublicationCommand;
 }>;
-type ActiveRevisionReader = (entryId: string) => Promise<string | null>;
+type ActiveRevisionReader = (entryIds: readonly string[]) => Promise<ReadonlyMap<string, string | null>>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const FILTERS = new Set(["new", "unchanged", "changed", "missing", "duplicate", "invalid"]);
@@ -173,6 +174,7 @@ export class CompendiumImportReviewService {
       const values: unknown[] = [runId];
       const filter = diffStatus ? `AND candidate.diff_status = $${values.push(diffStatus)}` : "";
       const candidates = await client.query<CandidateRow>(candidateSelect(`${filter} ORDER BY candidate.candidate_order, candidate.id`), values);
+      const activeRevisionTokens = await this.readActiveRevision(candidates.rows.map((candidate) => candidate.candidate_key));
       const diagnostics = await client.query<QueryResultRow & Record<string, unknown>>(
         `SELECT diagnostic_key AS "diagnosticKey", level, code, message, details, created_at AS "createdAt"
          FROM compendium_import_diagnostics WHERE import_run_id = $1 ORDER BY created_at, id`, [runId],
@@ -182,13 +184,22 @@ export class CompendiumImportReviewService {
                 initiating_actor AS "initiatingActor", details, created_at AS "createdAt"
          FROM compendium_import_review_audit WHERE import_run_id = $1 ORDER BY created_at DESC, id DESC LIMIT 200`, [runId],
       );
-      return { run, candidates: candidates.rows.map(mapCandidate), diagnostics: diagnostics.rows, audit: audit.rows };
+      return {
+        run,
+        candidates: candidates.rows.map((candidate) => ({
+          ...mapCandidate(candidate),
+          activeRevisionToken: activeRevisionTokens.get(candidate.candidate_key) ?? null,
+        })),
+        diagnostics: diagnostics.rows,
+        audit: audit.rows,
+      };
     });
   }
 
   async act(admin: AdminContext, runId: string, input: Readonly<{
     candidateIds: readonly string[];
     action: ReviewAction;
+    activeRevisionTokens?: Readonly<Record<string, string | null>>;
     resolvedContent?: Record<string, unknown>;
     resolvedContents?: Readonly<Record<string, Record<string, unknown>>>;
   }>): Promise<readonly Readonly<{ candidateId: string; publicationStatus: ReviewPublicationStatus; error?: string }>[]> {
@@ -216,6 +227,9 @@ export class CompendiumImportReviewService {
         throw new ImportReviewError("resolvedContents must contain exactly every selected candidate ID.");
       }
     }
+    const publishes = input.action !== "reject";
+    if (publishes) validateActiveRevisionTokens(input.activeRevisionTokens, ids);
+    else if (input.activeRevisionTokens !== undefined) throw new ImportReviewError("Active revision tokens are not accepted for reject actions.");
 
     const prepared = await this.transaction(async (client) => {
       const rows = await client.query<CandidateRow>(candidateSelect("AND candidate.id = ANY($2::uuid[]) ORDER BY candidate.id FOR UPDATE OF candidate"), [runId, ids]);
@@ -243,11 +257,10 @@ export class CompendiumImportReviewService {
         const revision = decision === "approved" || decision === "merged"
           ? await buildRevision(client, row, decision === "merged" ? resolved! : row.content)
           : null;
-        const expectedActiveRevisionId = shouldPublish
-          ? input.action === "retry"
-            ? requireCapturedExpectation(row)
-            : await this.readActiveRevision(row.candidate_key)
-          : null;
+        const displayedToken = shouldPublish ? input.activeRevisionTokens![row.id] : null;
+        const expectedActiveRevisionId = reusePending
+          ? requireMatchingCapturedExpectation(row, displayedToken)
+          : displayedToken;
         await client.query(
           `INSERT INTO compendium_import_candidate_reviews
              (candidate_id, import_run_id, decision, resolved_content, publication_status,
@@ -279,25 +292,24 @@ export class CompendiumImportReviewService {
       try {
         if (item.revision) await this.submitters.publish({ idempotencyKey: item.key, expectedActiveRevisionId: item.expectedActiveRevisionId, revision: item.revision });
         else await this.submitters.unpublish({ idempotencyKey: item.key, expectedActiveRevisionId: item.expectedActiveRevisionId, entryId: item.row.candidate_key });
-        await this.setPublicationResult(runId, item.row.id, item.key, "queued", null, admin.userId);
+        await this.markPublicationQueued(runId, item.row.id, item.key, admin.userId);
         results.push({ candidateId: item.row.id, publicationStatus: "queued" as const });
       } catch (error) {
         const message = errorMessage(error);
-        await this.setPublicationResult(runId, item.row.id, item.key, "failed", message, admin.userId);
-        results.push({ candidateId: item.row.id, publicationStatus: "failed" as const, error: message });
+        results.push({ candidateId: item.row.id, publicationStatus: "pending" as const, error: message });
       }
     }
     return results;
   }
 
-  private async setPublicationResult(runId: string, candidateId: string, key: string, status: ReviewPublicationStatus, error: string | null, initiatingActor: string): Promise<void> {
+  private async markPublicationQueued(runId: string, candidateId: string, key: string, initiatingActor: string): Promise<void> {
     await this.transaction(async (client) => {
       const updated = await client.query(
-        `UPDATE compendium_import_candidate_reviews SET publication_status = $4, last_error = $5, updated_at = now()
-         WHERE import_run_id = $1 AND candidate_id = $2 AND idempotency_key = $3 AND publication_status <> 'completed'`,
-        [runId, candidateId, key, status, error],
+        `UPDATE compendium_import_candidate_reviews SET publication_status = 'queued', last_error = NULL, updated_at = now()
+         WHERE import_run_id = $1 AND candidate_id = $2 AND idempotency_key = $3 AND publication_status = 'pending'`,
+        [runId, candidateId, key],
       );
-      if (updated.rowCount) await audit(client, runId, candidateId, `publication_${status}`, "publication-system", initiatingActor, error ? { error } : {});
+      if (updated.rowCount) await audit(client, runId, candidateId, "publication_queued", "publication-system", initiatingActor, {});
     });
   }
 
@@ -379,7 +391,7 @@ async function buildRevision(client: DbClient, candidate: CandidateRow, content:
 function mapCandidate(row: CandidateRow): ImportCandidateReview {
   return { id: row.id, candidateKey: row.candidate_key, entryType: row.entry_type, diffStatus: row.diff_status,
     content: row.content, previousContent: row.previous_content, invalidReason: row.invalid_reason, locator: row.locator,
-    chunkId: row.chunk_id, page: row.page_number, decision: row.decision ?? "pending", resolvedContent: row.resolved_content,
+    chunkId: row.chunk_id, page: row.page_number, activeRevisionToken: null, decision: row.decision ?? "pending", resolvedContent: row.resolved_content,
     publicationStatus: row.publication_status ?? "idle", lastError: row.last_error, reviewedBy: row.reviewed_by,
     reviewedAt: row.reviewed_at == null ? null : iso(row.reviewed_at) };
 }
@@ -405,14 +417,32 @@ async function audit(client: DbClient, runId: string, candidateId: string, event
   await client.query(`INSERT INTO compendium_import_review_audit (import_run_id, candidate_id, event_type, actor, initiating_actor, details) VALUES ($1,$2,$3,$4,$5,$6::jsonb)`, [runId, candidateId, event, actor, initiatingActor, JSON.stringify(details)]);
 }
 
-function requireCapturedExpectation(row: CandidateRow): string | null {
+function requireMatchingCapturedExpectation(row: CandidateRow, displayedToken: string | null): string | null {
   if (!row.expected_active_revision_captured) throw new ImportReviewError("Publication retry is missing its captured active revision.", 409);
+  if (row.expected_active_revision_id !== displayedToken) {
+    throw new ImportReviewError("The displayed active revision changed after this pending command was created. Reload before retrying.", 409);
+  }
   return row.expected_active_revision_id;
 }
 
-async function defaultActiveRevisionReader(entryId: string): Promise<string | null> {
+async function defaultActiveRevisionReader(entryIds: readonly string[]): Promise<ReadonlyMap<string, string | null>> {
   const { manifest } = await loadResolvedRepositoryManifest(getDataRoot());
-  return manifest.entries.find((entry) => entry.entryId === entryId)?.revisionId ?? null;
+  const active = new Map(manifest.entries.map((entry) => [entry.entryId, entry.revisionId]));
+  return new Map(entryIds.map((entryId) => [entryId, active.get(entryId) ?? null]));
+}
+
+function validateActiveRevisionTokens(tokens: Readonly<Record<string, string | null>> | undefined, candidateIds: readonly string[]): void {
+  if (!tokens || !isRecord(tokens)) throw new ImportReviewError("activeRevisionTokens must contain every selected candidate.");
+  const keys = Object.keys(tokens).sort();
+  const expected = [...candidateIds].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new ImportReviewError("activeRevisionTokens must contain exactly every selected candidate ID.");
+  }
+  for (const token of Object.values(tokens)) {
+    if (token !== null && (typeof token !== "string" || !/^rev-[0-9a-f]{64}$/.test(token))) {
+      throw new ImportReviewError("Each active revision token must be a revision ID or null.");
+    }
+  }
 }
 
 function boundedInteger(value: number | undefined, fallback: number, minimum: number, maximum: number): number {

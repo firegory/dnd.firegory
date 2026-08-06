@@ -20,11 +20,18 @@ test("review action payload rejects unknown, mixed, duplicate, and malformed opt
     { action: "merge", candidateIds: [first, second], resolvedContent: {} },
     { action: "merge", candidateIds: [first, second], resolvedContents: { [first]: {} } },
     { action: "merge", candidateIds: [first], resolvedContent: {}, resolvedContents: { [first]: {} } },
+    { action: "approve", candidateIds: [first], activeRevisionTokens: { [first]: "bad-token" } },
+    { action: "approve", candidateIds: [first], activeRevisionTokens: { [second]: null } },
+    { action: "reject", candidateIds: [first], activeRevisionTokens: { [first]: null } },
   ];
   for (const value of invalid) assert.throws(() => parseImportReviewActionRequest(value));
-  assert.deepEqual(parseImportReviewActionRequest({ action: "approve", candidateIds: [first] }), { action: "approve", candidateIds: [first] });
-  assert.deepEqual(parseImportReviewActionRequest({ action: "merge", candidateIds: [first], resolvedContent: { entry: {} } }), { action: "merge", candidateIds: [first], resolvedContent: { entry: {} } });
+  assert.deepEqual(parseImportReviewActionRequest({ action: "approve", candidateIds: [first], activeRevisionTokens: { [first]: null } }), { action: "approve", candidateIds: [first], activeRevisionTokens: { [first]: null } });
+  assert.deepEqual(parseImportReviewActionRequest({ action: "merge", candidateIds: [first], activeRevisionTokens: { [first]: activeRevision }, resolvedContent: { entry: {} } }), { action: "merge", candidateIds: [first], activeRevisionTokens: { [first]: activeRevision }, resolvedContent: { entry: {} } });
+  assert.deepEqual(parseImportReviewActionRequest({ action: "approve", candidateIds: [first, second], activeRevisionTokens: { [first]: null, [second]: activeRevision } }).activeRevisionTokens, { [first]: null, [second]: activeRevision });
+  assert.deepEqual(parseImportReviewActionRequest({ action: "reject", candidateIds: [first] }), { action: "reject", candidateIds: [first] });
 });
+
+const activeRevision = `rev-${"a".repeat(64)}`;
 
 test("review mutations require an exact same-origin Origin header", () => {
   const request = (origin?: string) => new Request("https://dnd.example/api/admin/compendium/import-runs/run/actions", {

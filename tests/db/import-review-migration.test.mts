@@ -24,5 +24,6 @@ test("review migration enforces successful runs, immutable audit, and publicatio
   assert.match(sql, /compendium_import_review_idempotency_idx/);
   assert.match(sql, /expected_active_revision_captured boolean NOT NULL DEFAULT false/);
   assert.match(sql, /captured active revision expectation is immutable/);
+  assert.match(sql, /OLD\.publication_status = 'failed' AND NEW\.publication_status = 'pending'/);
   assert.match(sql, /initiating_actor text/);
 });

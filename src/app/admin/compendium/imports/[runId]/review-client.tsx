@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 
 import { useUiLanguage } from "../../../../../components/ui/i18n";
 
-type Candidate = { id: string; candidateKey: string; entryType: string | null; diffStatus: string; content: Record<string, unknown>; previousContent: Record<string, unknown> | null; invalidReason: string | null; locator: string | null; page: number | null; decision: string; resolvedContent: Record<string, unknown> | null; publicationStatus: string; lastError: string | null; reviewedBy: string | null; reviewedAt: string | null };
+type Candidate = { id: string; candidateKey: string; entryType: string | null; diffStatus: string; content: Record<string, unknown>; previousContent: Record<string, unknown> | null; invalidReason: string | null; locator: string | null; page: number | null; activeRevisionToken: string | null; decision: string; resolvedContent: Record<string, unknown> | null; publicationStatus: string; lastError: string | null; reviewedBy: string | null; reviewedAt: string | null };
 type RunDetail = { run: { sourceId: string; fileId: string; sourceTitle: string; status: string; counts: Record<string, number> }; candidates: Candidate[]; diagnostics: Array<{ code: string; level: string; message: string }>; audit: Array<{ eventType: string; candidateId: string | null; actor: string; createdAt: string }> };
 const FILTERS = ["", "new", "unchanged", "changed", "missing", "duplicate", "invalid"];
 
@@ -27,15 +27,21 @@ export function ImportRunReview({ runId }: { runId: string }) {
   useEffect(() => { const controller = new AbortController(); const timer = setTimeout(() => { void load(controller.signal).catch((reason) => { if (reason.name !== "AbortError") setError(reason.message); }); }, 0); return () => { clearTimeout(timer); controller.abort(); }; }, [filter, runId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function act(action: string, candidateIds: string[], resolvedContent?: Record<string, unknown>, resolvedContents?: Record<string, Record<string, unknown>>) {
+    if (!detail) return;
     if (["unpublish", "reject"].includes(action) && !confirm(t(action === "unpublish" ? "unpublishConfirm" : "rejectCandidatesConfirm", { count: candidateIds.length }))) return;
     setBusy(true);
     try {
-      const response = await fetch(`/api/admin/compendium/import-runs/${runId}/actions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, candidateIds, resolvedContent, resolvedContents }) });
+      const activeRevisionTokens = action === "reject" ? undefined : Object.fromEntries(candidateIds.map((candidateId) => {
+        const candidate = detail.candidates.find((item) => item.id === candidateId);
+        if (!candidate) throw new Error(t("candidateTokenMissing"));
+        return [candidateId, candidate.activeRevisionToken];
+      }));
+      const response = await fetch(`/api/admin/compendium/import-runs/${runId}/actions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, candidateIds, activeRevisionTokens, resolvedContent, resolvedContents }) });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error ?? t("reviewActionFailed"));
-      const failures = (body.results ?? []).filter((result: { publicationStatus: string }) => result.publicationStatus === "failed");
-      if (failures.length) setError(t("publicationQueueFailed", { count: failures.length }));
+      const failures = (body.results ?? []).filter((result: { error?: string }) => result.error);
       await load();
+      if (failures.length) setError(t("publicationQueueFailed", { count: failures.length }));
     } catch (reason) { setError(reason instanceof Error ? reason.message : t("reviewActionFailed")); }
     finally { setBusy(false); }
   }
@@ -82,6 +88,7 @@ function CandidateCard({ candidate, sourceId, fileId, selected, disabled, t, onS
   async function submitMerge() { try { const value = JSON.parse(mergeText); if (!value || Array.isArray(value) || typeof value !== "object") throw new Error(); await onAct("merge", value); setMergeOpen(false); } catch { alert(t("invalidMergeJson")); } }
   return <article className={`rounded-xl border bg-surface p-4 sm:p-5 ${selected ? "border-accent" : "border-border"}`}>
     <div className="flex flex-wrap items-start gap-3"><input aria-label={`${t("selectCandidate")}: ${candidate.candidateKey}`} type="checkbox" checked={selected} onChange={(event) => onSelect(event.target.checked)} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 className="font-mono text-base font-bold text-text-primary">{candidate.candidateKey}</h2><Badge value={candidate.diffStatus} /><Badge value={candidate.decision} /><Badge value={candidate.publicationStatus} /></div><p className="mt-1 text-xs text-text-muted">{candidate.entryType ?? "—"} · {candidate.locator ?? t("noLocator")}</p></div></div>
+    <p className="mt-3 text-xs text-text-muted">{t("activeRevisionToken")}: <code>{candidate.activeRevisionToken ?? t("activeRevisionAbsent")}</code></p>
     {candidate.invalidReason && <p className="mt-3 rounded-md bg-danger/10 p-3 text-sm text-danger">{candidate.invalidReason}</p>}
     {candidate.lastError && <p className="mt-3 rounded-md bg-danger/10 p-3 text-sm text-danger">{candidate.lastError}</p>}
     <div className="mt-4 grid gap-3 lg:grid-cols-2"><JsonPanel title={t("activeCandidate")} value={candidate.previousContent} empty={t("noActiveCandidate")} /><JsonPanel title={t("importCandidate")} value={candidate.content} /></div>

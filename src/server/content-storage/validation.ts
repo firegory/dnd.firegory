@@ -260,6 +260,7 @@ async function composeResolvedRepositoryManifest(root: string): Promise<Readonly
   const targetGenerations = new Map<string, string>();
   let highestGeneration: string | null = null;
   for (const delta of await loadValidRepositoryActivationDeltas(root)) {
+    if (delta.readerContractVersion === 2 && bootstrap.readerContractVersion !== 2) continue;
     const previous = targetGenerations.get(delta.targetEntryId);
     if (!previous || delta.generation > previous) {
       if (delta.entry === null) entries.delete(delta.targetEntryId);

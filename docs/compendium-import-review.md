@@ -17,9 +17,9 @@ The admin workspace at `/admin/compendium/imports` exposes successful and failed
 
 The application does not update `compendium_versions`, `compendium_revisions`, canonical manifests, or canonical NFS paths. Approval and merge create a validated canonical revision in memory and call `submitPublicationCommand`; unpublish calls `submitUnpublicationCommand`. Both write only to the #96 upload spool and enqueue worker work.
 
-Each review captures the current active revision ID, including explicit absence, in review state and the immutable v2 publication command. Under the canonical fence the worker rejects the command if the target changed, preventing a later run from being overwritten by a stale approval or unpublication. Failed review publications retain that expectation when retried.
+Each candidate response includes the exact currently active revision token, including explicit absence. The UI displays and submits that token per candidate, including every member of a bulk action; the mutation service persists it without rereading canonical state. Under the canonical fence the worker rejects the command if the target changed, preventing a later run from being overwritten by a stale page's approval or unpublication. A submission exception leaves the pending attempt and idempotency key unchanged. Only a worker terminal failure enables a new attempt, which uses the token from the newly loaded review response.
 
-The worker serializes canonical changes and installs an immutable activation delta. Version 1 remains replacement-only. Unpublication uses a version 2 delta whose `entry` is `null`, and submission is blocked until the repository bootstrap declares deletion-capable reader contract v2. Until that delta is atomically installed, readers continue resolving the previous active revision.
+The worker serializes canonical changes and installs an immutable activation delta. Version 1 remains replacement-only and is folded by v1 and v2 repositories. Unpublication uses a version 2 delta whose `entry` is `null`; it is emitted and folded only when the bootstrap declares deletion-capable reader contract v2. Rolling a bootstrap back to v1 makes existing v2 deltas inert while retaining v1 replacements.
 
 ## Candidate payload
 

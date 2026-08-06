@@ -131,11 +131,14 @@ Applies an individual or bulk action (up to 200 candidates).
 ```json
 {
   "action": "approve",
-  "candidateIds": ["candidate-uuid"]
+  "candidateIds": ["candidate-uuid"],
+  "activeRevisionTokens": {
+    "candidate-uuid": "rev-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
 }
 ```
 
-Actions are `approve`, `reject`, `merge`, `unpublish`, and `retry`. `merge` additionally accepts `resolvedContent` for one candidate or `resolvedContents` keyed by candidate UUID for bulk use. Invalid or duplicate candidates require merge; only missing candidates can be unpublished; failed publications can be retried with a new key, while an interrupted pending submission reuses its key. A successful response reports `queued`, `failed`, or `idle` per candidate. Queue failure leaves the review retryable and cannot alter the active canonical revision.
+Actions are `approve`, `reject`, `merge`, `unpublish`, and `retry`. Every publishing action requires `activeRevisionTokens` with exactly one displayed token (`rev-…` or `null`) per selected candidate. `merge` additionally accepts `resolvedContent` for one candidate or `resolvedContents` keyed by candidate UUID for bulk use. Invalid or duplicate candidates require merge; only missing candidates can be unpublished. Submission exceptions report `pending` and retain the same key and attempt. Only a worker-recorded terminal failure permits retry with a new attempt and the newly displayed token.
 
 ---
 
