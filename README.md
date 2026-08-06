@@ -10,6 +10,7 @@ Key features:
 
 - **Password authentication** with role-based access (`user`, `premium`, `admin`).
 - **PDF ingestion** with OCR support — upload via admin UI or CLI.
+- **Structured PDF candidates** — deterministic spell, stat-block, table, and section extraction with citation-validated LLM fallback and review-only deduplication.
 - **Hybrid search** — keyword full-text + pgvector semantic retrieval with query expansion and reranking.
 - **Citation-first RAG answers** — short answer, direct quote, source metadata.
 - **Bilingual** — English and Russian content support, language toggle.

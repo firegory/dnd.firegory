@@ -172,6 +172,7 @@ function isPrivateUrl(baseUrl: string): boolean {
 async function openAiChatCompletion(
   messages: readonly ChatMessage[],
   cfg: LlmConfig,
+  format?: "json",
 ): Promise<ChatCompletionResult> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -186,6 +187,7 @@ async function openAiChatCompletion(
     max_tokens: cfg.maxTokens,
     temperature: cfg.temperature,
   };
+  if (format === "json") body.response_format = { type: "json_object" };
 
   if (needsThinkingDisabled(cfg.baseUrl)) {
     body.chat_template_kwargs = { enable_thinking: false };
@@ -248,12 +250,12 @@ export async function chatCompletion(
     if (preferOllamaNative || responseFormat === "json") {
       return ollamaChatCompletion(messages, cfg, responseFormat);
     }
-    return openAiChatCompletion(messages, cfg);
+    return openAiChatCompletion(messages, cfg, responseFormat);
   }
 
   if (!cfg.apiKey && !isPrivateUrl(cfg.baseUrl)) {
     throw new Error("LLM_API_KEY is not configured");
   }
 
-  return openAiChatCompletion(messages, cfg);
+  return openAiChatCompletion(messages, cfg, responseFormat);
 }

@@ -1,6 +1,6 @@
 # Compendium relational core
 
-Migration `0007_compendium_relational_core.sql` adds the normalized storage core. It is additive and does not project or modify existing source, file, generation, or chunk rows. Import extraction and review workflow remain part of issue #75.
+Migration `0007_compendium_relational_core.sql` adds the normalized storage core. It is additive and does not project or modify existing source, file, generation, or chunk rows. Migration `0008` supplies the durable import and review workflow; PDF candidate extraction uses those records without another migration.
 
 ## Identity and access boundary
 
@@ -34,7 +34,23 @@ Workers claim runs with a time-limited database lease. A live lease excludes con
 
 Candidate payloads are immutable JSON objects with canonical content hashes and explicit per-run order. The latest successful run for the same source/file is the comparison baseline. First valid occurrences are classified as `new`, `unchanged`, or `changed`; repeated keys are `duplicate`; rejected parser output is `invalid`; and baseline keys absent from the new run are copied into immutable `missing` review records. Missing records have no current occurrence and do not delete, retire, or unpublish anything. The candidate-diff checkpoint hashes the ordered, canonical representation of every occurrence and candidate identity, ownership field, provenance link, classification, payload, and content hash. Resume and conflict paths reconstruct and verify that manifest rather than trusting a matching row count or payload hash alone.
 
-Diagnostics have stable per-run keys for idempotent retry, and lifecycle/checkpoint events are retained in an append-only audit log. Occurrences, candidates, checkpoints, diagnostics, and audit rows reject updates and deletes. A partial run is any non-terminal leased or lease-expired `running` run; neither partial nor failed runs can back a revision's draft-to-published transition. Publication locks the revision before locking import links and runs; every import-link insert, update, or delete first takes a shared lock on its old/new revisions in deterministic order. These matching lock orders close link/publication races in both `CompendiumService` and direct database writes. This issue does not add extraction, review UI, or publication behavior.
+Diagnostics have stable per-run keys for idempotent retry, and lifecycle/checkpoint events are retained in an append-only audit log. Occurrences, candidates, checkpoints, diagnostics, and audit rows reject updates and deletes. A partial run is any non-terminal leased or lease-expired `running` run; neither partial nor failed runs can back a revision's draft-to-published transition. Publication locks the revision before locking import links and runs; every import-link insert, update, or delete first takes a shared lock on its old/new revisions in deterministic order. These matching lock orders close link/publication races in both `CompendiumService` and direct database writes. This workflow does not publish candidates or add review UI.
+
+## PDF candidate extraction
+
+After a PDF generation is activated and its ingestion job succeeds, the worker starts a separate `pdf-candidate-extraction` import run. Extraction failure is recorded on that run and does not roll back the successful ingestion generation. The extraction path never creates drafts, revisions, publication commands, or embeddings.
+
+`CandidateExtractionService` loads a generation only when all of these conditions hold in one ownership query:
+
+- The generation is `active` or `archived`, its owning ingestion job is `succeeded`, and the file MIME type is `application/pdf`.
+- Source, file, generation, job, and every allowed chunk share the same database ownership tuple.
+- Edition and language are supported, and `access_tier`, `shared`, and `owner_user_id` form a valid open, premium, or personal boundary.
+
+Chunks are processed in stable `(chunk_index, id)` order. Spell blocks, creature stat blocks, equipment tables, and leveled feature sections use deterministic parsers first. A chunk that looks like one of those types but fails deterministic parsing may use the current chat-completion provider with a type-specific prompt, JSON response mode, and temperature zero. The provider receives only edition, language, one allowed chunk ID, and its quote text; it does not receive source IDs, owner IDs, or chunks from another source.
+
+Accepted output uses a strict, closed schema for its entry type. Unknown properties and invalid enums/ranges are rejected. Every extracted top-level field and typed attribute must have a citation to an allowed chunk ID. Citation offsets are zero-based Unicode code-point offsets and the quoted text must exactly equal the referenced `chunks.quote_text` span. Candidate JSON also snapshots source/file/generation, edition, language, access ownership, parser/prompt/model versions, extraction method, and review state.
+
+Candidate keys are deterministic ASCII keys, including fixed Cyrillic transliteration. Matching considers only prior successful candidates from the same source. Multiple current occurrences or multiple prior source-local matches receive `review.status = "ambiguous_duplicate"`; they remain separate immutable #75 candidates and are never merged automatically. Repeating the same generation and version tuple resolves the existing #75 run, while occurrence and candidate checkpoint hashes protect retries from divergent output.
 
 Citations reference a revision, its source-bound version, and an exact `(chunk, generation, file, source)` owner tuple. A citation may only use an active or archived generation, never staged output. Referenced chunk text, quote text, ownership, and generation lifecycle are protected from deletion or incompatible mutation; active-to-archived transitions remain valid, while staged reset/discard remains unaffected because staged chunks cannot be cited.
 
