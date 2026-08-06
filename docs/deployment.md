@@ -8,6 +8,7 @@ This guide covers deploying dnd.firegory using Docker Compose for a self-hosted 
 - At least 2 GB RAM (4 GB recommended for OCR-heavy workloads).
 - Sufficient disk space for PostgreSQL data, Redis, and file storage.
 - Network access to the z.ai API (for embeddings and LLM features).
+- PostgreSQL 16 built with ICU and the deterministic root collation `und-x-icu` (provided by the Compose image).
 
 ## Step 1: Clone the repository
 
@@ -87,6 +88,7 @@ docker compose exec app npm run db:migrate
 ```
 
 This creates the schema tables and indexes. Migrations are idempotent — re-running is safe.
+The compendium migration fails clearly if PostgreSQL is not UTF-8 or lacks the deterministic ICU root collation `und-x-icu`; verify custom PostgreSQL builds before upgrading.
 
 ## Step 5: Create the first admin user
 
@@ -132,6 +134,7 @@ Run through this checklist:
 - Initializes with `docker/postgres/init/001-pgvector.sql` on first volume creation.
 - Data persists in the `postgres_data` named volume.
 - Health check confirms the database is ready before dependent services start.
+- Must expose deterministic ICU collation `und-x-icu`; compendium name normalization never depends on host `LC_CTYPE`.
 
 **redis**:
 

@@ -38,6 +38,14 @@ DO $$ BEGIN
   IF current_setting('server_encoding') <> 'UTF8' THEN
     RAISE EXCEPTION 'compendium name normalization requires UTF8 server_encoding';
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_collation
+    WHERE collname = 'und-x-icu'
+      AND collnamespace = 'pg_catalog'::regnamespace
+      AND collprovider = 'i' AND collisdeterministic
+  ) THEN
+    RAISE EXCEPTION 'compendium name normalization requires deterministic ICU collation und-x-icu';
+  END IF;
 END $$;
 
 -- Composite candidate keys let every downstream FK prove corpus ownership.
@@ -134,7 +142,10 @@ END $$;
 
 CREATE OR REPLACE FUNCTION compendium_normalize_name(value text) RETURNS text
 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
-  SELECT trim(BOTH '-' FROM regexp_replace(lower(btrim(normalize(value, NFC))), '[-_[:space:].,/:;!?()]+', '-', 'g'))
+  SELECT trim(BOTH '-' FROM regexp_replace(
+    lower(btrim(normalize(value, NFC)) COLLATE pg_catalog."und-x-icu"),
+    '[-_[:space:].,/:;!?()]+' COLLATE pg_catalog."und-x-icu", '-', 'g'
+  ))
 $$;
 
 -- Slugs and aliases intentionally share one registry and one conflict scope:
@@ -149,7 +160,8 @@ CREATE TABLE IF NOT EXISTS compendium_names (
   language source_language NOT NULL,
   kind compendium_name_kind NOT NULL,
   name text NOT NULL,
-  normalized_name text GENERATED ALWAYS AS (compendium_normalize_name(name)) STORED,
+  normalized_name text COLLATE pg_catalog."und-x-icu"
+    GENERATED ALWAYS AS (compendium_normalize_name(name)) STORED,
   created_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT compendium_names_version_scope_fk
     FOREIGN KEY (version_id, entry_id, entry_type, edition, language)

@@ -33,7 +33,9 @@ test("slugs and aliases share one normalized conflict scope", () => {
   assert.match(sql, /CREATE OR REPLACE FUNCTION compendium_normalize_name/);
   assert.match(sql, /normalize\(value, NFC\)/);
   assert.match(sql, /server_encoding'[\s\S]*UTF8/);
-  assert.match(sql, /normalized_name text GENERATED ALWAYS/);
+  assert.match(sql, /collname = 'und-x-icu'[\s\S]*collnamespace = 'pg_catalog'::regnamespace[\s\S]*collprovider = 'i' AND collisdeterministic/);
+  assert.match(sql, /lower\([\s\S]*COLLATE pg_catalog\."und-x-icu"/);
+  assert.match(sql, /normalized_name text COLLATE pg_catalog\."und-x-icu"[\s\S]*GENERATED ALWAYS/);
   assert.match(sql, /UNIQUE \(entry_type, edition, language, normalized_name\)/);
   assert.match(sql, /compendium_names_one_slug_per_version_idx[\s\S]*WHERE kind = 'slug'/);
 });

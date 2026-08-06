@@ -350,7 +350,14 @@ function requireUuid(value: string, field: string): void { if (typeof value !== 
 function requireText(value: string, field: string): void { if (typeof value !== "string" || !value.trim()) throw new CompendiumValidationError(`${field} is required.`); }
 function integerRange(value: number, min: number, max: number, field: string): void { if (!Number.isSafeInteger(value) || value < min || value > max) throw new CompendiumValidationError(`${field} must be an integer between ${min} and ${max}.`); }
 function numberRange(value: number, min: number, max: number, field: string): void { if (!Number.isFinite(value) || value < min || value > max) throw new CompendiumValidationError(`${field} must be between ${min} and ${max}.`); }
-function decimalRange(value: number, min: number, max: number, scale: number, field: string): void { numberRange(value, min, max, field); if (!Number.isInteger(value * 10 ** scale)) throw new CompendiumValidationError(`${field} supports at most ${scale} decimal places.`); }
+function decimalRange(value: number, min: number, max: number, scale: number, field: string): void {
+  numberRange(value, min, max, field);
+  const scaled = value * 10 ** scale;
+  const tolerance = Number.EPSILON * Math.max(1, Math.abs(scaled)) * 8;
+  if (Math.abs(scaled - Math.round(scaled)) > tolerance) {
+    throw new CompendiumValidationError(`${field} supports at most ${scale} decimal places.`);
+  }
+}
 function challengeRating(value: number): void { if (![0, 0.125, 0.25, 0.5].includes(value) && (!Number.isInteger(value) || value < 1 || value > 30)) throw new CompendiumValidationError("creature.challengeRating must be 0, 1/8, 1/4, 1/2, or an integer from 1 to 30."); }
 function validateObject(value: ExtensionData | undefined, field: string): void { if (value !== undefined && (value === null || Array.isArray(value) || typeof value !== "object")) throw new CompendiumValidationError(`${field} must be an object.`); }
 function enumValue(value: string, allowed: readonly string[], field: string): void { if (!allowed.includes(value)) throw new CompendiumValidationError(`${field} must be one of: ${allowed.join(", ")}.`); }

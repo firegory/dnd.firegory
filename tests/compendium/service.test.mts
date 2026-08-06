@@ -61,6 +61,9 @@ test("draft validator rejects normalized slug/alias conflicts", () => {
     () => validateDraft({ ...draft, slug: "cafe", aliases: ["caf\u00e9", "cafe\u0301"] }),
     /conflict after normalization/,
   );
+  assert.throws(() => validateDraft({ ...draft, aliases: ["I", "i"] }), /conflict after normalization/);
+  assert.throws(() => validateDraft({ ...draft, aliases: ["\u0130", "i\u0307"] }), /conflict after normalization/);
+  assert.throws(() => validateDraft({ ...draft, aliases: ["\u041c\u0410\u0413", "\u043c\u0430\u0433"] }), /conflict after normalization/);
 });
 
 test("projection validators enforce ranges and matching types", () => {
@@ -98,8 +101,13 @@ test("projection numeric validators match PostgreSQL precision and integer bound
   assert.throws(() => validateDraft({ ...draft, entryType: "creature", projection: { ...creature, hitPoints: 2147483648 } }), /2147483647/);
   const equipment = { type: "equipment", category: "tool", costCp: 2147483647, weightLb: 9999999.999 } as const;
   assert.doesNotThrow(() => validateDraft({ ...draft, entryType: "equipment", projection: equipment }));
+  for (const weightLb of [0, 0.001, 1.001, 1.005, 1.015, 9999999.999]) {
+    assert.doesNotThrow(() => validateDraft({ ...draft, entryType: "equipment", projection: { ...equipment, weightLb } }));
+  }
   assert.throws(() => validateDraft({ ...draft, entryType: "equipment", projection: { ...equipment, costCp: 2147483648 } }), /2147483647/);
-  assert.throws(() => validateDraft({ ...draft, entryType: "equipment", projection: { ...equipment, weightLb: 1.0001 } }), /at most 3 decimal places/);
+  for (const weightLb of [0.0001, 1.0001, 1.0015, 9999999.9989]) {
+    assert.throws(() => validateDraft({ ...draft, entryType: "equipment", projection: { ...equipment, weightLb } }), /at most 3 decimal places/);
+  }
   assert.throws(() => validateDraft({ ...draft, entryType: "equipment", projection: { ...equipment, weightLb: 10000000 } }), /9999999\.999/);
 });
 

@@ -18,7 +18,7 @@ The application service allocates the initial revision ID while inserting the ve
 
 Slugs and aliases are rows in `compendium_names`. Both normalize to Unicode NFC before case folding and replacement of whitespace plus `-_.,/:;!?()` with hyphens. They share the unique scope `(entry_type, edition, language, normalized_name)`, so canonically equivalent composed and decomposed aliases conflict and an alias cannot shadow another alias or slug. One partial unique index permits one slug per version. Slugs must already be in normalized ASCII stable-key form.
 
-Production PostgreSQL must use `server_encoding = 'UTF8'`; the migration rejects other encodings. Use one Unicode-capable `LC_CTYPE` policy consistently across environments (the deployment baseline is `C.UTF-8`) because PostgreSQL `lower()` is locale-aware. Application preflight normalization is NFC and database uniqueness remains authoritative.
+Production PostgreSQL must use `server_encoding = 'UTF8'` and provide the deterministic ICU root collation `und-x-icu`; the migration rejects databases missing either capability. Name folding, separator processing, the generated normalized column, and its unique index explicitly use this collation and do not inherit database `LC_CTYPE`. Application preflight uses NFC plus ECMAScript's locale-independent Unicode default case conversion, while database uniqueness remains authoritative.
 
 ## Relations and provenance
 
