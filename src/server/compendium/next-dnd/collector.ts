@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { request as httpsRequest } from "node:https";
+import type { IncomingMessage } from "node:http";
+import { request as httpsRequest, type RequestOptions } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
@@ -167,7 +168,7 @@ export async function collectNextDndSnapshots(options: CollectNextDndOptions): P
     requestTimeoutMs,
     maxResponseBytes,
     maxRedirects,
-    networkRequest: options.networkRequest ?? defaultNetworkRequest,
+    networkRequest: options.networkRequest ?? createPinnedHttpsNetworkRequest(),
     resolveHostname: options.resolveHostname ?? defaultResolveHostname,
     now,
     sleep: options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
@@ -546,14 +547,22 @@ async function defaultResolveHostname(hostname: string): Promise<readonly string
   return (await lookup(hostname, { all: true, verbatim: true })).map(({ address }) => address);
 }
 
-async function defaultNetworkRequest(url: URL, options: Parameters<NextDndNetworkRequest>[1]): Promise<Response> {
-  return new Promise((resolve, reject) => {
+type HttpsRequestFactory = (
+  url: URL,
+  options: RequestOptions,
+  onResponse: (incoming: IncomingMessage) => void,
+) => Readonly<{ on(event: "error", listener: (error: Error) => void): unknown; end(): void }>;
+
+export function createPinnedHttpsNetworkRequest(
+  requestFactory: HttpsRequestFactory = (url, options, onResponse) => httpsRequest(url, options, onResponse),
+): NextDndNetworkRequest {
+  return async (url, options) => new Promise((resolve, reject) => {
     const family = isIP(options.pinnedAddress);
     const pinnedLookup: LookupFunction = (_hostname, lookupOptions, callback) => {
       if (lookupOptions.all) callback(null, [{ address: options.pinnedAddress, family }]);
       else callback(null, options.pinnedAddress, family);
     };
-    const request = httpsRequest(url, {
+    const request = requestFactory(url, {
       method: "GET",
       agent: false,
       headers: { ...options.headers, host: options.hostHeader },
@@ -561,16 +570,24 @@ async function defaultNetworkRequest(url: URL, options: Parameters<NextDndNetwor
       signal: options.signal,
       lookup: pinnedLookup,
     }, (incoming) => {
-      const headers = new Headers();
-      for (const [name, value] of Object.entries(incoming.headers)) {
-        if (Array.isArray(value)) for (const item of value) headers.append(name, item);
-        else if (value !== undefined) headers.set(name, value);
+      const status = incoming.statusCode ?? 500;
+      try {
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(incoming.headers)) {
+          if (Array.isArray(value)) for (const item of value) headers.append(name, item);
+          else if (value !== undefined) headers.set(name, value);
+        }
+        const nullBody = status === 204 || status === 205 || status === 304;
+        if (nullBody) incoming.destroy();
+        resolve(new Response(nullBody ? null : Readable.toWeb(incoming) as ReadableStream<Uint8Array>, {
+          status,
+          statusText: incoming.statusMessage ?? "",
+          headers,
+        }));
+      } catch (error) {
+        incoming.destroy();
+        reject(new Error(`Pinned HTTPS response construction failed for HTTP ${status}: ${error instanceof Error ? error.message : String(error)}`));
       }
-      resolve(new Response(Readable.toWeb(incoming) as ReadableStream<Uint8Array>, {
-        status: incoming.statusCode ?? 500,
-        statusText: incoming.statusMessage ?? "",
-        headers,
-      }));
     });
     request.on("error", reject);
     request.end();
