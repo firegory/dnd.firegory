@@ -14,7 +14,7 @@ const resource = (kind: SnapshotResource["kind"], sourceUrl: string, category: S
   fetchedAt: "2026-08-06T12:00:00.000Z",
   sha256: hash,
   byteLength: 100,
-  parserVersion: "next-dnd-2024-v2",
+  parserVersion: "next-dnd-2024-v3",
   blobPath: `blobs/${hash}.html`,
 });
 const robotsSnapshot = resource("robots", "https://next.dnd.su/robots.txt", null, null, "b".repeat(64));
@@ -23,7 +23,7 @@ const detailSnapshot = resource("detail", "https://next.dnd.su/spells/10195-hunt
 
 const manifest: NextDndSnapshotManifest = {
   schemaVersion: 2,
-  parserVersion: "next-dnd-2024-v2",
+  parserVersion: "next-dnd-2024-v3",
   status: "complete",
   collectedAt: "2026-08-06T12:00:00.000Z",
   robots: { userAgent: "dnd.firegory.site-snapshot", snapshot: robotsSnapshot, rules: [], evaluations: [{ sourceUrl: indexSnapshot.sourceUrl, allowed: true }] },
@@ -50,7 +50,7 @@ test("maps complete snapshots to stable #75 occurrences and candidates", () => {
   assert.deepEqual(batch.occurrences, [{ occurrenceIndex: 0, locator: detailSnapshot.sourceUrl, fingerprintSha256: "a".repeat(64) }]);
   assert.equal(batch.candidates[0].candidateKey, "spells-10195");
   assert.equal(batch.candidates[0].entryType, "spell");
-  assert.equal(batch.candidates[0].content.parserVersion, "next-dnd-2024-v2");
+  assert.equal(batch.candidates[0].content.parserVersion, "next-dnd-2024-v3");
 });
 
 test("feeds only occurrence and candidate phases for a complete snapshot", async () => {

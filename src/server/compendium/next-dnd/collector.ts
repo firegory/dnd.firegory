@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { isIP } from "node:net";
+import { request as httpsRequest } from "node:https";
+import { isIP, type LookupFunction } from "node:net";
 import { dirname, join } from "node:path";
+import { Readable } from "node:stream";
 
 import {
   NEXT_DND_CATEGORIES,
@@ -91,11 +93,23 @@ export type CollectNextDndOptions = Readonly<{
   requestTimeoutMs?: number;
   maxResponseBytes?: number;
   maxRedirects?: number;
-  fetch?: typeof globalThis.fetch;
+  networkRequest?: NextDndNetworkRequest;
   resolveHostname?: (hostname: string) => Promise<readonly string[]>;
   now?: () => Date;
   sleep?: (milliseconds: number) => Promise<void>;
 }>;
+
+export type NextDndNetworkRequest = (
+  url: URL,
+  options: Readonly<{
+    headers: Readonly<Record<string, string>>;
+    signal: AbortSignal;
+    redirect: "manual";
+    pinnedAddress: string;
+    tlsServerName: string;
+    hostHeader: string;
+  }>,
+) => Promise<Response>;
 
 type CachedMetadata = Readonly<{
   sourceUrl: string;
@@ -116,7 +130,7 @@ type FetcherOptions = Readonly<{
   requestTimeoutMs: number;
   maxResponseBytes: number;
   maxRedirects: number;
-  fetch: typeof globalThis.fetch;
+  networkRequest: NextDndNetworkRequest;
   resolveHostname: (hostname: string) => Promise<readonly string[]>;
   now: () => Date;
   sleep: (milliseconds: number) => Promise<void>;
@@ -153,7 +167,7 @@ export async function collectNextDndSnapshots(options: CollectNextDndOptions): P
     requestTimeoutMs,
     maxResponseBytes,
     maxRedirects,
-    fetch: options.fetch ?? globalThis.fetch,
+    networkRequest: options.networkRequest ?? defaultNetworkRequest,
     resolveHostname: options.resolveHostname ?? defaultResolveHostname,
     now,
     sleep: options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
@@ -167,7 +181,7 @@ export async function collectNextDndSnapshots(options: CollectNextDndOptions): P
   const robotsUrl = new URL("/robots.txt", NEXT_DND_ORIGIN).href;
   let robotsFetch: CachedFetch | null = null;
   try {
-    robotsFetch = await fetcher(robotsUrl);
+    robotsFetch = await fetcher(robotsUrl, { forceNetwork: !offline, allowStaleFallback: false });
   } catch (error) {
     failures.push(failure(null, null, robotsUrl, "robots", "fetch", error, null));
   }
@@ -261,7 +275,7 @@ export async function collectNextDndSnapshots(options: CollectNextDndOptions): P
 
 function createCachedFetcher(outputDirectory: string, options: FetcherOptions) {
   let lastRequestAt = 0;
-  return async (sourceUrl: string): Promise<CachedFetch> => {
+  return async (sourceUrl: string, policy: Readonly<{ forceNetwork?: boolean; allowStaleFallback?: boolean }> = {}): Promise<CachedFetch> => {
     const initialUrl = new URL(sourceUrl);
     requireAllowedUrl(initialUrl);
     const cachePath = join(outputDirectory, "cache", `${sha256(Buffer.from(initialUrl.href))}.json`);
@@ -272,7 +286,7 @@ function createCachedFetcher(outputDirectory: string, options: FetcherOptions) {
       if (bytes.byteLength !== cached.byteLength || sha256(bytes) !== cached.sha256) throw new Error(`Cached blob bytes or hash mismatch for ${initialUrl.href}.`);
       return { ...cached, cacheHit: true, bytes };
     };
-    if (!options.refresh) {
+    if (!options.refresh && !policy.forceNetwork) {
       const hit = await loadCached();
       if (hit) return hit;
     }
@@ -308,7 +322,7 @@ function createCachedFetcher(outputDirectory: string, options: FetcherOptions) {
         await options.sleep(error.retryAfterMs ?? Math.min(30_000, 500 * 2 ** attempt));
       }
     }
-    const fallback = await loadCached();
+    const fallback = policy.allowStaleFallback === false ? null : await loadCached();
     if (fallback) {
       options.diagnostics.push({
         code: "stale-cache-fallback",
@@ -326,17 +340,20 @@ async function requestWithRedirects(initialUrl: URL, options: FetcherOptions, ra
   let current = initialUrl;
   const redirectChain: string[] = [];
   for (let redirectCount = 0; ; redirectCount++) {
-    await validateNetworkTarget(current, options.resolveHostname);
+    const pinnedAddress = await validateNetworkTarget(current, options.resolveHostname);
     await rateLimit();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(new Error("Request timed out.")), options.requestTimeoutMs);
     try {
       let response: Response;
       try {
-        response = await options.fetch(current, {
+        response = await options.networkRequest(current, {
           headers: { accept: "text/html,text/plain", "user-agent": `${NEXT_DND_ROBOTS_USER_AGENT}/2` },
           redirect: "manual",
           signal: controller.signal,
+          pinnedAddress,
+          tlsServerName: current.hostname,
+          hostHeader: current.host,
         });
       } catch (error) {
         throw new RequestFailure(controller.signal.aborted ? "Request timed out." : `Network request failed: ${error instanceof Error ? error.message : String(error)}`, true);
@@ -350,7 +367,6 @@ async function requestWithRedirects(initialUrl: URL, options: FetcherOptions, ra
         try { next = new URL(location, current); }
         catch { throw new RequestFailure("Redirect Location is not a valid URL.", false); }
         requireAllowedUrl(next);
-        await validateNetworkTarget(next, options.resolveHostname);
         redirectChain.push(next.href);
         current = next;
         continue;
@@ -401,7 +417,7 @@ async function readBoundedResponse(response: Response, maximumBytes: number): Pr
   return Buffer.concat(chunks, length);
 }
 
-async function validateNetworkTarget(url: URL, resolver: FetcherOptions["resolveHostname"]): Promise<void> {
+async function validateNetworkTarget(url: URL, resolver: FetcherOptions["resolveHostname"]): Promise<string> {
   requireAllowedUrl(url);
   let addresses: readonly string[];
   try { addresses = await resolver(url.hostname); }
@@ -410,6 +426,7 @@ async function validateNetworkTarget(url: URL, resolver: FetcherOptions["resolve
   for (const address of addresses) {
     if (!isPublicAddress(address)) throw new RequestFailure(`DNS target ${address} is not a public IP address.`, false);
   }
+  return addresses[0];
 }
 
 function requireAllowedUrl(url: URL): void {
@@ -527,6 +544,37 @@ class RequestFailure extends Error {
 
 async function defaultResolveHostname(hostname: string): Promise<readonly string[]> {
   return (await lookup(hostname, { all: true, verbatim: true })).map(({ address }) => address);
+}
+
+async function defaultNetworkRequest(url: URL, options: Parameters<NextDndNetworkRequest>[1]): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const family = isIP(options.pinnedAddress);
+    const pinnedLookup: LookupFunction = (_hostname, lookupOptions, callback) => {
+      if (lookupOptions.all) callback(null, [{ address: options.pinnedAddress, family }]);
+      else callback(null, options.pinnedAddress, family);
+    };
+    const request = httpsRequest(url, {
+      method: "GET",
+      agent: false,
+      headers: { ...options.headers, host: options.hostHeader },
+      servername: options.tlsServerName,
+      signal: options.signal,
+      lookup: pinnedLookup,
+    }, (incoming) => {
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(incoming.headers)) {
+        if (Array.isArray(value)) for (const item of value) headers.append(name, item);
+        else if (value !== undefined) headers.set(name, value);
+      }
+      resolve(new Response(Readable.toWeb(incoming) as ReadableStream<Uint8Array>, {
+        status: incoming.statusCode ?? 500,
+        statusText: incoming.statusMessage ?? "",
+        headers,
+      }));
+    });
+    request.on("error", reject);
+    request.end();
+  });
 }
 
 async function writeImmutable(path: string, content: Buffer, expectedHash: string): Promise<void> {

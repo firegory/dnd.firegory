@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 
 import type { CompendiumEntryType } from "../service.ts";
 
-export const NEXT_DND_PARSER_VERSION = "next-dnd-2024-v2";
+export const NEXT_DND_PARSER_VERSION = "next-dnd-2024-v3";
 
 export const NEXT_DND_CATEGORIES = {
   class: { path: "/class/", entryType: "class" },
@@ -28,7 +28,7 @@ export type NextDndIndexEntry = Readonly<{
 }>;
 
 export type NextDndIndex = Readonly<{
-  category: string;
+  category: NextDndCategory;
   order: Readonly<Record<string, string>>;
   entries: readonly NextDndIndexEntry[];
 }>;
@@ -46,6 +46,9 @@ export function parseNextDndIndex(html: string, indexUrl: string, expectedCatego
   if (!isRecord(parsed) || !Array.isArray(parsed.cards) || typeof parsed.category !== "string" || !parsed.category.trim()) {
     throw new Error("window.LIST must contain cards and a nonempty category.");
   }
+  if (parsed.category.trim() !== expectedCategory) {
+    throw new Error(`window.LIST category "${parsed.category.trim()}" does not match requested category "${expectedCategory}".`);
+  }
 
   const entries = parsed.cards.map((value, index) => parseListCard(value, index, indexUrl, expectedCategory));
   const ids = new Set<string>();
@@ -56,7 +59,7 @@ export function parseNextDndIndex(html: string, indexUrl: string, expectedCatego
   const order = isRecord(parsed.order)
     ? Object.fromEntries(Object.entries(parsed.order).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
     : {};
-  return { category: parsed.category.trim(), order, entries };
+  return { category: expectedCategory, order, entries };
 }
 
 export type NextDndNormalizedDetail = Readonly<{

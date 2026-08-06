@@ -34,6 +34,8 @@ test("rejects executable LIST values and off-category links", () => {
   assert.throws(() => parseNextDndIndex("<script>window.LIST = makeList();</script>", "https://next.dnd.su/spells/", "spells"), /JSON object/);
   const html = '<script>window.LIST={"cards":[{"title":"Bad","link":"/comments/1-bad"}],"category":"spells"};</script>';
   assert.throws(() => parseNextDndIndex(html, "https://next.dnd.su/spells/", "spells"), /outside \/spells\//);
+  const mismatch = spellIndexFixture(1).replace('"category":"spells"', '"category":"items"');
+  assert.throws(() => parseNextDndIndex(mismatch, "https://next.dnd.su/spells/", "spells"), /does not match requested category/);
 });
 
 test("sanitizes stored-XSS payloads with tag, attribute, and protocol allowlists", () => {

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { collectNextDndSnapshots } from "../../src/server/compendium/next-dnd/collector.ts";
+import { collectNextDndSnapshots, type NextDndNetworkRequest } from "../../src/server/compendium/next-dnd/collector.ts";
 import { spellDetailFixture, spellIndexFixture } from "../fixtures/next-dnd/spells.mts";
 
 const now = () => new Date("2026-08-06T12:00:00.000Z");
@@ -16,8 +16,8 @@ test("collects raw bytes, honors Retry-After, reports parse failures, and replay
   const outputDirectory = await temporaryDirectory("snapshot");
   const attempts = new Map<string, number>();
   const sleeps: number[] = [];
-  const requestOptions: RequestInit[] = [];
-  const fetcher: typeof fetch = async (input, init) => {
+  const requestOptions: Parameters<NextDndNetworkRequest>[1][] = [];
+  const fetcher: NextDndNetworkRequest = async (input, init) => {
     const url = String(input);
     requestOptions.push(init ?? {});
     const count = (attempts.get(url) ?? 0) + 1;
@@ -35,7 +35,7 @@ test("collects raw bytes, honors Retry-After, reports parse failures, and replay
     categories: ["spells"],
     minimumDelayMs: 1,
     retries: 1,
-    fetch: fetcher,
+    networkRequest: fetcher,
     resolveHostname: publicDns,
     now,
     sleep: async (milliseconds) => { sleeps.push(milliseconds); },
@@ -48,7 +48,8 @@ test("collects raw bytes, honors Retry-After, reports parse failures, and replay
   assert.ok(first.manifest.parserFailures[0].snapshot);
   assert.ok(sleeps.includes(2_000), "Retry-After seconds must override exponential backoff");
   assert.equal(attempts.get("https://next.dnd.su/spells/10195-hunters-mark"), 2);
-  assert.ok(requestOptions.every((init) => init.redirect === "manual" && init.signal instanceof AbortSignal));
+  assert.ok(requestOptions.every((init) => init.redirect === "manual" && init.signal instanceof AbortSignal
+    && init.pinnedAddress === "93.184.216.34" && init.tlsServerName === "next.dnd.su" && init.hostHeader === "next.dnd.su"));
 
   const indexSnapshot = first.manifest.categories[0].index!;
   const rawIndex = await readFile(join(outputDirectory, indexSnapshot.blobPath));
@@ -63,7 +64,7 @@ test("collects raw bytes, honors Retry-After, reports parse failures, and replay
     allowNetwork: false,
     categories: ["spells"],
     offline: true,
-    fetch: async () => { throw new Error("network must not run"); },
+    networkRequest: async () => { throw new Error("network must not run"); },
     resolveHostname: async () => { throw new Error("DNS must not run"); },
     now,
   });
@@ -77,16 +78,73 @@ test("collects raw bytes, honors Retry-After, reports parse failures, and replay
     refresh: true,
     retries: 1,
     minimumDelayMs: 1,
-    fetch: async () => { throw new Error("upstream unavailable"); },
+    networkRequest: async (url) => {
+      if (url.pathname === "/robots.txt") return new Response(robotsAllowed);
+      throw new Error("upstream unavailable");
+    },
     resolveHostname: publicDns,
     now,
     sleep: async () => undefined,
   });
   assert.equal(fallback.manifest.status, "partial");
-  assert.ok(fallback.manifest.diagnostics.length >= 4);
+  assert.ok(fallback.manifest.diagnostics.length >= 3);
   assert.ok(fallback.manifest.diagnostics.every((diagnostic) => diagnostic.code === "stale-cache-fallback" && diagnostic.attempts === 2));
   assert.notEqual(fallback.runDirectory, first.runDirectory);
   assert.equal(JSON.parse(await readFile(join(fallback.runDirectory, "collection-diagnostics.json"), "utf8")).length, fallback.manifest.diagnostics.length);
+});
+
+test("refreshes robots first online and never authorizes from stale robots", async () => {
+  const outputDirectory = await temporaryDirectory("fresh-robots");
+  await collectNextDndSnapshots({
+    outputDirectory,
+    allowNetwork: true,
+    categories: ["spells"],
+    minimumDelayMs: 1,
+    retries: 0,
+    networkRequest: async (url) => {
+      if (url.pathname === "/robots.txt") return new Response(robotsAllowed);
+      if (url.pathname === "/spells/") return new Response(spellIndexFixture(1));
+      return new Response(spellDetailFixture("10195"));
+    },
+    resolveHostname: publicDns,
+    now,
+    sleep: async () => undefined,
+  });
+
+  const failedRequests: string[] = [];
+  const failedRefresh = await collectNextDndSnapshots({
+    outputDirectory,
+    allowNetwork: true,
+    categories: ["spells"],
+    minimumDelayMs: 1,
+    retries: 0,
+    networkRequest: async (url) => { failedRequests.push(url.href); throw new Error("robots unavailable"); },
+    resolveHostname: publicDns,
+    now,
+    sleep: async () => undefined,
+  });
+  assert.deepEqual(failedRequests, ["https://next.dnd.su/robots.txt"]);
+  assert.equal(failedRefresh.manifest.status, "failed");
+  assert.equal(failedRefresh.manifest.robots, null);
+  assert.deepEqual(failedRefresh.manifest.diagnostics, [], "stale robots must never be a network authorization fallback");
+
+  const changedRequests: string[] = [];
+  const changedPolicy = await collectNextDndSnapshots({
+    outputDirectory,
+    allowNetwork: true,
+    categories: ["spells"],
+    minimumDelayMs: 1,
+    retries: 0,
+    networkRequest: async (url) => {
+      changedRequests.push(url.href);
+      return new Response("User-agent: *\nDisallow: /spells/\n");
+    },
+    resolveHostname: publicDns,
+    now,
+    sleep: async () => undefined,
+  });
+  assert.deepEqual(changedRequests, ["https://next.dnd.su/robots.txt"]);
+  assert.equal(changedPolicy.manifest.parserFailures[0].phase, "policy");
 });
 
 test("collector API requires explicit network consent and a positive rate limit", async () => {
@@ -105,7 +163,7 @@ test("enforces robots.txt and records policy evidence before category requests",
     categories: ["spells"],
     minimumDelayMs: 1,
     retries: 0,
-    fetch: async (input) => {
+    networkRequest: async (input) => {
       requested.push(String(input));
       return new Response("User-agent: *\nDisallow: /*ells/$\n", { status: 200 });
     },
@@ -119,6 +177,28 @@ test("enforces robots.txt and records policy evidence before category requests",
   assert.equal(result.manifest.parserFailures[0].phase, "policy");
 });
 
+test("rejects a discovered LIST category that differs from the requested category", async () => {
+  const requested: string[] = [];
+  const result = await collectNextDndSnapshots({
+    outputDirectory: await temporaryDirectory("category-mismatch"),
+    allowNetwork: true,
+    categories: ["spells"],
+    minimumDelayMs: 1,
+    retries: 0,
+    networkRequest: async (url) => {
+      requested.push(url.href);
+      if (url.pathname === "/robots.txt") return new Response(robotsAllowed);
+      return new Response(spellIndexFixture(1).replace('"category":"spells"', '"category":"items"'));
+    },
+    resolveHostname: publicDns,
+    now,
+    sleep: async () => undefined,
+  });
+  assert.deepEqual(requested, ["https://next.dnd.su/robots.txt", "https://next.dnd.su/spells/"]);
+  assert.equal(result.manifest.status, "partial");
+  assert.match(result.manifest.parserFailures[0].message, /category "items" does not match requested category "spells"/);
+});
+
 test("follows only bounded manual redirects after validating each target", async () => {
   const outputDirectory = await temporaryDirectory("redirect");
   const requested: string[] = [];
@@ -130,7 +210,7 @@ test("follows only bounded manual redirects after validating each target", async
     minimumDelayMs: 1,
     retries: 0,
     maxRedirects: 2,
-    fetch: async (input, init) => {
+    networkRequest: async (input, init) => {
       const url = String(input);
       requested.push(url);
       assert.equal(init?.redirect, "manual");
@@ -155,7 +235,7 @@ test("follows only bounded manual redirects after validating each target", async
       categories: ["spells"],
       minimumDelayMs: 1,
       retries: 0,
-      fetch: async (input) => String(input).endsWith("robots.txt")
+      networkRequest: async (input) => String(input).endsWith("robots.txt")
         ? new Response(robotsAllowed)
         : new Response(null, { status: 302, headers: { location } }),
       resolveHostname: publicDns,
@@ -173,7 +253,7 @@ test("follows only bounded manual redirects after validating each target", async
     categories: ["spells"],
     minimumDelayMs: 1,
     retries: 0,
-    fetch: async (input) => {
+    networkRequest: async (input) => {
       redirectRequests++;
       return String(input).endsWith("robots.txt")
         ? new Response(robotsAllowed)
@@ -193,7 +273,7 @@ test("follows only bounded manual redirects after validating each target", async
     minimumDelayMs: 1,
     retries: 0,
     maxRedirects: 1,
-    fetch: async (input) => String(input).endsWith("robots.txt")
+    networkRequest: async (input) => String(input).endsWith("robots.txt")
       ? new Response(robotsAllowed)
       : new Response(null, { status: 302, headers: { location: `/spells/?next=${encodeURIComponent(String(input))}` } }),
     resolveHostname: publicDns,
@@ -211,7 +291,7 @@ test("rejects private DNS targets before making a request", async () => {
     categories: ["spells"],
     minimumDelayMs: 1,
     retries: 3,
-    fetch: async () => { requests++; return new Response(robotsAllowed); },
+    networkRequest: async () => { requests++; return new Response(robotsAllowed); },
     resolveHostname: async () => ["127.0.0.1", "93.184.216.34"],
     now,
     sleep: async () => undefined,
@@ -219,6 +299,37 @@ test("rejects private DNS targets before making a request", async () => {
   assert.equal(requests, 0);
   assert.equal(result.manifest.status, "failed");
   assert.match(result.manifest.parserFailures[0].message, /not a public IP/);
+});
+
+test("pins the validated public address when ambient DNS changes before connect", async () => {
+  let ambientDnsAnswer = "93.184.216.34";
+  const connectedAddresses: string[] = [];
+  const result = await collectNextDndSnapshots({
+    outputDirectory: await temporaryDirectory("dns-pin"),
+    allowNetwork: true,
+    categories: ["spells"],
+    minimumDelayMs: 1,
+    retries: 0,
+    resolveHostname: async () => {
+      const validated = ambientDnsAnswer;
+      ambientDnsAnswer = "127.0.0.1";
+      return [validated === "127.0.0.1" ? "93.184.216.34" : validated];
+    },
+    networkRequest: async (url, options) => {
+      assert.equal(ambientDnsAnswer, "127.0.0.1");
+      assert.equal(options.pinnedAddress, "93.184.216.34");
+      assert.equal(options.tlsServerName, "next.dnd.su");
+      assert.equal(options.hostHeader, "next.dnd.su");
+      connectedAddresses.push(options.pinnedAddress);
+      if (url.pathname === "/robots.txt") return new Response(robotsAllowed);
+      if (url.pathname === "/spells/") return new Response(spellIndexFixture(1));
+      return new Response(spellDetailFixture("10195"));
+    },
+    now,
+    sleep: async () => undefined,
+  });
+  assert.equal(result.manifest.status, "complete");
+  assert.deepEqual(connectedAddresses, ["93.184.216.34", "93.184.216.34", "93.184.216.34"]);
 });
 
 test("aborts timed-out requests and caps streamed response bytes", async () => {
@@ -230,7 +341,7 @@ test("aborts timed-out requests and caps streamed response bytes", async () => {
     minimumDelayMs: 1,
     retries: 0,
     requestTimeoutMs: 100,
-    fetch: async (_input, init) => {
+    networkRequest: async (_input, init) => {
       receivedSignal = init?.signal as AbortSignal;
       return new Promise((_resolve, reject) => receivedSignal!.addEventListener("abort", () => reject(receivedSignal!.reason), { once: true }));
     },
@@ -248,7 +359,7 @@ test("aborts timed-out requests and caps streamed response bytes", async () => {
     minimumDelayMs: 1,
     retries: 0,
     maxResponseBytes: 1_024,
-    fetch: async (input) => String(input).endsWith("robots.txt") ? new Response(robotsAllowed) : new Response("x".repeat(1_025)),
+    networkRequest: async (input) => String(input).endsWith("robots.txt") ? new Response(robotsAllowed) : new Response("x".repeat(1_025)),
     resolveHostname: publicDns,
     now,
     sleep: async () => undefined,
@@ -264,7 +375,7 @@ test("does not retry permanent HTTP failures", async () => {
     categories: ["spells"],
     minimumDelayMs: 1,
     retries: 5,
-    fetch: async (input) => {
+    networkRequest: async (input) => {
       const url = String(input);
       if (url.endsWith("robots.txt")) return new Response(robotsAllowed);
       if (url.endsWith("/spells/")) return new Response(spellIndexFixture(1));
@@ -291,7 +402,7 @@ test("rejects corrupted existing content-addressed blob bytes", async () => {
     categories: ["spells"],
     minimumDelayMs: 1,
     retries: 0,
-    fetch: async () => new Response(robotsAllowed),
+    networkRequest: async () => new Response(robotsAllowed),
     resolveHostname: publicDns,
     now,
     sleep: async () => undefined,
