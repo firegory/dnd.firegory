@@ -27,6 +27,26 @@ export type CandidatePublicationContext = Readonly<{
   chunk: EvidenceChunk;
 }>;
 
+export type CandidatePublicationCapability = Readonly<{
+  payloadOrigin: "pdf_extraction" | "collector_snapshot" | "unknown";
+  publicationCapability: "publishable" | "requires_extraction";
+  publicationBlockReason: string | null;
+}>;
+
+export type CandidateCapabilityContext = Readonly<{
+  candidateKey: string;
+  entryType: string | null;
+  sourceId: string;
+  fileId: string;
+  generationId: string | null;
+  edition: unknown;
+  language: unknown;
+  accessTier: unknown;
+  shared: unknown;
+  ownerUserId: unknown;
+  chunk: EvidenceChunk | null;
+}>;
+
 const CANONICAL_ENTRY_TYPES: Readonly<Record<CompendiumEntryType, string>> = {
   spell: "spell",
   creature: "monster",
@@ -56,6 +76,48 @@ export function canonicalCandidateEntryId(entryType: string, candidateKey: strin
   if (value.length <= 128) return value;
   const suffix = createHash("sha256").update(`${entryType}\0${candidateKey}`).digest("hex").slice(0, 16);
   return `${entryType}-${candidateKey.slice(0, 128 - entryType.length - suffix.length - 2)}-${suffix}`;
+}
+
+export function classifyCandidatePublication(value: unknown, context: CandidateCapabilityContext): CandidatePublicationCapability {
+  if (isCollectorSnapshotCandidate(value)) {
+    return {
+      payloadOrigin: "collector_snapshot",
+      publicationCapability: "requires_extraction",
+      publicationBlockReason: "Collector snapshot candidates require chunk-backed canonical extraction before publication.",
+    };
+  }
+  if (!isExtractionEnvelope(value)) {
+    return {
+      payloadOrigin: "unknown",
+      publicationCapability: "requires_extraction",
+      publicationBlockReason: "Candidate payload origin is unsupported and requires canonical extraction before publication.",
+    };
+  }
+  try {
+    if (!context.entryType || !context.generationId || !context.chunk) {
+      throw new CandidateProjectionError("Extraction candidate is missing generation or chunk evidence.");
+    }
+    const boundary: ExtractionBoundary = {
+      sourceId: context.sourceId,
+      fileId: context.fileId,
+      generationId: context.generationId,
+      edition: context.edition as ExtractionBoundary["edition"],
+      language: context.language as ExtractionBoundary["language"],
+      accessTier: context.accessTier as ExtractionBoundary["accessTier"],
+      shared: context.shared as boolean,
+      ownerUserId: context.ownerUserId as string | null,
+    };
+    const candidate = validateExtractionEnvelope(value, context.candidateKey, context.entryType as CompendiumEntryType, boundary, context.chunk);
+    Object.entries(candidate.attributes).forEach(([attribute, fieldValue]) => typedField(attribute, fieldValue));
+    if (context.chunk.pageNumber === null) throw new CandidateProjectionError("Extraction candidate has no source page.");
+    return { payloadOrigin: "pdf_extraction", publicationCapability: "publishable", publicationBlockReason: null };
+  } catch (error) {
+    return {
+      payloadOrigin: "pdf_extraction",
+      publicationCapability: "requires_extraction",
+      publicationBlockReason: `Extraction candidate requires repair before publication: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 export function projectExtractedCandidate(value: unknown, context: CandidatePublicationContext): CanonicalRevision {
@@ -105,13 +167,21 @@ export function projectExtractedCandidate(value: unknown, context: CandidatePubl
 }
 
 function validateExtractedCandidate(value: unknown, context: CandidatePublicationContext): CandidateWire {
-  if (!isRecord(value) || !hasExactKeys(value, ["attributes", "body", "candidateKey", "citations", "entryType", "extraction", "provenance", "review", "schemaVersion", "title"])) {
+  const candidate = validateExtractionEnvelope(value, context.candidateKey, context.entryType, context.boundary, context.chunk);
+  if (!context.source.files.some((file) => file.fileId === context.boundary.fileId)) {
+    throw new CandidateProjectionError("Extracted candidate file provenance is absent from the canonical source record.");
+  }
+  return candidate;
+}
+
+function validateExtractionEnvelope(value: unknown, candidateKey: string, entryType: CompendiumEntryType, boundary: ExtractionBoundary, chunk: EvidenceChunk): CandidateWire {
+  if (!isExtractionEnvelope(value)) {
     throw new CandidateProjectionError("Publishable content must be an immutable #77 extracted candidate payload.");
   }
-  if (value.schemaVersion !== EXTRACTION_SCHEMA_VERSION || value.entryType !== context.entryType || value.candidateKey !== context.candidateKey) {
+  if (value.schemaVersion !== EXTRACTION_SCHEMA_VERSION || value.entryType !== entryType || value.candidateKey !== candidateKey) {
     throw new CandidateProjectionError("Extracted candidate schema and typed identity must match its immutable review row.");
   }
-  if (!isRecord(value.provenance) || !sameBoundary(value.provenance, context.boundary)) {
+  if (!validBoundary(boundary) || !isRecord(value.provenance) || !sameBoundary(value.provenance, boundary)) {
     throw new CandidateProjectionError("Extracted candidate provenance must match its source, file, generation, and access boundary.");
   }
   if (!isRecord(value.extraction) || !hasExactKeys(value.extraction, ["method", "modelVersion", "parserVersion", "promptVersion"])
@@ -128,9 +198,6 @@ function validateExtractedCandidate(value: unknown, context: CandidatePublicatio
       || (reviewStatus === "ready" ? reviewReasons.length !== 0 : reviewReasons.length === 0)) {
     throw new CandidateProjectionError("Extracted candidate review metadata is incomplete or unsupported.");
   }
-  if (!context.source.files.some((file) => file.fileId === context.boundary.fileId)) {
-    throw new CandidateProjectionError("Extracted candidate file provenance is absent from the canonical source record.");
-  }
   const wire = {
     entryType: value.entryType,
     candidateKey: value.candidateKey,
@@ -140,10 +207,35 @@ function validateExtractedCandidate(value: unknown, context: CandidatePublicatio
     citations: value.citations,
   };
   try {
-    return validateCandidateWire(wire, [context.chunk]);
+    return validateCandidateWire(wire, [chunk]);
   } catch (error) {
     throw new CandidateProjectionError(error instanceof Error ? error.message : String(error));
   }
+}
+
+function validBoundary(boundary: ExtractionBoundary): boolean {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const validAccess = (boundary.accessTier === "open" && !boundary.shared && boundary.ownerUserId === null)
+    || (boundary.accessTier === "premium" && boundary.shared && boundary.ownerUserId === null)
+    || (boundary.accessTier === "personal" && !boundary.shared && typeof boundary.ownerUserId === "string" && uuid.test(boundary.ownerUserId));
+  return uuid.test(boundary.sourceId) && uuid.test(boundary.fileId) && uuid.test(boundary.generationId)
+    && ["5e", "5.5e"].includes(boundary.edition) && ["en", "ru"].includes(boundary.language) && validAccess;
+}
+
+function isExtractionEnvelope(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && hasExactKeys(value, ["attributes", "body", "candidateKey", "citations", "entryType", "extraction", "provenance", "review", "schemaVersion", "title"]);
+}
+
+function isCollectorSnapshotCandidate(value: unknown): boolean {
+  return isRecord(value)
+    && hasExactKeys(value, ["contentHtml", "contentText", "externalId", "indexMetadata", "parserVersion", "sha256", "sourceUrl", "title"])
+    && typeof value.externalId === "string" && Boolean(value.externalId.trim())
+    && typeof value.sourceUrl === "string" && /^https:\/\//.test(value.sourceUrl)
+    && typeof value.sha256 === "string" && /^[0-9a-f]{64}$/.test(value.sha256)
+    && typeof value.parserVersion === "string" && Boolean(value.parserVersion.trim())
+    && typeof value.title === "string" && Boolean(value.title.trim())
+    && typeof value.contentHtml === "string" && typeof value.contentText === "string"
+    && isRecord(value.indexMetadata);
 }
 
 function typedField(key: string, value: unknown): Readonly<Record<string, JsonValue>> {

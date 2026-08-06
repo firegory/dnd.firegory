@@ -114,7 +114,7 @@ Returns the caller-visible source attribution and publication fields. This non-a
 
 ## Admin: Compendium import review
 
-All review endpoints require the `admin` role. Candidate responses include the type-qualified canonical `entryId` used for active-revision lookup. Mutations additionally require an exact same-origin `Origin` header and reject unknown, mistyped, duplicate, or action-inapplicable fields. Review mutations record the authenticated initiator; terminal publication outcomes use the worker identity while retaining that initiator separately. Application requests only persist intent and submit immutable commands to the #96 spool; they never write canonical repository files.
+All review endpoints require the `admin` role. Candidate responses include `payloadOrigin`, `publicationCapability`, `publicationBlockReason`, and the type-qualified canonical `entryId` used for active-revision lookup. Collector snapshots are returned as `collector_snapshot` / `requires_extraction` with no canonical entry or active token. Mutations additionally require an exact same-origin `Origin` header and reject unknown, mistyped, duplicate, or action-inapplicable fields. Review mutations record the authenticated initiator; terminal publication outcomes use the worker identity while retaining that initiator separately. Application requests only persist intent and submit immutable commands to the #96 spool; they never write canonical repository files.
 
 ### GET `/api/admin/compendium/import-runs`
 

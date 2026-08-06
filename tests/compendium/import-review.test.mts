@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { extractCandidates } from "../../src/server/compendium/candidate-extraction.ts";
 import { CompendiumImportReviewService } from "../../src/server/compendium/import-review.ts";
+import { nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
 
 const runId = "11111111-1111-4111-8111-111111111111";
 const candidateId = "22222222-2222-4222-8222-222222222222";
@@ -39,6 +40,15 @@ const spellShield = await extracted(spellShieldText);
 const equipmentShield = await extracted(equipmentShieldText, secondChunkId);
 const unsupportedEquipment = await extracted(unsupportedEquipmentText, secondChunkId);
 const astralSpell = await extracted(astralFixtureText, astralChunkId);
+const collectorContent = nextDndImportBatch({
+  status: "complete", robots: {}, parserFailures: [],
+  categories: [{ index: {}, entryCount: 1, details: [{
+    category: "spells", externalId: "10195", sourceUrl: "https://next.dnd.su/spells/10195-hunters-mark",
+    sha256: "f".repeat(64), parserVersion: "next-dnd-2024-v3",
+    normalized: { title: "Метка охотника", contentHtml: "<article>Rules</article>", contentText: "Rules" },
+    indexMetadata: { level: 1 },
+  }] }],
+} as never).candidates[0].content;
 
 function chunkFields(text = fixtureText, id = chunkId) {
   return { chunk_id: id, chunk_index: id === chunkId ? 0 : 1, page_number: 1, section_heading: null, quote_text: text };
@@ -46,12 +56,22 @@ function chunkFields(text = fixtureText, id = chunkId) {
 
 function candidate(overrides: Record<string, unknown> = {}) {
   return { id: candidateId, import_run_id: runId, source_id: firstSourceId(), file_id: fileId, generation_id: generationId,
+    edition: "5e", language: "en", access_tier: "open", shared: false, owner_user_id: null,
     candidate_key: content.candidateKey, entry_type: content.entryType, diff_status: "new", content,
     previous_content: null, invalid_reason: null, locator: "page:1", ...chunkFields(),
     created_at: "2026-08-06T00:00:00.000Z", run_status: "succeeded", decision: null, resolved_content: null,
     publication_status: null, publication_attempt: null, idempotency_key: null, last_error: null, reviewed_by: null, reviewed_at: null,
     expected_active_revision_id: null, expected_active_revision_captured: false,
     ...overrides };
+}
+
+function collectorCandidate(overrides: Record<string, unknown> = {}) {
+  return candidate({
+    candidate_key: "spells-10195", entry_type: "spell", content: collectorContent,
+    generation_id: null, locator: "https://next.dnd.su/spells/10195-hunters-mark",
+    chunk_id: null, chunk_index: null, page_number: null, section_heading: null, quote_text: null,
+    ...overrides,
+  });
 }
 
 function source() {
@@ -347,4 +367,64 @@ test("unpublication uses the same type-qualified identity as projection and CAS 
   }, async () => { throw new Error("mutation must not read canonical state"); });
   await service.act(admin, runId, { candidateIds: [candidateId], action: "unpublish", activeRevisionTokens: { [candidateId]: activeRevision } });
   assert.equal(target, "equipment-shield");
+});
+
+test("review classifies a real #78 snapshot candidate as requiring extraction", async () => {
+  const db = { async query(sql: string) {
+    if (sql.includes("FROM compendium_import_runs run JOIN sources")) return { rows: [{
+      id: runId, source_id: firstSourceId(), source_title: "Snapshot", file_id: fileId, status: "succeeded",
+      created_at: "2026-08-06T00:00:00Z", finished_at: "2026-08-06T00:01:00Z", candidate_count: 1,
+      new_count: 1, unchanged_count: 0, changed_count: 0, missing_count: 0, duplicate_count: 0,
+      invalid_count: 0, diagnostic_count: 0, pending_review_count: 1, failed_publication_count: 0,
+    }] };
+    if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: [collectorCandidate()] };
+    return { rows: [] };
+  } };
+  const service = new CompendiumImportReviewService(async (callback) => callback(db), {
+    publish: async () => { throw new Error("unused"); }, unpublish: async () => { throw new Error("unused"); },
+  }, async (entryIds) => { assert.deepEqual(entryIds, []); return new Map(); });
+  const result = await service.getRun(admin, runId);
+  assert.deepEqual({
+    origin: result.candidates[0].payloadOrigin,
+    capability: result.candidates[0].publicationCapability,
+    entryId: result.candidates[0].entryId,
+    token: result.candidates[0].activeRevisionToken,
+  }, { origin: "collector_snapshot", capability: "requires_extraction", entryId: null, token: null });
+  assert.match(result.candidates[0].publicationBlockReason!, /chunk-backed canonical extraction/);
+});
+
+test("snapshot publication and mixed bulk sets fail atomically while reject remains available", async () => {
+  const writes: string[] = [];
+  let submitted = false;
+  let rows = [collectorCandidate()];
+  const db = { async query(sql: string) {
+    if (sql.includes("FROM compendium_import_candidates candidate")) return { rows };
+    if (/^(?:INSERT|UPDATE)/.test(sql.trim())) writes.push(sql);
+    return { rows: [], rowCount: 1 };
+  } };
+  const service = new CompendiumImportReviewService(async (callback) => callback(db), {
+    publish: async () => { submitted = true; throw new Error("must not publish"); },
+    unpublish: async () => { submitted = true; throw new Error("must not unpublish"); },
+  }, async () => new Map());
+  for (const action of ["approve", "merge", "unpublish", "retry"] as const) {
+    await assert.rejects(
+      service.act(admin, runId, {
+        candidateIds: [candidateId], action, activeRevisionTokens: { [candidateId]: null },
+        ...(action === "merge" ? { resolvedContent: collectorContent } : {}),
+      }),
+      (error: unknown) => error instanceof Error && error.message.includes("not publishable") && (error as { status?: number }).status === 409,
+    );
+  }
+  assert.deepEqual(writes, []);
+  rows = [candidate(), collectorCandidate({ id: secondCandidateId })];
+  await assert.rejects(service.act(admin, runId, {
+    candidateIds: [candidateId, secondCandidateId], action: "approve",
+    activeRevisionTokens: { [candidateId]: null, [secondCandidateId]: null },
+  }), /spells-10195 is not publishable/);
+  assert.deepEqual(writes, []);
+  rows = [collectorCandidate()];
+  const rejected = await service.act(admin, runId, { candidateIds: [candidateId], action: "reject" });
+  assert.equal(rejected[0].publicationStatus, "idle");
+  assert.equal(writes.some((sql) => sql.includes("compendium_import_candidate_reviews")), true);
+  assert.equal(submitted, false);
 });

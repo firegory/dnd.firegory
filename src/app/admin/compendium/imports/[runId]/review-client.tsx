@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 
 import { useUiLanguage } from "../../../../../components/ui/i18n";
 
-type Candidate = { id: string; candidateKey: string; entryId: string | null; entryType: string | null; diffStatus: string; content: Record<string, unknown>; previousContent: Record<string, unknown> | null; invalidReason: string | null; locator: string | null; page: number | null; activeRevisionToken: string | null; decision: string; resolvedContent: Record<string, unknown> | null; publicationStatus: string; lastError: string | null; reviewedBy: string | null; reviewedAt: string | null };
+type Candidate = { id: string; candidateKey: string; entryId: string | null; entryType: string | null; diffStatus: string; content: Record<string, unknown>; previousContent: Record<string, unknown> | null; invalidReason: string | null; locator: string | null; page: number | null; activeRevisionToken: string | null; payloadOrigin: string; publicationCapability: "publishable" | "requires_extraction"; publicationBlockReason: string | null; decision: string; resolvedContent: Record<string, unknown> | null; publicationStatus: string; lastError: string | null; reviewedBy: string | null; reviewedAt: string | null };
 type RunDetail = { run: { sourceId: string; fileId: string; sourceTitle: string; status: string; counts: Record<string, number> }; candidates: Candidate[]; diagnostics: Array<{ code: string; level: string; message: string }>; audit: Array<{ eventType: string; candidateId: string | null; actor: string; createdAt: string }> };
 const FILTERS = ["", "new", "unchanged", "changed", "missing", "duplicate", "invalid"];
 
@@ -62,6 +62,8 @@ export function ImportRunReview({ runId }: { runId: string }) {
 
   if (!detail) return <p className="text-text-muted">{error ?? t("loadingImportRun")}</p>;
   const allSelected = detail.candidates.length > 0 && detail.candidates.every((candidate) => selected.has(candidate.id));
+  const selectedCandidates = detail.candidates.filter((candidate) => selected.has(candidate.id));
+  const selectedPublishable = selectedCandidates.length > 0 && selectedCandidates.every((candidate) => candidate.publicationCapability === "publishable");
   return <div className="space-y-6">
     <header className="border-b border-border pb-5"><Link href="/admin/compendium/imports" className="text-sm text-accent hover:underline">← {t("importReview")}</Link><div className="mt-3 flex flex-wrap items-end justify-between gap-4"><div><h1 className="text-3xl">{detail.run.sourceTitle}</h1><p className="mt-1 font-mono text-xs text-text-muted">{runId}</p></div><span className="rounded-full bg-success/15 px-3 py-1 text-sm font-bold text-success">{detail.run.status}</span></div></header>
     {error && <p role="alert" className="rounded-lg border border-danger/30 bg-danger/10 p-3 text-danger">{error}</p>}
@@ -69,11 +71,11 @@ export function ImportRunReview({ runId }: { runId: string }) {
     <div className="sticky top-16 z-10 flex flex-wrap items-center gap-2 rounded-xl border border-border bg-surface/95 p-3 shadow-lg backdrop-blur">
       <select aria-label={t("candidateFilter")} className="rounded-md border border-border bg-surface-light px-3 py-2 text-sm" value={filter} onChange={(event) => setFilter(event.target.value)}>{FILTERS.map((value) => <option key={value} value={value}>{value || t("allCandidates")}</option>)}</select>
       <label className="mr-auto flex items-center gap-2 text-sm"><input type="checkbox" checked={allSelected} onChange={(event) => setSelected(event.target.checked ? new Set(detail.candidates.map((candidate) => candidate.id)) : new Set())} />{t("selectAll")} ({selected.size})</label>
-      <button disabled={busy || selected.size === 0} onClick={() => void act("approve", [...selected])} className="rounded-md bg-success px-3 py-2 text-sm font-bold text-white disabled:opacity-40">{t("approve")}</button>
+      <button disabled={busy || !selectedPublishable} onClick={() => void act("approve", [...selected])} className="rounded-md bg-success px-3 py-2 text-sm font-bold text-white disabled:opacity-40">{t("approve")}</button>
       <button disabled={busy || selected.size === 0} onClick={() => void act("reject", [...selected])} className="rounded-md border border-danger px-3 py-2 text-sm font-bold text-danger disabled:opacity-40">{t("reject")}</button>
-      <button disabled={busy || selected.size === 0} onClick={openBulkMerge} className="rounded-md border border-accent px-3 py-2 text-sm font-bold text-accent disabled:opacity-40">{t("merge")}</button>
-      <button disabled={busy || selected.size === 0} onClick={() => void act("unpublish", [...selected])} className="rounded-md bg-danger px-3 py-2 text-sm font-bold text-white disabled:opacity-40">{t("unpublish")}</button>
-      <button disabled={busy || selected.size === 0} onClick={() => void act("retry", [...selected])} className="rounded-md bg-warning px-3 py-2 text-sm font-bold text-white disabled:opacity-40">{t("retry")}</button>
+      <button disabled={busy || !selectedPublishable} onClick={openBulkMerge} className="rounded-md border border-accent px-3 py-2 text-sm font-bold text-accent disabled:opacity-40">{t("merge")}</button>
+      <button disabled={busy || !selectedPublishable} onClick={() => void act("unpublish", [...selected])} className="rounded-md bg-danger px-3 py-2 text-sm font-bold text-white disabled:opacity-40">{t("unpublish")}</button>
+      <button disabled={busy || !selectedPublishable} onClick={() => void act("retry", [...selected])} className="rounded-md bg-warning px-3 py-2 text-sm font-bold text-white disabled:opacity-40">{t("retry")}</button>
     </div>
     {bulkMerge !== null && <section className="rounded-xl border border-accent bg-surface p-4"><label className="text-sm font-bold">{t("bulkResolvedContents")}<textarea className="mt-2 h-80 w-full rounded-md border border-border bg-primary p-3 font-mono text-xs text-text-primary" value={bulkMerge} onChange={(event) => setBulkMerge(event.target.value)} /></label><div className="mt-2 flex gap-2"><button disabled={busy} onClick={() => void submitBulkMerge()} className="rounded-md bg-accent px-3 py-2 text-sm font-bold text-white">{t("publishMerge")}</button><button onClick={() => setBulkMerge(null)} className="rounded-md border border-border px-3 py-2 text-sm">{t("close")}</button></div></section>}
     <div className="space-y-4">{detail.candidates.map((candidate) => <CandidateCard key={candidate.id} candidate={candidate} sourceId={detail.run.sourceId} fileId={detail.run.fileId} selected={selected.has(candidate.id)} disabled={busy} t={t} onSelect={(checked) => setSelected((current) => { const next = new Set(current); if (checked) next.add(candidate.id); else next.delete(candidate.id); return next; })} onAct={(action, merged) => act(action, [candidate.id], merged)} />)}</div>
@@ -85,28 +87,30 @@ function CandidateCard({ candidate, sourceId, fileId, selected, disabled, t, onS
   const [mergeText, setMergeText] = useState(JSON.stringify(candidate.resolvedContent ?? candidate.content, null, 2));
   const [mergeOpen, setMergeOpen] = useState(false);
   const terminal = candidate.publicationStatus !== "idle";
+  const publishable = candidate.publicationCapability === "publishable";
   async function submitMerge() { try { const value = JSON.parse(mergeText); if (!value || Array.isArray(value) || typeof value !== "object") throw new Error(); await onAct("merge", value); setMergeOpen(false); } catch { alert(t("invalidMergeJson")); } }
   return <article className={`rounded-xl border bg-surface p-4 sm:p-5 ${selected ? "border-accent" : "border-border"}`}>
-    <div className="flex flex-wrap items-start gap-3"><input aria-label={`${t("selectCandidate")}: ${candidate.candidateKey}`} type="checkbox" checked={selected} onChange={(event) => onSelect(event.target.checked)} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 className="font-mono text-base font-bold text-text-primary">{candidate.candidateKey}</h2><Badge value={candidate.diffStatus} /><Badge value={candidate.decision} /><Badge value={candidate.publicationStatus} /></div><p className="mt-1 text-xs text-text-muted">{candidate.entryType ?? "—"} · {candidate.locator ?? t("noLocator")}</p></div></div>
+    <div className="flex flex-wrap items-start gap-3"><input aria-label={`${t("selectCandidate")}: ${candidate.candidateKey}`} type="checkbox" checked={selected} onChange={(event) => onSelect(event.target.checked)} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 className="font-mono text-base font-bold text-text-primary">{candidate.candidateKey}</h2><Badge value={candidate.diffStatus} /><Badge value={candidate.decision} /><Badge value={candidate.publicationStatus} /><Badge value={candidate.publicationCapability} /></div><p className="mt-1 text-xs text-text-muted">{candidate.entryType ?? "—"} · {candidate.payloadOrigin} · {candidate.locator ?? t("noLocator")}</p></div></div>
     <p className="mt-3 text-xs text-text-muted">{t("canonicalEntryId")}: <code>{candidate.entryId ?? t("activeRevisionAbsent")}</code></p>
     <p className="mt-1 text-xs text-text-muted">{t("activeRevisionToken")}: <code>{candidate.activeRevisionToken ?? t("activeRevisionAbsent")}</code></p>
+    {candidate.publicationBlockReason && <p className="mt-3 rounded-md bg-warning/10 p-3 text-sm text-warning">{t("publicationRequiresExtraction")}: {candidate.publicationBlockReason}</p>}
     {candidate.invalidReason && <p className="mt-3 rounded-md bg-danger/10 p-3 text-sm text-danger">{candidate.invalidReason}</p>}
     {candidate.lastError && <p className="mt-3 rounded-md bg-danger/10 p-3 text-sm text-danger">{candidate.lastError}</p>}
     <div className="mt-4 grid gap-3 lg:grid-cols-2"><JsonPanel title={t("activeCandidate")} value={candidate.previousContent} empty={t("noActiveCandidate")} /><JsonPanel title={t("importCandidate")} value={candidate.content} /></div>
     {candidate.page && <CandidateCitationPreview candidateKey={candidate.candidateKey} sourceId={sourceId} fileId={fileId} page={candidate.page} t={t} />}
     {mergeOpen && <div className="mt-4"><label className="text-sm font-bold">{t("resolvedContent")}<textarea className="mt-2 h-64 w-full rounded-md border border-border bg-primary p-3 font-mono text-xs text-text-primary" value={mergeText} onChange={(event) => setMergeText(event.target.value)} /></label><button onClick={() => void submitMerge()} className="mt-2 rounded-md bg-accent px-3 py-2 text-sm font-bold text-white">{t("publishMerge")}</button></div>}
     <div className="mt-4 flex flex-wrap gap-2">
-      {!terminal && ["new", "changed", "unchanged"].includes(candidate.diffStatus) && <button disabled={disabled} onClick={() => void onAct("approve")} className="rounded-md bg-success px-3 py-1.5 text-sm font-bold text-white">{t("approve")}</button>}
+      {!terminal && publishable && ["new", "changed", "unchanged"].includes(candidate.diffStatus) && <button disabled={disabled} onClick={() => void onAct("approve")} className="rounded-md bg-success px-3 py-1.5 text-sm font-bold text-white">{t("approve")}</button>}
       {!terminal && <button disabled={disabled} onClick={() => void onAct("reject")} className="rounded-md border border-danger px-3 py-1.5 text-sm font-bold text-danger">{t("reject")}</button>}
-      {!terminal && candidate.diffStatus !== "missing" && <button disabled={disabled} onClick={() => setMergeOpen((open) => !open)} className="rounded-md border border-accent px-3 py-1.5 text-sm font-bold text-accent">{t("merge")}</button>}
-      {!terminal && candidate.diffStatus === "missing" && <button disabled={disabled} onClick={() => void onAct("unpublish")} className="rounded-md bg-danger px-3 py-1.5 text-sm font-bold text-white">{t("unpublish")}</button>}
-      {["failed", "pending"].includes(candidate.publicationStatus) && <button disabled={disabled} onClick={() => void onAct("retry")} className="rounded-md bg-warning px-3 py-1.5 text-sm font-bold text-white">{t("retry")}</button>}
+      {!terminal && publishable && candidate.diffStatus !== "missing" && <button disabled={disabled} onClick={() => setMergeOpen((open) => !open)} className="rounded-md border border-accent px-3 py-1.5 text-sm font-bold text-accent">{t("merge")}</button>}
+      {!terminal && publishable && candidate.diffStatus === "missing" && <button disabled={disabled} onClick={() => void onAct("unpublish")} className="rounded-md bg-danger px-3 py-1.5 text-sm font-bold text-white">{t("unpublish")}</button>}
+      {publishable && ["failed", "pending"].includes(candidate.publicationStatus) && <button disabled={disabled} onClick={() => void onAct("retry")} className="rounded-md bg-warning px-3 py-1.5 text-sm font-bold text-white">{t("retry")}</button>}
     </div>
   </article>;
 }
 
 function JsonPanel({ title, value, empty }: { title: string; value: unknown; empty?: string }) { return <section className="min-w-0"><h3 className="mb-2 text-xs font-bold tracking-wider text-text-muted uppercase">{title}</h3><pre className="max-h-80 overflow-auto rounded-lg bg-primary p-3 font-mono text-xs whitespace-pre-wrap text-text-secondary">{value == null ? empty ?? "—" : JSON.stringify(value, null, 2)}</pre></section>; }
-function Badge({ value }: { value: string }) { const danger = ["invalid", "missing", "failed", "rejected", "unpublish"].includes(value); return <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${danger ? "bg-danger/15 text-danger" : "bg-accent/15 text-accent"}`}>{value}</span>; }
+function Badge({ value }: { value: string }) { const danger = ["invalid", "missing", "failed", "rejected", "unpublish", "requires_extraction"].includes(value); return <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${danger ? "bg-danger/15 text-danger" : "bg-accent/15 text-accent"}`}>{value}</span>; }
 
 function CandidateCitationPreview({ candidateKey, sourceId, fileId, page, t }: { candidateKey: string; sourceId: string; fileId: string; page: number; t: ReturnType<typeof useUiLanguage>["t"] }) {
   const [failed, setFailed] = useState(false);

@@ -12,7 +12,13 @@ import {
 } from "../content-storage/repository.ts";
 import { loadResolvedRepositoryManifest } from "../content-storage/validation.ts";
 import { withTransaction } from "../db/client.ts";
-import { canonicalCandidateEntryId, CandidateProjectionError, projectExtractedCandidate } from "./candidate-publication.ts";
+import {
+  canonicalCandidateEntryId,
+  CandidateProjectionError,
+  classifyCandidatePublication,
+  projectExtractedCandidate,
+  type CandidatePublicationCapability,
+} from "./candidate-publication.ts";
 import type { CompendiumEntryType } from "./service.ts";
 
 type DbClient = Readonly<{
@@ -48,6 +54,9 @@ export type ImportCandidateReview = Readonly<{
   chunkId: string | null;
   page: number | null;
   activeRevisionToken: string | null;
+  payloadOrigin: CandidatePublicationCapability["payloadOrigin"];
+  publicationCapability: CandidatePublicationCapability["publicationCapability"];
+  publicationBlockReason: string | null;
   decision: ReviewDecision;
   resolvedContent: Record<string, unknown> | null;
   publicationStatus: ReviewPublicationStatus;
@@ -72,6 +81,11 @@ type CandidateRow = QueryResultRow & Readonly<{
   source_id: string;
   file_id: string;
   generation_id: string | null;
+  edition: unknown;
+  language: unknown;
+  access_tier: unknown;
+  shared: unknown;
+  owner_user_id: unknown;
   candidate_key: string;
   entry_type: string | null;
   diff_status: string;
@@ -180,7 +194,11 @@ export class CompendiumImportReviewService {
       const values: unknown[] = [runId];
       const filter = diffStatus ? `AND candidate.diff_status = $${values.push(diffStatus)}` : "";
       const candidates = await client.query<CandidateRow>(candidateSelect(`${filter} ORDER BY candidate.candidate_order, candidate.id`), values);
-      const entryIds = new Map(candidates.rows.map((candidate) => [candidate.id, candidateEntryId(candidate)]));
+      const capabilities = new Map(candidates.rows.map((candidate) => [candidate.id, candidateCapability(candidate)]));
+      const entryIds = new Map(candidates.rows.map((candidate) => [
+        candidate.id,
+        capabilities.get(candidate.id)?.publicationCapability === "publishable" ? candidateEntryId(candidate) : null,
+      ]));
       const activeRevisionTokens = await this.readActiveRevision([...new Set([...entryIds.values()].filter((entryId): entryId is string => entryId !== null))]);
       const diagnostics = await client.query<QueryResultRow & Record<string, unknown>>(
         `SELECT diagnostic_key AS "diagnosticKey", level, code, message, details, created_at AS "createdAt"
@@ -195,7 +213,10 @@ export class CompendiumImportReviewService {
         run,
         candidates: candidates.rows.map((candidate) => {
           const entryId = entryIds.get(candidate.id) ?? null;
-          return { ...mapCandidate(candidate), entryId, activeRevisionToken: entryId ? activeRevisionTokens.get(entryId) ?? null : null };
+          return {
+            ...mapCandidate(candidate), ...capabilities.get(candidate.id)!, entryId,
+            activeRevisionToken: entryId ? activeRevisionTokens.get(entryId) ?? null : null,
+          };
         }),
         diagnostics: diagnostics.rows,
         audit: audit.rows,
@@ -241,6 +262,13 @@ export class CompendiumImportReviewService {
     const prepared = await this.transaction(async (client) => {
       const rows = await client.query<CandidateRow>(candidateSelect("AND candidate.id = ANY($2::uuid[]) ORDER BY candidate.id FOR UPDATE OF candidate"), [runId, ids]);
       if (rows.rows.length !== ids.length) throw new ImportReviewError("One or more candidates were not found in this run.", 404);
+      if (input.action !== "reject") {
+        const blocked = rows.rows.map((row) => ({ row, capability: candidateCapability(row) }))
+          .find(({ capability }) => capability.publicationCapability !== "publishable");
+        if (blocked) {
+          throw new ImportReviewError(`Candidate ${blocked.row.candidate_key} is not publishable: ${blocked.capability.publicationBlockReason}`, 409);
+        }
+      }
       const actions: Array<{ row: CandidateRow; entryId: string | null; key: string | null; revision: CanonicalRevision | null; expectedActiveRevisionId: string | null }> = [];
       for (const row of rows.rows) {
         const currentStatus = row.publication_status ?? "idle";
@@ -339,6 +367,7 @@ export class CompendiumImportReviewService {
 function candidateSelect(suffix: string): string {
   return `SELECT candidate.id, candidate.import_run_id, candidate.source_id, candidate.file_id, candidate.generation_id,
                  candidate.candidate_key, candidate.entry_type,
+                 source.edition, source.language, source.access_tier, source.shared, source.owner_user_id,
                  candidate.diff_status, candidate.content, previous.content AS previous_content,
                  candidate.invalid_reason, candidate.created_at, run.status AS run_status,
                   occurrence.locator, occurrence.chunk_id, chunk.page_number, chunk.chunk_index,
@@ -349,6 +378,7 @@ function candidateSelect(suffix: string): string {
                  review.reviewed_by, review.reviewed_at
           FROM compendium_import_candidates candidate
           JOIN compendium_import_runs run ON run.id = candidate.import_run_id
+          JOIN sources source ON source.id = candidate.source_id
           LEFT JOIN compendium_import_candidates previous ON previous.id = candidate.previous_candidate_id
           LEFT JOIN compendium_import_occurrences occurrence ON occurrence.id = candidate.occurrence_id
           LEFT JOIN chunks chunk ON chunk.id = occurrence.chunk_id
@@ -418,11 +448,30 @@ async function buildRevision(client: DbClient, candidate: CandidateRow, content:
 }
 
 function mapCandidate(row: CandidateRow): ImportCandidateReview {
-  return { id: row.id, candidateKey: row.candidate_key, entryId: candidateEntryId(row), entryType: row.entry_type, diffStatus: row.diff_status,
+  return { id: row.id, candidateKey: row.candidate_key, entryId: null, entryType: row.entry_type, diffStatus: row.diff_status,
     content: row.content, previousContent: row.previous_content, invalidReason: row.invalid_reason, locator: row.locator,
     chunkId: row.chunk_id, page: row.page_number, activeRevisionToken: null, decision: row.decision ?? "pending", resolvedContent: row.resolved_content,
+    payloadOrigin: "unknown", publicationCapability: "requires_extraction", publicationBlockReason: null,
     publicationStatus: row.publication_status ?? "idle", lastError: row.last_error, reviewedBy: row.reviewed_by,
     reviewedAt: row.reviewed_at == null ? null : iso(row.reviewed_at) };
+}
+
+function candidateCapability(row: CandidateRow): CandidatePublicationCapability {
+  return classifyCandidatePublication(row.content, {
+    candidateKey: row.candidate_key,
+    entryType: row.entry_type,
+    sourceId: row.source_id,
+    fileId: row.file_id,
+    generationId: row.generation_id,
+    edition: row.edition,
+    language: row.language,
+    accessTier: row.access_tier,
+    shared: row.shared,
+    ownerUserId: row.owner_user_id,
+    chunk: row.chunk_id && row.chunk_index !== null && row.quote_text
+      ? { id: row.chunk_id, chunkIndex: row.chunk_index, pageNumber: row.page_number, sectionHeading: row.section_heading, quoteText: row.quote_text }
+      : null,
+  });
 }
 
 function candidateEntryId(row: Pick<CandidateRow, "entry_type" | "candidate_key">): string | null {
