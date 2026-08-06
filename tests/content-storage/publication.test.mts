@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import type { PoolClient } from "pg";
-import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -17,7 +17,9 @@ import {
 } from "../../src/server/content-storage/publication-command.ts";
 import {
   activationDirectoryPath,
-  activationManifestPath,
+  activationDeltaPath,
+  formatPublicationGeneration,
+  publicationGenerationReservationPath,
   publicationOutboxStatePath,
   publicationQuarantinePath,
   createCanonicalRevision,
@@ -35,13 +37,12 @@ import { RedisPublicationLeaseManager } from "../../src/worker/publication/lease
 import { processPublicationReservation } from "../../src/worker/publication/processor.ts";
 import {
   PublicationFenceUnavailableError,
-  PUBLICATION_TEMPORARY_RETENTION_MS,
   publishCanonicalRevision,
 } from "../../src/worker/publication/publisher.ts";
-import { PostgresActivationTokenAllocator, type ActivationTokenAllocator } from "../../src/worker/publication/token.ts";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const fixtureRoot = resolve(projectRoot, "content-repository");
+const generation = (value: number) => formatPublicationGeneration(BigInt(value));
 
 test("read-only app submission durably records intent and reconciliation closes enqueue crash windows", async (t) => {
   const root = await temporaryRepository(t);
@@ -56,6 +57,7 @@ test("read-only app submission durably records intent and reconciliation closes 
       { idempotencyKey: "publish-dash-v2", revision },
       {
         spoolRoot,
+        dataRoot: root,
         now: 100,
         enqueue: async (key) => { queued.push(key); },
         afterEnqueue: () => { throw new Error("crash after enqueue"); },
@@ -81,10 +83,11 @@ test("read-only app submission durably records intent and reconciliation closes 
     await reconcilePublicationOutbox({ spoolRoot, now: 300, enqueue: async (key) => { queued.push(key); } }),
     { enqueued: 1, failed: 0 },
   );
-  await markPublicationCompleted("publish-dash-v2", spoolRoot, 400);
+  const commandGeneration = (await loadPublicationCommand("publish-dash-v2", spoolRoot)).generation;
+  await markPublicationCompleted("publish-dash-v2", commandGeneration, spoolRoot, 400);
   await submitPublicationCommand(
     { idempotencyKey: "publish-dash-v2", revision },
-    { spoolRoot, enqueue: async (key) => { queued.push(key); } },
+    { spoolRoot, dataRoot: root, enqueue: async (key) => { queued.push(key); } },
   );
   assert.equal(queued.length, 3, "completed outbox entries are not redelivered by submission");
   assert.equal(publicationSpoolPath(spoolRoot, "publish-dash-v2").includes("/commands/"), true);
@@ -93,7 +96,7 @@ test("read-only app submission durably records intent and reconciliation closes 
   await assert.rejects(
     submitPublicationCommand(
       { idempotencyKey: "publish-dash-v2", revision: conflicting },
-      { spoolRoot, enqueue: async () => undefined },
+      { spoolRoot, dataRoot: root, enqueue: async () => undefined },
     ),
     /already bound to another publication/,
   );
@@ -101,7 +104,7 @@ test("read-only app submission durably records intent and reconciliation closes 
   await assert.rejects(
     submitPublicationCommand(
       { idempotencyKey: "transient-enqueue", revision: conflicting },
-      { spoolRoot, enqueue: async () => { throw new Error("Redis unavailable"); } },
+      { spoolRoot, dataRoot: root, enqueue: async () => { throw new Error("Redis unavailable"); } },
     ),
     /Redis unavailable/,
   );
@@ -114,10 +117,13 @@ test("read-only app submission durably records intent and reconciliation closes 
 
   const malformedPath = publicationSpoolPath(spoolRoot, "malformed-spool");
   await writeFile(malformedPath, "{broken");
+  const recentTemporary = resolve(dirname(malformedPath), "active-temp.json.1.active-worker.tmp");
+  await writeFile(recentTemporary, "active");
   assert.deepEqual(
-    await reconcilePublicationOutbox({ spoolRoot, now: 600, enqueue: async () => undefined }),
+    await reconcilePublicationOutbox({ spoolRoot, now: Date.now(), enqueue: async () => undefined }),
     { enqueued: 1, failed: 1 },
   );
+  assert.equal(await readFile(recentTemporary, "utf8"), "active", "cleanup uses actual mtime, not the logical filename timestamp");
   assert.equal((await readOutboxState(spoolRoot, "malformed-spool"))?.status, "failed");
   assert.equal(await readFile(publicationQuarantinePath(spoolRoot, "malformed-spool"), "utf8").then(Boolean), true);
 });
@@ -129,26 +135,84 @@ test("immutable outbox events prevent completed state from regressing under race
   const revision = await revisionFromFixture("2026-08-06T01:45:00.000Z");
   await submitPublicationCommand(
     { idempotencyKey: "outbox-race", revision },
-    { spoolRoot, now: 100, enqueue: async () => undefined },
+    { spoolRoot, dataRoot: fixtureRoot, now: 100, enqueue: async () => undefined },
   );
 
   await Promise.allSettled([
-    markPublicationCompleted("outbox-race", spoolRoot, 200),
-    markPublicationFailed("outbox-race", "late duplicate failure", spoolRoot, 300),
+    markPublicationCompleted("outbox-race", generation(1), spoolRoot, 200),
+    markPublicationFailed("outbox-race", generation(1), "late duplicate failure", spoolRoot, 300),
     reconcilePublicationOutbox({ spoolRoot, now: 400, redeliveryAfterMs: 0, enqueue: async () => undefined }),
     submitPublicationCommand(
       { idempotencyKey: "outbox-race", revision },
-      { spoolRoot, now: 500, enqueue: async () => undefined },
+      { spoolRoot, dataRoot: fixtureRoot, now: 500, enqueue: async () => undefined },
     ),
   ]);
 
   const state = await readOutboxState(spoolRoot, "outbox-race");
   assert.equal(state?.status, "completed");
-  assert.equal(state?.generation, 200);
+  assert.equal(state?.generation, generation(1));
   assert.ok((await readdir(publicationOutboxStatePath(spoolRoot, "outbox-race"))).length >= 3);
 });
 
-test("higher immutable activation remains active when a stale lower-token writer resumes", async (t) => {
+test("durable generation reservations linearize submitters and survive rebuild artifacts", async (t) => {
+  const root = await temporaryRepository(t);
+  const spoolRoot = resolve(dirname(root), "generation-spool");
+  const revision = await nextRevision(root, "2026-08-06T01:50:00.000Z");
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolveBlocked) => { releaseFirst = resolveBlocked; });
+  let firstReached!: () => void;
+  const reached = new Promise<void>((resolveReached) => { firstReached = resolveReached; });
+  let paused = false;
+  const first = submitPublicationCommand(
+    { idempotencyKey: "generation-first", revision },
+    {
+      spoolRoot,
+      dataRoot: root,
+      enqueue: async () => undefined,
+      beforeGenerationCreate: async () => {
+        if (paused) return;
+        paused = true;
+        firstReached();
+        await firstBlocked;
+      },
+    },
+  );
+  await reached;
+  await submitPublicationCommand(
+    { idempotencyKey: "generation-second", revision },
+    { spoolRoot, dataRoot: root, enqueue: async () => undefined },
+  );
+  releaseFirst();
+  await first;
+  assert.equal((await loadPublicationCommand("generation-second", spoolRoot)).generation, generation(1));
+  assert.equal((await loadPublicationCommand("generation-first", spoolRoot)).generation, generation(2));
+
+  await writeFile(publicationGenerationReservationPath(spoolRoot, generation(8)), "partial");
+  await writeFile(resolve(dirname(publicationGenerationReservationPath(spoolRoot, generation(1))), `${"9".repeat(33)}.json`), "invalid");
+  await submitPublicationCommand(
+    { idempotencyKey: "generation-after-rebuild", revision },
+    { spoolRoot, dataRoot: root, enqueue: async () => undefined },
+  );
+  assert.equal((await loadPublicationCommand("generation-after-rebuild", spoolRoot)).generation, generation(9));
+});
+
+test("same-target deltas order by generation while different targets compose", async (t) => {
+  const root = await temporaryRepository(t);
+  const dash = await nextRevision(root, "2026-08-06T01:55:00.000Z");
+  const otherInput = structuredClone(dash) as Partial<CanonicalRevision>;
+  delete otherInput.revisionId;
+  delete otherInput.contentHash;
+  otherInput.entryId = "dodge";
+  const dodge = createCanonicalRevision(otherInput as CanonicalRevisionInput);
+
+  await publish(root, publicationCommand("dash-generation-two", dash, 2));
+  await publish(root, publicationCommand("dodge-generation-three", dodge, 3));
+  const active = await readManifest(root);
+  assert.equal(active.entries.find((entry) => entry.entryId === "dash")?.revisionId, dash.revisionId);
+  assert.equal(active.entries.find((entry) => entry.entryId === "dodge")?.revisionId, dodge.revisionId);
+});
+
+test("higher per-target generation remains active when a stale writer resumes", async (t) => {
   const root = await temporaryRepository(t);
   const firstRevision = await nextRevision(root, "2026-08-06T02:00:00.000Z");
   const secondRevision = await nextRevision(root, "2026-08-06T03:00:00.000Z");
@@ -159,7 +223,6 @@ test("higher immutable activation remains active when a stale lower-token writer
   const fenceState = { owner: null as symbol | null };
   const firstFenceManager = memoryFenceManager(fenceState);
   const secondFenceManager = memoryFenceManager(fenceState);
-  const tokenAllocator = memoryTokenAllocator();
   let resumeFirst!: () => void;
   const pauseFirst = new Promise<void>((resolvePause) => { resumeFirst = resolvePause; });
   let firstPaused!: () => void;
@@ -167,14 +230,13 @@ test("higher immutable activation remains active when a stale lower-token writer
 
   const first = publishCanonicalRevision({
     dataRoot: root,
-    command: publicationCommand("stale-writer-first", firstRevision),
+    command: publicationCommand("stale-writer-first", firstRevision, 1),
     leaseManager: firstLeaseManager,
     fenceManager: firstFenceManager,
-    tokenAllocator,
     leaseTtlMs: 100,
     hooks: {
-      afterActivationTokenAllocated: async (token) => {
-        assert.equal(token, "00000000000000000001");
+      beforeActivationInstall: async (assignedGeneration) => {
+        assert.equal(assignedGeneration, generation(1));
         fenceState.owner = null; // Simulate loss of the old PostgreSQL session lock.
         firstPaused();
         await pauseFirst;
@@ -186,36 +248,41 @@ test("higher immutable activation remains active when a stale lower-token writer
 
   const newer = await publishCanonicalRevision({
     dataRoot: root,
-    command: publicationCommand("stale-writer-second", secondRevision),
+    command: publicationCommand("stale-writer-second", secondRevision, 2),
     leaseManager: secondLeaseManager,
     fenceManager: secondFenceManager,
-    tokenAllocator,
     leaseTtlMs: 100,
   });
   assert.equal(newer.revisionId, secondRevision.revisionId);
-  assert.equal((await loadActiveRepositoryManifest(root)).fencingToken, "00000000000000000002");
+  assert.equal((await loadActiveRepositoryManifest(root)).generation, generation(2));
 
   resumeFirst();
   await first;
   assert.deepEqual(await readdir(activationDirectoryPath(root)), [
-    "00000000000000000001.json",
-    "00000000000000000002.json",
+    `${generation(1)}.json`,
+    `${generation(2)}.json`,
   ]);
   assert.equal((await readManifest(root)).entries[0].revisionId, secondRevision.revisionId);
 });
 
-test("activation resolution skips corrupt higher files and rebuilt allocation resumes above them", async (t) => {
+test("activation resolution skips corrupt higher files", async (t) => {
   const root = await temporaryRepository(t);
   const firstRevision = await nextRevision(root, "2026-08-06T03:15:00.000Z");
-  await publish(root, publicationCommand("activation-one", firstRevision));
-  await writeFile(activationManifestPath(root, "00000000000000000002"), "{broken");
-  assert.equal((await loadActiveRepositoryManifest(root)).fencingToken, "00000000000000000001");
+  await publish(root, publicationCommand("activation-one", firstRevision, 1));
+  await writeFile(activationDeltaPath(root, generation(2)), "{broken");
+  assert.equal((await loadActiveRepositoryManifest(root)).generation, generation(1));
 
   const secondRevision = await nextRevision(root, "2026-08-06T03:30:00.000Z");
-  await publish(root, publicationCommand("activation-three", secondRevision));
+  await publish(root, publicationCommand("activation-three", secondRevision, 3));
   const active = await loadActiveRepositoryManifest(root);
-  assert.equal(active.fencingToken, "00000000000000000003");
+  assert.equal(active.generation, generation(3));
   assert.equal(active.manifest.entries[0].revisionId, secondRevision.revisionId);
+  await writeFile(activationDeltaPath(root, generation(4)), JSON.stringify({
+    schemaVersion: 1,
+    kind: "repositoryActivationDelta",
+    generation: generation(4),
+  }));
+  assert.equal((await loadActiveRepositoryManifest(root)).generation, generation(3), "schema-invalid deltas are inert");
 });
 
 test("PostgreSQL fence holds one dedicated session through verification and release", async () => {
@@ -240,32 +307,18 @@ test("PostgreSQL fence holds one dedicated session through verification and rele
   assert.equal(releases, 1);
 });
 
-test("PostgreSQL token allocation advances above the filesystem maximum after database rebuild", async () => {
-  const queries: string[] = [];
-  let nextCalls = 0;
-  const client = {
-    async query(sql: string) {
-      queries.push(sql);
-      if (sql.includes("nextval")) return { rows: [{ token: ++nextCalls === 1 ? "1" : "6" }] };
-      return { rows: [] };
-    },
-  } as unknown as PoolClient;
-  const allocator = new PostgresActivationTokenAllocator(client);
-  assert.equal(await allocator.allocate(BigInt(5)), BigInt(6));
-  assert.ok(queries.some((query) => query.includes("setval")));
-});
-
 test("all pre-activation crash windows preserve the old manifest and retry cleanly", async (t) => {
   await t.test("cleanup removes only old temporaries and preserves a concurrent recent temporary", async (st) => {
     const root = await temporaryRepository(st);
     const revision = await nextRevision(root, "2026-08-06T04:00:00.000Z");
     const staging = publicationStagingPath(root, revision.entryId, revision.revisionId);
     await mkdir(dirname(staging), { recursive: true });
-    const now = PUBLICATION_TEMPORARY_RETENTION_MS * 2;
+    const now = Date.now();
     const abandoned = resolve(dirname(staging), `.${revision.revisionId}.1.abandoned-worker.tmp`);
     const recent = resolve(dirname(staging), `.${revision.revisionId}.${now - 1}.active-worker.tmp`);
     await writeFile(abandoned, "partial");
     await writeFile(recent, "active");
+    await utimes(abandoned, new Date(0), new Date(0));
     await publish(root, publicationCommand("partial-temporary", revision), {}, now);
     await assert.rejects(readFile(abandoned), hasErrorCode("ENOENT"));
     assert.equal(await readFile(recent, "utf8"), "active");
@@ -361,7 +414,7 @@ test("processor owns acknowledgements, handles duplicates, and quarantines perma
   const revision = await revisionFromFixture("2026-08-06T09:00:00.000Z");
   await submitPublicationCommand(
     { idempotencyKey: "processor-duplicate", revision },
-    { spoolRoot, enqueue: async () => undefined, now: 1 },
+    { spoolRoot, dataRoot: fixtureRoot, enqueue: async () => undefined, now: 1 },
   );
   const actions = queueActionRecorder();
   let publications = 0;
@@ -425,7 +478,7 @@ test("processor applies bounded exponential retry and dead-letters the final att
   const revision = await revisionFromFixture("2026-08-06T10:00:00.000Z");
   await submitPublicationCommand(
     { idempotencyKey: "bounded-retry", revision },
-    { spoolRoot, enqueue: async () => undefined },
+    { spoolRoot, dataRoot: fixtureRoot, enqueue: async () => undefined },
   );
   const actions = queueActionRecorder();
   const transient = async () => { throw new Error("temporary database outage"); };
@@ -458,7 +511,7 @@ test("processor renews long reservations and stops queue transitions after owner
   const revision = await revisionFromFixture("2026-08-06T11:00:00.000Z");
   await submitPublicationCommand(
     { idempotencyKey: "long-publication", revision },
-    { spoolRoot, enqueue: async () => undefined },
+    { spoolRoot, dataRoot: fixtureRoot, enqueue: async () => undefined },
   );
   const healthy = queueActionRecorder();
   assert.equal(await processPublicationReservation({
@@ -476,11 +529,11 @@ test("processor renews long reservations and stops queue transitions after owner
 
   await submitPublicationCommand(
     { idempotencyKey: "lost-reservation", revision },
-    { spoolRoot, enqueue: async () => undefined },
+    { spoolRoot, dataRoot: fixtureRoot, enqueue: async () => undefined },
   );
   const stolen = queueActionRecorder((renewal) => renewal === 1);
   assert.equal(await processPublicationReservation({
-    reservation: reservation("lost-delivery", "lost-reservation", "lost-reservation", 0),
+    reservation: reservation("lost-delivery", "lost-reservation", "lost-reservation", 0, 2),
     dataRoot: "/unused",
     spoolRoot,
     visibilityTimeoutMs: 15,
@@ -503,7 +556,7 @@ test("normal publication contention requeues without consuming retry budget", as
   const revision = await revisionFromFixture("2026-08-06T12:00:00.000Z");
   await submitPublicationCommand(
     { idempotencyKey: "contention", revision },
-    { spoolRoot, enqueue: async () => undefined },
+    { spoolRoot, dataRoot: fixtureRoot, enqueue: async () => undefined },
   );
   const actions = queueActionRecorder();
   assert.equal(await processPublicationReservation({
@@ -528,7 +581,6 @@ async function publish(
     command,
     leaseManager: new RedisPublicationLeaseManager(memoryLeaseCommands()),
     fenceManager: memoryFenceManager({ owner: null }),
-    tokenAllocator: memoryTokenAllocator(),
     now: () => now,
     hooks,
   });
@@ -569,8 +621,8 @@ function revise(current: CanonicalRevision, createdAt: string): CanonicalRevisio
   return createCanonicalRevision(input as CanonicalRevisionInput);
 }
 
-function publicationCommand(idempotencyKey: string, revision: CanonicalRevision): PublicationCommand {
-  return { schemaVersion: 1, kind: "publishCanonicalRevision", idempotencyKey, revision };
+function publicationCommand(idempotencyKey: string, revision: CanonicalRevision, assignedGeneration = 1): PublicationCommand {
+  return { schemaVersion: 1, kind: "publishCanonicalRevision", idempotencyKey, generation: generation(assignedGeneration), revision };
 }
 
 function memoryLeaseCommands(now: () => number = Date.now) {
@@ -613,18 +665,8 @@ function memoryFenceManager(state: { owner: symbol | null }): PublicationFenceMa
   };
 }
 
-function memoryTokenAllocator(): ActivationTokenAllocator {
-  let current = BigInt(0);
-  return {
-    async allocate(minimumExclusive) {
-      current = (current > minimumExclusive ? current : minimumExclusive) + BigInt(1);
-      return current;
-    },
-  };
-}
-
-function reservation(deliveryId: string, reservationId: string, idempotencyKey: string, attempt: number): PublicationReservation {
-  const message = { deliveryId, idempotencyKey, attempt, createdAt: 1 };
+function reservation(deliveryId: string, reservationId: string, idempotencyKey: string, attempt: number, assignedGeneration = 1): PublicationReservation {
+  const message = { deliveryId, idempotencyKey, generation: generation(assignedGeneration), attempt, createdAt: 1 };
   return { deliveryId, reservationId, raw: JSON.stringify(message), message };
 }
 

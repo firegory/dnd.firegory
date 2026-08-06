@@ -15,6 +15,7 @@ export const PUBLICATION_MAX_ATTEMPTS = 5;
 export type PublicationQueueMessage = Readonly<{
   deliveryId: string;
   idempotencyKey: string;
+  generation: string;
   attempt: number;
   createdAt: number;
 }>;
@@ -96,13 +97,17 @@ return 1`;
 
 export async function enqueuePublication(
   idempotencyKey: string,
+  generation: string,
   options: Readonly<{ now?: number; delayMs?: number; backend?: PublicationQueueBackend }> = {},
 ): Promise<PublicationQueueMessage> {
   assertStableId(idempotencyKey, "idempotencyKey");
+  if (!/^[0-9]{32}$/.test(generation)) throw new TypeError("generation must be a fixed-width publication generation.");
   const now = options.now ?? Date.now();
+  if (!Number.isSafeInteger(now) || now < 0) throw new TypeError("now must be a nonnegative safe integer.");
   const message: PublicationQueueMessage = {
     deliveryId: randomUUID(),
     idempotencyKey,
+    generation,
     attempt: 0,
     createdAt: now,
   };
@@ -261,9 +266,12 @@ function decodeMessage(raw: string, deliveryId: string): PublicationQueueMessage
     !isRecord(value) ||
     value.deliveryId !== deliveryId ||
     typeof value.idempotencyKey !== "string" ||
+    typeof value.generation !== "string" ||
+    !/^[0-9]{32}$/.test(value.generation) ||
     !Number.isSafeInteger(value.attempt) ||
     (value.attempt as number) < 0 ||
-    !Number.isSafeInteger(value.createdAt)
+    !Number.isSafeInteger(value.createdAt) ||
+    (value.createdAt as number) < 0
   ) {
     throw new Error("Publication delivery body is malformed.");
   }

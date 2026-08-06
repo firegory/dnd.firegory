@@ -69,13 +69,20 @@ export async function processPublicationReservation(options: Readonly<{
     return "reservation-lost";
   }
 
-  const { idempotencyKey, attempt } = reservation.message;
+  const { idempotencyKey, generation, attempt } = reservation.message;
   let state;
   try {
     state = await readOutboxState(spoolRoot, idempotencyKey);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    await markPublicationFailed(idempotencyKey, reason, spoolRoot, now, reservation.message.createdAt);
+    await markPublicationFailed(idempotencyKey, generation, reason, spoolRoot, now);
+    await quarantinePublication(reservation.deliveryId, reservation.raw, reason, spoolRoot, now);
+    await queue.deadLetter(reservation, reason, now);
+    return "dead-lettered";
+  }
+  if (state && state.generation !== generation) {
+    const reason = `Queued generation does not match outbox state ${idempotencyKey}.`;
+    await markPublicationFailed(idempotencyKey, generation, reason, spoolRoot, now);
     await quarantinePublication(reservation.deliveryId, reservation.raw, reason, spoolRoot, now);
     await queue.deadLetter(reservation, reason, now);
     return "dead-lettered";
@@ -106,8 +113,9 @@ export async function processPublicationReservation(options: Readonly<{
       dataRoot: options.dataRoot,
       spoolRoot,
       idempotencyKey,
+      expectedGeneration: generation,
     });
-    await markPublicationCompleted(idempotencyKey, spoolRoot, now, reservation.message.createdAt);
+    await markPublicationCompleted(idempotencyKey, generation, spoolRoot, now);
     if (reservationLost || !await queue.renew(reservation, { now: clock(), visibilityTimeoutMs })) {
       return "reservation-lost";
     }
@@ -123,7 +131,7 @@ export async function processPublicationReservation(options: Readonly<{
       return "retried";
     }
     if (isPermanentPublicationFailure(error) || attempt + 1 >= PUBLICATION_MAX_ATTEMPTS) {
-      await markPublicationFailed(idempotencyKey, reason, spoolRoot, now, reservation.message.createdAt);
+      await markPublicationFailed(idempotencyKey, generation, reason, spoolRoot, now);
       await quarantinePublication(reservation.deliveryId, reservation.raw, reason, spoolRoot, now);
       await queue.deadLetter(reservation, reason, now);
       return "dead-lettered";

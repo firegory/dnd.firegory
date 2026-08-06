@@ -6,6 +6,7 @@ import Ajv2020, { type ErrorObject, type ValidateFunction } from "ajv/dist/2020.
 import addFormats from "ajv-formats";
 
 import canonicalRevisionSchema from "../../../content-repository/schemas/v1/canonical-revision.schema.json" with { type: "json" };
+import repositoryActivationDeltaSchema from "../../../content-repository/schemas/v1/repository-activation-delta.schema.json" with { type: "json" };
 import repositoryManifestSchema from "../../../content-repository/schemas/v1/repository-manifest.schema.json" with { type: "json" };
 import sourceSchema from "../../../content-repository/schemas/v1/source.schema.json" with { type: "json" };
 import {
@@ -13,13 +14,12 @@ import {
   activationDirectoryPath,
   hasValidRevisionIdentity,
   manifestPath,
-  parseActivationToken,
   sourceMetadataPath,
   type CanonicalRevision,
   type ContentSource,
   type JsonValue,
   type RepositoryManifest,
-  type RepositoryActivation,
+  type RepositoryActivationDelta,
 } from "./repository.ts";
 
 type Section = Readonly<{
@@ -46,6 +46,7 @@ ajv.addSchema(sourceSchema);
 const validateSource = ajv.getSchema(sourceSchema.$id) as ValidateFunction<ContentSource>;
 const validateRevision = ajv.compile(canonicalRevisionSchema) as ValidateFunction<CanonicalRevision>;
 const validateManifestDocument = ajv.compile(repositoryManifestSchema) as ValidateFunction<RepositoryManifest>;
+const validateActivationDelta = ajv.compile(repositoryActivationDeltaSchema) as ValidateFunction<RepositoryActivationDelta>;
 
 export class ContentSchemaValidationError extends Error {
   readonly errors: readonly ErrorObject[];
@@ -124,19 +125,13 @@ export function assertRepositoryManifest(document: unknown): asserts document is
   assertUnique(document.entries.map((entry) => entry.entryId), "Manifest entry IDs");
 }
 
-export function assertRepositoryActivation(document: unknown): asserts document is RepositoryActivation {
-  if (
-    !isRecord(document) ||
-    Object.keys(document).some((key) => !["schemaVersion", "kind", "fencingToken", "manifest"].includes(key)) ||
-    document.schemaVersion !== 1 ||
-    document.kind !== "repositoryActivation" ||
-    typeof document.fencingToken !== "string" ||
-    !/^[0-9]{20}$/.test(document.fencingToken)
-  ) {
-    throw new ContentIntegrityError("Repository activation does not match the supported activation contract.");
+export function assertRepositoryActivationDelta(document: unknown): asserts document is RepositoryActivationDelta {
+  if (!validateActivationDelta(document)) {
+    throw new ContentSchemaValidationError("Repository activation delta", validateActivationDelta.errors ?? []);
   }
-  parseActivationToken(document.fencingToken);
-  assertRepositoryManifest(document.manifest);
+  if (document.targetEntryId !== document.entry.entryId) {
+    throw new ContentIntegrityError("Repository activation delta target does not match its entry.");
+  }
 }
 
 export async function validateContentRepository(dataRoot: string): Promise<void> {
@@ -146,41 +141,54 @@ export async function validateContentRepository(dataRoot: string): Promise<void>
 
 export async function loadActiveRepositoryManifest(dataRoot: string): Promise<Readonly<{
   manifest: RepositoryManifest;
-  fencingToken: string | null;
+  generation: string | null;
 }>> {
   const root = await realpath(dataRoot);
+  const manifestFile = await resolveRepositoryFile(root, relative(root, manifestPath(root)));
+  const bootstrap = await readJson(manifestFile, "Repository manifest");
+  assertRepositoryManifest(bootstrap);
+  await validateManifestContents(root, bootstrap);
+
   const activationDirectory = activationDirectoryPath(root);
   let activationNames: string[] = [];
   try {
     activationNames = (await readdir(activationDirectory, { withFileTypes: true }))
-      .filter((entry) => entry.isFile() && /^[0-9]{20}\.json$/.test(entry.name))
+      .filter((entry) => entry.isFile() && /^[0-9]{32}\.json$/.test(entry.name))
       .map((entry) => entry.name)
-      .sort()
-      .reverse();
+      .sort();
   } catch (error) {
     if (!hasCode(error, "ENOENT")) throw error;
   }
 
+  const entries = new Map(bootstrap.entries.map((entry) => [entry.entryId, entry]));
+  const targetGenerations = new Map<string, string>();
+  let highestGeneration: string | null = null;
   for (const name of activationNames) {
     try {
       const file = await resolveRepositoryFile(root, relative(root, resolve(activationDirectory, name)));
-      const activation = await readJson(file, `Repository activation ${name}`);
-      assertRepositoryActivation(activation);
-      if (`${activation.fencingToken}.json` !== name) {
-        throw new ContentIntegrityError(`Repository activation token does not match filename ${name}.`);
+      const delta = await readJson(file, `Repository activation delta ${name}`);
+      assertRepositoryActivationDelta(delta);
+      if (`${delta.generation}.json` !== name) {
+        throw new ContentIntegrityError(`Repository activation generation does not match filename ${name}.`);
       }
-      await validateManifestContents(root, activation.manifest);
-      return { manifest: activation.manifest, fencingToken: activation.fencingToken };
+      await validateManifestContents(root, { ...bootstrap, entries: [delta.entry] });
+      const previous = targetGenerations.get(delta.targetEntryId);
+      if (!previous || delta.generation > previous) {
+        entries.set(delta.targetEntryId, delta.entry);
+        targetGenerations.set(delta.targetEntryId, delta.generation);
+      }
+      if (!highestGeneration || delta.generation > highestGeneration) highestGeneration = delta.generation;
     } catch {
-      // A corrupt or incomplete higher activation is ignored in favor of the next valid token.
+      // Invalid deltas are inert; valid lower generations and other targets still compose.
     }
   }
 
-  const manifestFile = await resolveRepositoryFile(root, relative(root, manifestPath(root)));
-  const manifest = await readJson(manifestFile, "Repository manifest");
-  assertRepositoryManifest(manifest);
+  const manifest: RepositoryManifest = {
+    ...bootstrap,
+    entries: [...entries.values()].sort((left, right) => left.entryId.localeCompare(right.entryId)),
+  };
   await validateManifestContents(root, manifest);
-  return { manifest, fencingToken: null };
+  return { manifest, generation: highestGeneration };
 }
 
 async function validateManifestContents(root: string, manifest: RepositoryManifest): Promise<void> {

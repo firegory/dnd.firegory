@@ -5,7 +5,7 @@ export const CONTENT_SCHEMA_VERSION = 1 as const;
 
 const STABLE_ID = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
 const REVISION_ID = /^rev-[0-9a-f]{64}$/;
-const ACTIVATION_TOKEN = /^[0-9]{20}$/;
+const PUBLICATION_GENERATION = /^[0-9]{32}$/;
 
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 
@@ -60,11 +60,13 @@ export type RepositoryManifest = Readonly<{
   entries: readonly RepositoryManifestEntry[];
 }>;
 
-export type RepositoryActivation = Readonly<{
+export type RepositoryActivationDelta = Readonly<{
   schemaVersion: typeof CONTENT_SCHEMA_VERSION;
-  kind: "repositoryActivation";
-  fencingToken: string;
-  manifest: RepositoryManifest;
+  kind: "repositoryActivationDelta";
+  generation: string;
+  idempotencyKey: string;
+  targetEntryId: string;
+  entry: RepositoryManifestEntry;
 }>;
 
 export function getDataRoot(environment: NodeJS.ProcessEnv = process.env): string {
@@ -81,33 +83,33 @@ export function activationDirectoryPath(root: string): string {
   return resolve(root, "manifests", "activations");
 }
 
-export function activationManifestPath(root: string, fencingToken: string): string {
-  assertActivationToken(fencingToken);
-  return resolve(activationDirectoryPath(root), `${fencingToken}.json`);
+export function activationDeltaPath(root: string, generation: string): string {
+  assertPublicationGeneration(generation);
+  return resolve(activationDirectoryPath(root), `${generation}.json`);
 }
 
 export function activationTemporaryPath(
   root: string,
-  fencingToken: string,
+  generation: string,
   createdAt: number,
   ownerId: string,
 ): string {
-  assertActivationToken(fencingToken);
+  assertPublicationGeneration(generation);
   if (!Number.isSafeInteger(createdAt) || createdAt < 0) throw new TypeError("createdAt must be a nonnegative integer.");
   assertStableId(ownerId, "ownerId");
-  return resolve(activationDirectoryPath(root), `.${fencingToken}.${createdAt}.${ownerId}.tmp`);
+  return resolve(activationDirectoryPath(root), `.${generation}.${createdAt}.${ownerId}.tmp`);
 }
 
-export function formatActivationToken(token: bigint): string {
-  if (token < BigInt(0) || token > BigInt("9223372036854775807")) throw new TypeError("Activation token is outside PostgreSQL bigint range.");
-  return token.toString().padStart(20, "0");
+export function formatPublicationGeneration(generation: bigint): string {
+  if (generation < BigInt(0) || generation > BigInt("99999999999999999999999999999999")) {
+    throw new TypeError("Publication generation is outside the fixed-width decimal range.");
+  }
+  return generation.toString().padStart(32, "0");
 }
 
-export function parseActivationToken(token: string): bigint {
-  assertActivationToken(token);
-  const parsed = BigInt(token);
-  if (parsed > BigInt("9223372036854775807")) throw new TypeError("Activation token is outside PostgreSQL bigint range.");
-  return parsed;
+export function parsePublicationGeneration(generation: string): bigint {
+  assertPublicationGeneration(generation);
+  return BigInt(generation);
 }
 
 export function schemaPath(root: string, schemaName: string, schemaVersion = CONTENT_SCHEMA_VERSION): string {
@@ -166,14 +168,19 @@ export function publicationOutboxStatePath(root: string, idempotencyKey: string)
 export function publicationOutboxEventPath(
   root: string,
   idempotencyKey: string,
-  generation: number,
+  generation: string,
   status: "pending" | "queued" | "completed" | "failed",
   eventId: string,
 ): string {
   assertStableId(idempotencyKey, "idempotencyKey");
-  if (!Number.isSafeInteger(generation) || generation < 0) throw new TypeError("generation must be a nonnegative integer.");
+  assertPublicationGeneration(generation);
   assertStableId(eventId, "eventId");
   return resolve(publicationOutboxStatePath(root, idempotencyKey), `${generation}-${status}-${eventId}.json`);
+}
+
+export function publicationGenerationReservationPath(root: string, generation: string): string {
+  assertPublicationGeneration(generation);
+  return resolve(root, "generation-reservations", `${generation}.json`);
 }
 
 export function publicationQuarantinePath(root: string, deliveryId: string): string {
@@ -240,8 +247,10 @@ function assertRevisionId(value: string): void {
   if (!REVISION_ID.test(value)) throw new TypeError("revisionId must be a SHA-256-derived revision ID.");
 }
 
-function assertActivationToken(value: string): void {
-  if (!ACTIVATION_TOKEN.test(value)) throw new TypeError("fencingToken must be a fixed-width decimal activation token.");
+function assertPublicationGeneration(value: string): void {
+  if (!PUBLICATION_GENERATION.test(value)) {
+    throw new TypeError("generation must be a fixed-width decimal publication generation.");
+  }
 }
 
 function assertPositiveInteger(value: number, name: string): void {

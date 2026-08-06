@@ -8,17 +8,14 @@ import {
 } from "../../server/content-storage/publication-command.ts";
 import {
   activationDirectoryPath,
-  activationManifestPath,
+  activationDeltaPath,
   activationTemporaryPath,
   canonicalJson,
   canonicalRevisionPath,
-  formatActivationToken,
-  parseActivationToken,
   publicationStagingPath,
   publicationStagingTemporaryPath,
   type JsonValue,
-  type RepositoryActivation,
-  type RepositoryManifest,
+  type RepositoryActivationDelta,
 } from "../../server/content-storage/repository.ts";
 import {
   assertCanonicalRevision,
@@ -43,10 +40,6 @@ import {
   openDirectoryNoFollow,
   openExclusiveNoFollow,
 } from "./safe-filesystem.ts";
-import {
-  createPostgresActivationTokenAllocator,
-  type ActivationTokenAllocator,
-} from "./token.ts";
 
 export const PUBLICATION_TEMPORARY_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
@@ -75,7 +68,7 @@ export type PublicationHooks = Readonly<{
   afterStagingTemporarySynced?: () => void | Promise<void>;
   afterStagingInstalled?: () => void | Promise<void>;
   beforeActivation?: () => void | Promise<void>;
-  afterActivationTokenAllocated?: (fencingToken: string) => void | Promise<void>;
+  beforeActivationInstall?: (generation: string) => void | Promise<void>;
   afterActivationTemporarySynced?: () => void | Promise<void>;
 }>;
 
@@ -84,7 +77,6 @@ export async function publishCanonicalRevision(options: Readonly<{
   command: PublicationCommand;
   leaseManager?: PublicationLeaseManager;
   fenceManager?: PublicationFenceManager;
-  tokenAllocator?: ActivationTokenAllocator;
   leaseTtlMs?: number;
   now?: () => number;
   hooks?: PublicationHooks;
@@ -139,13 +131,13 @@ export async function publishCanonicalRevision(options: Readonly<{
       await removeAbandonedTemporaryFiles(
         root,
         stagingDirectory,
-        /^\.rev-[0-9a-f]{64}\.([0-9]+)\.[a-z0-9-]+\.tmp$/,
+        /^\.rev-[0-9a-f]{64}\.[0-9]+\.[a-z0-9-]+\.tmp$/,
         now - PUBLICATION_TEMPORARY_RETENTION_MS,
       );
       await removeAbandonedTemporaryFiles(
         root,
         activationDirectory,
-        /^\.[0-9]{20}\.([0-9]+)\.[a-z0-9-]+\.tmp$/,
+        /^\.[0-9]{32}\.[0-9]+\.[a-z0-9-]+\.tmp$/,
         now - PUBLICATION_TEMPORARY_RETENTION_MS,
       );
 
@@ -165,37 +157,27 @@ export async function publishCanonicalRevision(options: Readonly<{
       await promoteRevision(root, stagingFile, revisionFile, encodedRevision);
       await options.hooks?.beforeActivation?.();
 
-      const nextManifest: RepositoryManifest = {
-        ...manifest,
-        entries: [
-          ...manifest.entries.filter((entry) => entry.entryId !== revision.entryId),
-          {
+      await assertLease(lease, leaseLost);
+      await options.hooks?.beforeActivationInstall?.(options.command.generation);
+      await installActivationDelta(
+        root,
+        {
+          schemaVersion: 1,
+          kind: "repositoryActivationDelta",
+          generation: options.command.generation,
+          idempotencyKey: options.command.idempotencyKey,
+          targetEntryId: revision.entryId,
+          entry: {
             entryId: revision.entryId,
             revisionId: revision.revisionId,
             path: relative(root, revisionFile).replaceAll("\\", "/"),
             contentHash: revision.contentHash,
           },
-        ].sort((left, right) => left.entryId.localeCompare(right.entryId)),
-      };
-
-      await assertLease(lease, leaseLost);
-      const tokenResource = options.tokenAllocator ? null : await createPostgresActivationTokenAllocator();
-      try {
-        const maximumToken = await maximumActivationToken(root);
-        const token = await (options.tokenAllocator ?? tokenResource!.allocator).allocate(maximumToken);
-        const fencingToken = formatActivationToken(token);
-        await options.hooks?.afterActivationTokenAllocated?.(fencingToken);
-        await installActivation(
-          root,
-          nextManifest,
-          fencingToken,
-          lease.ownerId.toLowerCase(),
-          now,
-          options.hooks?.afterActivationTemporarySynced,
-        );
-      } finally {
-        tokenResource?.release();
-      }
+        },
+        lease.ownerId.toLowerCase(),
+        now,
+        options.hooks?.afterActivationTemporarySynced,
+      );
 
       return { entryId: revision.entryId, revisionId: revision.revisionId, alreadyActive: false };
     } finally {
@@ -215,18 +197,20 @@ export async function publishSpooledCommand(options: Readonly<{
   dataRoot: string;
   spoolRoot?: string;
   idempotencyKey: string;
+  expectedGeneration?: string;
   leaseManager?: PublicationLeaseManager;
   fenceManager?: PublicationFenceManager;
-  tokenAllocator?: ActivationTokenAllocator;
   leaseTtlMs?: number;
 }>): Promise<PublicationResult> {
   const command = await loadPublicationCommand(options.idempotencyKey, options.spoolRoot);
+  if (options.expectedGeneration !== undefined && command.generation !== options.expectedGeneration) {
+    throw new ContentIntegrityError(`Queued generation does not match publication command ${options.idempotencyKey}.`);
+  }
   return publishCanonicalRevision({
     dataRoot: options.dataRoot,
     command,
     leaseManager: options.leaseManager,
     fenceManager: options.fenceManager,
-    tokenAllocator: options.tokenAllocator,
     leaseTtlMs: options.leaseTtlMs,
   });
 }
@@ -288,25 +272,19 @@ async function promoteRevision(root: string, stagingFile: string, revisionFile: 
   await syncDirectory(dirname(stagingFile));
 }
 
-async function installActivation(
+async function installActivationDelta(
   root: string,
-  manifest: RepositoryManifest,
-  fencingToken: string,
+  activation: RepositoryActivationDelta,
   ownerId: string,
   createdAt: number,
   afterTemporarySynced?: () => void | Promise<void>,
 ): Promise<void> {
-  const activation: RepositoryActivation = {
-    schemaVersion: 1,
-    kind: "repositoryActivation",
-    fencingToken,
-    manifest,
-  };
-  const activationFile = activationManifestPath(root, fencingToken);
-  const temporary = activationTemporaryPath(root, fencingToken, createdAt, ownerId);
+  const activationFile = activationDeltaPath(root, activation.generation);
+  const temporary = activationTemporaryPath(root, activation.generation, createdAt, ownerId);
+  const contents = `${JSON.stringify(activation, null, 2)}\n`;
   const file = await openExclusiveNoFollow(temporary, 0o640);
   try {
-    await file.writeFile(`${JSON.stringify(activation, null, 2)}\n`, "utf8");
+    await file.writeFile(contents, "utf8");
     await file.sync();
   } finally {
     await file.close();
@@ -315,7 +293,10 @@ async function installActivation(
     await afterTemporarySynced?.();
     await assertCanonicalAncestors(root, activationFile);
     if (await regularFileExists(root, activationFile)) {
-      throw new ContentIntegrityError(`Activation fencing token already exists: ${fencingToken}`);
+      if (await readFile(activationFile, "utf8") !== contents) {
+        throw new ContentIntegrityError(`Publication generation is already bound to another activation: ${activation.generation}`);
+      }
+      return;
     }
     await rename(temporary, activationFile);
     await syncDirectory(dirname(activationFile));
@@ -332,27 +313,16 @@ async function removeAbandonedTemporaryFiles(
 ): Promise<void> {
   await assertCanonicalAncestors(root, resolve(directory, "placeholder"));
   for (const name of await readdir(directory)) {
-    const match = pattern.exec(name);
-    if (!match || Number(match[1]) >= olderThan) continue;
+    if (!pattern.test(name)) continue;
     const path = resolve(directory, name);
     const metadata = await lstat(path);
     if (metadata.isDirectory()) {
       throw new ContentIntegrityError(`Abandoned publication temporary path is a directory: ${path}`);
     }
+    if (!metadata.isFile() || metadata.mtimeMs >= olderThan) continue;
     await rm(path);
   }
   await syncDirectory(directory);
-}
-
-async function maximumActivationToken(root: string): Promise<bigint> {
-  let maximum = BigInt(0);
-  for (const name of await readdir(activationDirectoryPath(root))) {
-    const match = /^([0-9]{20})\.json$/.exec(name);
-    if (!match) continue;
-    const token = parseActivationToken(match[1]);
-    if (token > maximum) maximum = token;
-  }
-  return maximum;
 }
 
 async function regularFileExists(root: string, path: string): Promise<boolean> {

@@ -46,7 +46,7 @@ Worker
   -> Postgres + pgvector
 ```
 
-Canonical content publication is a separate worker-owned write path. The app fsyncs validated commands and immutable state events to a durable outbox while its canonical repository mount remains read-only, then sends uniquely identified deliveries through Redis. Ownership-checked visibility renewal coordinates queue work, while advisory locks reduce normal contention. Correctness comes from immutable fixed-width PostgreSQL fencing-token activations: the greatest valid activation is active, so a stale writer cannot regress content. Immutable revisions and activations are installed through fsynced temporary files and atomic same-filesystem renames.
+Canonical content publication is a separate worker-owned write path. Before persisting a command, the app exclusively creates and fsyncs a monotonic 32-digit generation reservation in the shared spool; collisions rescan all durable reservations, commands, and activations. The app then fsyncs the generation-bearing command and immutable outbox events while its canonical repository mount remains read-only, and sends a generation-bearing delivery through Redis. Ownership-checked visibility renewal coordinates queue work, while advisory locks reduce normal contention. Correctness comes from immutable per-target activation deltas: readers fold valid deltas over bootstrap state and the greatest generation wins independently for each target. Thus stale same-target writers are inert and different-target writers compose. Immutable revisions and deltas are installed through fsynced temporary files and atomic same-filesystem renames.
 
 ### Next.js app
 

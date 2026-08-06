@@ -13,10 +13,12 @@ import {
   type PublicationQueueMessage,
 } from "../../src/server/content-storage/publication-queue.ts";
 
+const generation = "0".repeat(31) + "1";
+
 test("queue reservations use unique deliveries and only the current owner can acknowledge", async () => {
   const backend = memoryQueueBackend();
-  const firstDelivery = await enqueuePublication("same-command", { backend, now: 10 });
-  const secondDelivery = await enqueuePublication("same-command", { backend, now: 10 });
+  const firstDelivery = await enqueuePublication("same-command", generation, { backend, now: 10 });
+  const secondDelivery = await enqueuePublication("same-command", generation, { backend, now: 10 });
   assert.notEqual(firstDelivery.deliveryId, secondDelivery.deliveryId);
 
   const first = await reservePublication({ backend, now: 10, visibilityTimeoutMs: 100 });
@@ -43,7 +45,7 @@ test("queue reservations use unique deliveries and only the current owner can ac
 
 test("retry increments attempts, respects backoff, and malformed bodies can be removed", async () => {
   const backend = memoryQueueBackend();
-  await enqueuePublication("retry-command", { backend, now: 0 });
+  await enqueuePublication("retry-command", generation, { backend, now: 0 });
   const reserved = await reservePublication({ backend, now: 0 });
   assert.ok(reserved?.message);
   assert.equal(await retryPublication(reserved, { backend, now: 0, delayMs: 50 }), true);
@@ -53,7 +55,7 @@ test("retry increments attempts, respects backoff, and malformed bodies can be r
   assert.equal(retried.message.attempt, 1);
   assert.equal(await acknowledgePublication(retried, backend), true);
 
-  await enqueuePublication("contention-command", { backend, now: 50 });
+  await enqueuePublication("contention-command", generation, { backend, now: 50 });
   const contended = await reservePublication({ backend, now: 50 });
   assert.ok(contended?.message);
   assert.equal(await retryPublication(contended, { backend, now: 50, delayMs: 10, consumeAttempt: false }), true);
@@ -70,6 +72,18 @@ test("retry increments attempts, respects backoff, and malformed bodies can be r
   assert.equal(await deadLetterPublication(malformed, "malformed", 60, backend), true);
   assert.equal(backend.deadLetters.length, 1);
   assert.equal(await reclaimExpiredPublications(1_000_000, backend), 0);
+
+  backend.putRaw("negative-created-at", JSON.stringify({
+    deliveryId: "negative-created-at",
+    idempotencyKey: "negative-command",
+    generation,
+    attempt: 0,
+    createdAt: -1,
+  }), 60);
+  const negative = await reservePublication({ backend, now: 60 });
+  assert.ok(negative);
+  assert.equal(negative.message, null);
+  assert.match(negative.malformedReason ?? "", /malformed/);
 });
 
 function memoryQueueBackend() {

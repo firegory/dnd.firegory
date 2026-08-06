@@ -3,8 +3,10 @@ import { link, lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs
 import { dirname, resolve } from "node:path";
 
 import { enqueuePublication } from "./publication-queue.ts";
+import { reservePublicationGeneration } from "./publication-generation.ts";
 import {
   canonicalJson,
+  getDataRoot,
   publicationOutboxEventPath,
   publicationOutboxStatePath,
   publicationQuarantinePath,
@@ -18,6 +20,7 @@ export type PublicationCommand = Readonly<{
   schemaVersion: 1;
   kind: "publishCanonicalRevision";
   idempotencyKey: string;
+  generation: string;
   revision: CanonicalRevision;
 }>;
 
@@ -26,7 +29,7 @@ export type PublicationOutboxState = Readonly<{
   kind: "publicationOutboxEvent";
   idempotencyKey: string;
   status: "pending" | "queued" | "completed" | "failed";
-  generation: number;
+  generation: string;
   eventId: string;
   updatedAt: number;
   lastError?: string;
@@ -39,7 +42,15 @@ export class PublicationCommandError extends Error {
   }
 }
 
-type Enqueue = (idempotencyKey: string) => Promise<unknown>;
+type Enqueue = (idempotencyKey: string, generation: string) => Promise<unknown>;
+type SubmitOptions = Readonly<{
+  spoolRoot?: string;
+  dataRoot?: string;
+  enqueue?: Enqueue;
+  now?: number;
+  afterEnqueue?: () => void | Promise<void>;
+  beforeGenerationCreate?: (generation: string) => void | Promise<void>;
+}>;
 const OUTBOX_TEMPORARY_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
 export function getPublicationSpoolRoot(environment: NodeJS.ProcessEnv = process.env): string {
@@ -50,20 +61,28 @@ export function getPublicationSpoolRoot(environment: NodeJS.ProcessEnv = process
 
 export async function submitPublicationCommand(
   input: Readonly<{ idempotencyKey: string; revision: CanonicalRevision }>,
-  options: Readonly<{
-    spoolRoot?: string;
-    enqueue?: Enqueue;
-    now?: number;
-    afterEnqueue?: () => void | Promise<void>;
-  }> = {},
+  options: SubmitOptions = {},
 ): Promise<Readonly<{ commandPath: string; existing: boolean }>> {
   assertCanonicalRevision(input.revision);
   const spoolRoot = resolve(options.spoolRoot ?? getPublicationSpoolRoot());
   const commandPath = publicationSpoolPath(spoolRoot, input.idempotencyKey);
+  const existingCommand = await loadPublicationCommandIfPresent(input.idempotencyKey, spoolRoot);
+  if (existingCommand) {
+    assertSameRevision(existingCommand, input.revision, input.idempotencyKey);
+    return enqueueExistingCommand(existingCommand, commandPath, options, spoolRoot);
+  }
+  const generation = await reservePublicationGeneration({
+    spoolRoot,
+    dataRoot: resolve(options.dataRoot ?? getDataRoot()),
+    idempotencyKey: input.idempotencyKey,
+    now: options.now,
+    beforeCreate: options.beforeGenerationCreate,
+  });
   const command: PublicationCommand = {
     schemaVersion: 1,
     kind: "publishCanonicalRevision",
     idempotencyKey: input.idempotencyKey,
+    generation,
     revision: input.revision,
   };
   const encoded = `${canonicalJson(command as unknown as JsonValue)}\n`;
@@ -72,20 +91,24 @@ export async function submitPublicationCommand(
 
   const now = options.now ?? Date.now();
   const existing = await installImmutableCommand(commandPath, encoded, now);
-  await ensurePendingState(spoolRoot, input.idempotencyKey, now);
+  const installedCommand = existing
+    ? await loadPublicationCommand(input.idempotencyKey, spoolRoot)
+    : command;
+  assertSameRevision(installedCommand, input.revision, input.idempotencyKey);
+  await ensurePendingState(spoolRoot, input.idempotencyKey, installedCommand.generation, now);
   const currentState = await readOutboxState(spoolRoot, input.idempotencyKey);
   if (currentState?.status === "completed") return { commandPath, existing };
   if (currentState?.status === "failed") {
     throw new Error(`Publication ${input.idempotencyKey} is quarantined: ${currentState.lastError ?? "unknown failure"}`);
   }
-  await (options.enqueue ?? enqueuePublication)(input.idempotencyKey);
+  await (options.enqueue ?? enqueuePublication)(input.idempotencyKey, installedCommand.generation);
   await options.afterEnqueue?.();
   await writeOutboxEvent(spoolRoot, {
     schemaVersion: 1,
     kind: "publicationOutboxEvent",
     idempotencyKey: input.idempotencyKey,
     status: "queued",
-    generation: now,
+    generation: installedCommand.generation,
     eventId: randomUUID(),
     updatedAt: now,
   });
@@ -119,37 +142,42 @@ export async function reconcilePublicationOutbox(options: Readonly<{
       state = await readOutboxState(spoolRoot, idempotencyKey);
     } catch (error) {
       const reason = errorMessage(error);
-      await markPublicationFailed(idempotencyKey, reason, spoolRoot, now);
+      await markPublicationFailed(idempotencyKey, "0".repeat(32), reason, spoolRoot, now);
       await quarantineOutboxFailure(spoolRoot, idempotencyKey, reason, now);
       failed++;
       continue;
     }
     if (state?.status === "completed" || state?.status === "failed") continue;
     if (state?.status === "queued" && now - state.updatedAt < redeliveryAfterMs) continue;
+    let command: PublicationCommand;
     try {
-      await loadPublicationCommand(idempotencyKey, spoolRoot);
+      command = await loadPublicationCommand(idempotencyKey, spoolRoot);
+      state ??= null;
+      if (state && state.generation !== command.generation) {
+        throw new PublicationCommandError(`Outbox generation does not match command ${idempotencyKey}.`);
+      }
     } catch (error) {
       const reason = errorMessage(error);
-      await markPublicationFailed(idempotencyKey, reason, spoolRoot, now);
+      await markPublicationFailed(idempotencyKey, state?.generation ?? "0".repeat(32), reason, spoolRoot, now);
       await quarantineOutboxFailure(spoolRoot, idempotencyKey, reason, now);
       failed++;
       continue;
     }
 
     try {
-      await (options.enqueue ?? enqueuePublication)(idempotencyKey);
+      await (options.enqueue ?? enqueuePublication)(idempotencyKey, command.generation);
       await writeOutboxEvent(spoolRoot, {
         schemaVersion: 1,
         kind: "publicationOutboxEvent",
         idempotencyKey,
         status: "queued",
-        generation: now,
+        generation: command.generation,
         eventId: randomUUID(),
         updatedAt: now,
       });
       enqueued++;
     } catch {
-      // The durable state remains pending/stale so the next reconciliation retries.
+      // Pending/stale state remains eligible for the next reconciliation pass.
     }
   }
   return { enqueued, failed };
@@ -165,7 +193,9 @@ export async function loadPublicationCommand(
     !isRecord(value) ||
     value.schemaVersion !== 1 ||
     value.kind !== "publishCanonicalRevision" ||
-    value.idempotencyKey !== idempotencyKey
+    value.idempotencyKey !== idempotencyKey ||
+    typeof value.generation !== "string" ||
+    !/^[0-9]{32}$/.test(value.generation)
   ) {
     throw new PublicationCommandError(`Publication command ${idempotencyKey} is invalid.`);
   }
@@ -188,7 +218,7 @@ export async function readOutboxState(
 
   const events: PublicationOutboxState[] = [];
   for (const name of names) {
-    if (!/^[0-9]+-(?:pending|queued|completed|failed)-[a-z0-9-]+\.json$/.test(name)) continue;
+    if (!/^[0-9]{32}-(?:pending|queued|completed|failed)-[a-z0-9-]+\.json$/.test(name)) continue;
     const value: unknown = JSON.parse(await readFile(resolve(directory, name), "utf8"));
     if (
       !isRecord(value) ||
@@ -196,9 +226,11 @@ export async function readOutboxState(
       value.kind !== "publicationOutboxEvent" ||
       value.idempotencyKey !== idempotencyKey ||
       !["pending", "queued", "completed", "failed"].includes(String(value.status)) ||
-      !Number.isSafeInteger(value.generation) ||
+      typeof value.generation !== "string" ||
+      !/^[0-9]{32}$/.test(value.generation) ||
       typeof value.eventId !== "string" ||
-      !Number.isSafeInteger(value.updatedAt)
+      !Number.isSafeInteger(value.updatedAt) ||
+      (value.updatedAt as number) < 0
     ) {
       throw new Error(`Publication outbox state ${idempotencyKey} is invalid.`);
     }
@@ -212,9 +244,9 @@ export async function readOutboxState(
 
 export async function markPublicationCompleted(
   idempotencyKey: string,
+  generation: string,
   spoolRoot = getPublicationSpoolRoot(),
   now = Date.now(),
-  generation = now,
 ): Promise<void> {
   await writeOutboxEvent(resolve(spoolRoot), {
     schemaVersion: 1,
@@ -229,10 +261,10 @@ export async function markPublicationCompleted(
 
 export async function markPublicationFailed(
   idempotencyKey: string,
+  generation: string,
   reason: string,
   spoolRoot = getPublicationSpoolRoot(),
   now = Date.now(),
-  generation = now,
 ): Promise<void> {
   await writeOutboxEvent(resolve(spoolRoot), {
     schemaVersion: 1,
@@ -274,9 +306,6 @@ async function installImmutableCommand(path: string, contents: string, createdAt
     } catch (error) {
       if (!hasCode(error, "EEXIST")) throw error;
       existing = true;
-      if (await readFile(path, "utf8") !== contents) {
-        throw new Error(`Idempotency key ${path} is already bound to another publication.`);
-      }
     }
     await syncDirectory(dirname(path));
     return existing;
@@ -285,7 +314,7 @@ async function installImmutableCommand(path: string, contents: string, createdAt
   }
 }
 
-async function ensurePendingState(spoolRoot: string, idempotencyKey: string, now: number): Promise<void> {
+async function ensurePendingState(spoolRoot: string, idempotencyKey: string, generation: string, now: number): Promise<void> {
   const state = await readOutboxState(spoolRoot, idempotencyKey);
   if (state) return;
   await writeOutboxEvent(spoolRoot, {
@@ -293,7 +322,7 @@ async function ensurePendingState(spoolRoot: string, idempotencyKey: string, now
     kind: "publicationOutboxEvent",
     idempotencyKey,
     status: "pending",
-    generation: now,
+    generation,
     eventId: randomUUID(),
     updatedAt: now,
   });
@@ -347,8 +376,12 @@ async function removeStateTemporaries(directory: string, olderThan: number): Pro
     const metadata = await lstat(path);
     if (!metadata.isDirectory()) continue;
     for (const eventName of await readdir(path)) {
-      const match = /^([0-9]+)-.*\.json\.tmp$/.exec(eventName);
-      if (match && Number(match[1]) < olderThan) await rm(resolve(path, eventName), { force: true });
+      if (!/^[0-9]{32}-(?:pending|queued|completed|failed)-[a-z0-9-]+\.json\.tmp$/.test(eventName)) continue;
+      const temporary = resolve(path, eventName);
+      const temporaryMetadata = await lstat(temporary);
+      if (temporaryMetadata.isFile() && temporaryMetadata.mtimeMs < olderThan) {
+        await rm(temporary, { force: true });
+      }
     }
     await syncDirectory(path);
   }
@@ -357,9 +390,11 @@ async function removeStateTemporaries(directory: string, olderThan: number): Pro
 
 async function removeCommandTemporaries(directory: string, olderThan: number): Promise<void> {
   for (const name of await readdir(directory)) {
-    const match = /^[a-z0-9-]+\.json\.([0-9]+)\.[a-z0-9-]+\.tmp$/.exec(name);
-    if (match && Number(match[1]) < olderThan) {
-      await rm(resolve(directory, name), { force: true });
+    if (!/^[a-z0-9-]+\.json\.[0-9]+\.[a-z0-9-]+\.tmp$/.test(name)) continue;
+    const temporary = resolve(directory, name);
+    const metadata = await lstat(temporary);
+    if (metadata.isFile() && metadata.mtimeMs < olderThan) {
+      await rm(temporary, { force: true });
     }
   }
   await syncDirectory(directory);
@@ -404,6 +439,51 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function compareOutboxEvents(left: PublicationOutboxState, right: PublicationOutboxState): number {
   const precedence = { pending: 0, queued: 1, failed: 2, completed: 3 } as const;
   return precedence[left.status] - precedence[right.status]
-    || left.generation - right.generation
+    || left.generation.localeCompare(right.generation)
     || left.eventId.localeCompare(right.eventId);
+}
+
+async function loadPublicationCommandIfPresent(
+  idempotencyKey: string,
+  spoolRoot: string,
+): Promise<PublicationCommand | null> {
+  try {
+    return await loadPublicationCommand(idempotencyKey, spoolRoot);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return null;
+    throw error;
+  }
+}
+
+async function enqueueExistingCommand(
+  command: PublicationCommand,
+  commandPath: string,
+  options: SubmitOptions,
+  spoolRoot: string,
+): Promise<Readonly<{ commandPath: string; existing: boolean }>> {
+  const now = options.now ?? Date.now();
+  await ensurePendingState(spoolRoot, command.idempotencyKey, command.generation, now);
+  const state = await readOutboxState(spoolRoot, command.idempotencyKey);
+  if (state?.status === "completed") return { commandPath, existing: true };
+  if (state?.status === "failed") {
+    throw new Error(`Publication ${command.idempotencyKey} is quarantined: ${state.lastError ?? "unknown failure"}`);
+  }
+  await (options.enqueue ?? enqueuePublication)(command.idempotencyKey, command.generation);
+  await options.afterEnqueue?.();
+  await writeOutboxEvent(spoolRoot, {
+    schemaVersion: 1,
+    kind: "publicationOutboxEvent",
+    idempotencyKey: command.idempotencyKey,
+    status: "queued",
+    generation: command.generation,
+    eventId: randomUUID(),
+    updatedAt: now,
+  });
+  return { commandPath, existing: true };
+}
+
+function assertSameRevision(command: PublicationCommand, revision: CanonicalRevision, idempotencyKey: string): void {
+  if (canonicalJson(command.revision as unknown as JsonValue) !== canonicalJson(revision as unknown as JsonValue)) {
+    throw new Error(`Idempotency key ${idempotencyKey} is already bound to another publication.`);
+  }
 }
