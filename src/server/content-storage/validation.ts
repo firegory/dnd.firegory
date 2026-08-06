@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, realpath } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
 import Ajv2020, { type ErrorObject, type ValidateFunction } from "ajv/dist/2020.js";
@@ -144,6 +144,39 @@ export async function validateRepositoryActivationDelta(
   return document;
 }
 
+export async function loadValidRepositoryActivationDeltas(
+  dataRoot: string,
+): Promise<readonly RepositoryActivationDelta[]> {
+  const root = await realpath(dataRoot);
+  const directory = activationDirectoryPath(root);
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return [];
+    throw error;
+  }
+
+  const deltas: RepositoryActivationDelta[] = [];
+  for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (!entry.isFile() || !/^[0-9]{32}\.json$/.test(entry.name)) continue;
+    try {
+      const lexicalPath = resolve(directory, entry.name);
+      if (!(await lstat(lexicalPath)).isFile()) continue;
+      const file = await resolveRepositoryFile(root, relative(root, lexicalPath));
+      const delta = await validateRepositoryActivationDelta(
+        root,
+        await readJson(file, `Repository activation delta ${entry.name}`),
+      );
+      if (`${delta.generation}.json` !== entry.name) continue;
+      deltas.push(delta);
+    } catch {
+      // Invalid, symlinked, or escaping activation artifacts are inert.
+    }
+  }
+  return deltas;
+}
+
 export async function validateContentRepository(dataRoot: string): Promise<void> {
   const root = await realpath(dataRoot);
   await loadResolvedRepositoryManifest(root);
@@ -171,39 +204,16 @@ export async function loadResolvedRepositoryManifest(dataRoot: string): Promise<
   const root = await realpath(dataRoot);
   const bootstrap = await loadRepositoryBootstrapDescriptor(root);
 
-  const activationDirectory = activationDirectoryPath(root);
-  let activationNames: string[] = [];
-  try {
-    activationNames = (await readdir(activationDirectory, { withFileTypes: true }))
-      .filter((entry) => entry.isFile() && /^[0-9]{32}\.json$/.test(entry.name))
-      .map((entry) => entry.name)
-      .sort();
-  } catch (error) {
-    if (!hasCode(error, "ENOENT")) throw error;
-  }
-
   const entries = new Map(bootstrap.entries.map((entry) => [entry.entryId, entry]));
   const targetGenerations = new Map<string, string>();
   let highestGeneration: string | null = null;
-  for (const name of activationNames) {
-    try {
-      const file = await resolveRepositoryFile(root, relative(root, resolve(activationDirectory, name)));
-      const delta = await validateRepositoryActivationDelta(
-        root,
-        await readJson(file, `Repository activation delta ${name}`),
-      );
-      if (`${delta.generation}.json` !== name) {
-        throw new ContentIntegrityError(`Repository activation generation does not match filename ${name}.`);
-      }
-      const previous = targetGenerations.get(delta.targetEntryId);
-      if (!previous || delta.generation > previous) {
-        entries.set(delta.targetEntryId, delta.entry);
-        targetGenerations.set(delta.targetEntryId, delta.generation);
-      }
-      if (!highestGeneration || delta.generation > highestGeneration) highestGeneration = delta.generation;
-    } catch {
-      // Invalid deltas are inert; valid lower generations and other targets still compose.
+  for (const delta of await loadValidRepositoryActivationDeltas(root)) {
+    const previous = targetGenerations.get(delta.targetEntryId);
+    if (!previous || delta.generation > previous) {
+      entries.set(delta.targetEntryId, delta.entry);
+      targetGenerations.set(delta.targetEntryId, delta.generation);
     }
+    if (!highestGeneration || delta.generation > highestGeneration) highestGeneration = delta.generation;
   }
 
   const manifest: RepositoryManifest = {

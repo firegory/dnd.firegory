@@ -3,7 +3,6 @@ import { link, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promis
 import { dirname, resolve } from "node:path";
 
 import {
-  activationDirectoryPath,
   formatPublicationGeneration,
   parsePublicationGeneration,
   publicationGenerationReservationPath,
@@ -11,8 +10,8 @@ import {
 } from "./repository.ts";
 import {
   assertCanonicalRevision,
+  loadValidRepositoryActivationDeltas,
   validateCanonicalRevisionDependencies,
-  validateRepositoryActivationDelta,
 } from "./validation.ts";
 
 type PublicationGenerationReservationPayload = Readonly<{
@@ -51,7 +50,8 @@ export async function reservePublicationGeneration(options: Readonly<{
   idempotencyKey: string;
   now?: number;
   beforeCreate?: (generation: string) => void | Promise<void>;
-}>): Promise<string> {
+  beforeLink?: (generation: string) => void | Promise<void>;
+}>): Promise<PublicationGenerationReservation> {
   const reservationDirectory = dirname(publicationGenerationReservationPath(options.spoolRoot, "0".repeat(32)));
   await mkdir(reservationDirectory, { recursive: true, mode: 0o750 });
 
@@ -81,6 +81,7 @@ export async function reservePublicationGeneration(options: Readonly<{
     }
 
     try {
+      await options.beforeLink?.(generation);
       try {
         await link(temporary, path);
       } catch (error) {
@@ -89,7 +90,7 @@ export async function reservePublicationGeneration(options: Readonly<{
         continue;
       }
       await syncDirectory(reservationDirectory);
-      return generation;
+      return reservation;
     } finally {
       await rm(temporary, { force: true });
     }
@@ -99,23 +100,12 @@ export async function reservePublicationGeneration(options: Readonly<{
 export async function maximumSemanticPublicationGeneration(spoolRoot: string, dataRoot: string): Promise<bigint> {
   let maximum = BigInt(0);
   const reservationDirectory = dirname(publicationGenerationReservationPath(spoolRoot, "0".repeat(32)));
-  await consumedReservationGenerations(reservationDirectory);
+  const reservations = await scanReservationGenerations(reservationDirectory);
+  if (reservations.maximumValid > maximum) maximum = reservations.maximumValid;
 
-  const activationDirectory = activationDirectoryPath(dataRoot);
-  for (const name of await readDirectoryIfPresent(activationDirectory)) {
-    const match = /^([0-9]{32})\.json$/.exec(name);
-    if (!match) continue;
-    try {
-      const value = await validateRepositoryActivationDelta(
-        dataRoot,
-        JSON.parse(await readFile(resolve(activationDirectory, name), "utf8")),
-      );
-      if (value.generation !== match[1]) continue;
-      const generation = parsePublicationGeneration(value.generation);
-      if (generation > maximum) maximum = generation;
-    } catch {
-      // Invalid activation artifacts are inert for both readers and allocation.
-    }
+  for (const delta of await loadValidRepositoryActivationDeltas(dataRoot)) {
+    const generation = parsePublicationGeneration(delta.generation);
+    if (generation > maximum) maximum = generation;
   }
 
   const commandDirectory = dirname(publicationSpoolPath(spoolRoot, "placeholder"));
@@ -141,18 +131,53 @@ export async function maximumSemanticPublicationGeneration(spoolRoot: string, da
   return maximum;
 }
 
-async function consumedReservationGenerations(directory: string): Promise<Set<string>> {
+async function scanReservationGenerations(directory: string): Promise<Readonly<{
+  consumed: Set<string>;
+  maximumValid: bigint;
+}>> {
   const consumed = new Set<string>();
+  let maximumValid = BigInt(0);
   for (const name of await readDirectoryIfPresent(directory)) {
     const match = /^([0-9]{32})\.json$/.exec(name);
     if (!match) continue;
     consumed.add(match[1]);
-    await isValidReservationFile(resolve(directory, name), match[1]);
+    if (await isValidReservationFile(resolve(directory, name), match[1])) {
+      const generation = parsePublicationGeneration(match[1]);
+      if (generation > maximumValid) maximumValid = generation;
+    }
   }
-  return consumed;
+  return { consumed, maximumValid };
 }
 
-async function isValidReservationFile(path: string, expectedGeneration: string): Promise<boolean> {
+async function consumedReservationGenerations(directory: string): Promise<Set<string>> {
+  return (await scanReservationGenerations(directory)).consumed;
+}
+
+export async function ownsPublicationGenerationReservation(
+  spoolRoot: string,
+  reservation: PublicationGenerationReservation,
+): Promise<boolean> {
+  const path = publicationGenerationReservationPath(spoolRoot, reservation.generation);
+  if (!await isValidReservationFile(path, reservation.generation, reservation.idempotencyKey)) return false;
+  try {
+    const value: unknown = JSON.parse(await readFile(path, "utf8"));
+    return isRecord(value)
+      && value.schemaVersion === reservation.schemaVersion
+      && value.kind === reservation.kind
+      && value.generation === reservation.generation
+      && value.idempotencyKey === reservation.idempotencyKey
+      && value.reservedAt === reservation.reservedAt
+      && value.checksum === reservation.checksum;
+  } catch {
+    return false;
+  }
+}
+
+async function isValidReservationFile(
+  path: string,
+  expectedGeneration: string,
+  expectedIdempotencyKey?: string,
+): Promise<boolean> {
   try {
     const value: unknown = JSON.parse(await readFile(path, "utf8"));
     if (!isRecord(value)
@@ -163,6 +188,7 @@ async function isValidReservationFile(path: string, expectedGeneration: string):
       || !Number.isSafeInteger(value.reservedAt)
       || (value.reservedAt as number) < 0) return false;
     assertStableId(value.idempotencyKey);
+    if (expectedIdempotencyKey !== undefined && value.idempotencyKey !== expectedIdempotencyKey) return false;
     const payload: PublicationGenerationReservationPayload = {
       schemaVersion: 1,
       kind: "publicationGenerationReservation",

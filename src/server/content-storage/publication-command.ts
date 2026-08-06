@@ -3,7 +3,10 @@ import { link, lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs
 import { dirname, resolve } from "node:path";
 
 import { enqueuePublication } from "./publication-queue.ts";
-import { reservePublicationGeneration } from "./publication-generation.ts";
+import {
+  ownsPublicationGenerationReservation,
+  reservePublicationGeneration,
+} from "./publication-generation.ts";
 import {
   canonicalJson,
   getDataRoot,
@@ -50,6 +53,8 @@ type SubmitOptions = Readonly<{
   now?: number;
   afterEnqueue?: () => void | Promise<void>;
   beforeGenerationCreate?: (generation: string) => void | Promise<void>;
+  beforeGenerationLink?: (generation: string) => void | Promise<void>;
+  afterGenerationReserved?: (generation: string) => void | Promise<void>;
 }>;
 const OUTBOX_TEMPORARY_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
@@ -71,13 +76,21 @@ export async function submitPublicationCommand(
     assertSameRevision(existingCommand, input.revision, input.idempotencyKey);
     return enqueueExistingCommand(existingCommand, commandPath, options, spoolRoot);
   }
-  const generation = await reservePublicationGeneration({
-    spoolRoot,
-    dataRoot: resolve(options.dataRoot ?? getDataRoot()),
-    idempotencyKey: input.idempotencyKey,
-    now: options.now,
-    beforeCreate: options.beforeGenerationCreate,
-  });
+  const dataRoot = resolve(options.dataRoot ?? getDataRoot());
+  let generation: string;
+  for (;;) {
+    const reservation = await reservePublicationGeneration({
+      spoolRoot,
+      dataRoot,
+      idempotencyKey: input.idempotencyKey,
+      now: options.now,
+      beforeCreate: options.beforeGenerationCreate,
+      beforeLink: options.beforeGenerationLink,
+    });
+    generation = reservation.generation;
+    await options.afterGenerationReserved?.(generation);
+    if (await ownsPublicationGenerationReservation(spoolRoot, reservation)) break;
+  }
   const command: PublicationCommand = {
     schemaVersion: 1,
     kind: "publishCanonicalRevision",

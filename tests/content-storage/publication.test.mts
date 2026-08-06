@@ -237,11 +237,12 @@ test("durable generation reservations linearize submitters and survive rebuild a
   const missingRevision = `rev-${"f".repeat(64)}`;
   const bootstrapEntry = (await readManifest(root)).entries[0];
   await mkdir(activationDirectoryPath(root), { recursive: true });
-  await writeFile(activationDeltaPath(root, "9".repeat(32)), JSON.stringify({
+  const semanticInvalidGeneration = `${"9".repeat(31)}8`;
+  await writeFile(activationDeltaPath(root, semanticInvalidGeneration), JSON.stringify({
     schemaVersion: 1,
     kind: "repositoryActivationDelta",
     readerContractVersion: 1,
-    generation: "9".repeat(32),
+    generation: semanticInvalidGeneration,
     idempotencyKey: "semantic-invalid-maximum",
     targetEntryId: bootstrapEntry.entryId,
     entry: {
@@ -251,11 +252,23 @@ test("durable generation reservations linearize submitters and survive rebuild a
       contentHash: `sha256:${"f".repeat(64)}`,
     },
   }));
+  const outsideActivation = resolve(dirname(root), "all-nines-activation.json");
+  await writeFile(outsideActivation, JSON.stringify({
+    schemaVersion: 1,
+    kind: "repositoryActivationDelta",
+    readerContractVersion: 1,
+    generation: "9".repeat(32),
+    idempotencyKey: "symlink-maximum",
+    targetEntryId: bootstrapEntry.entryId,
+    entry: bootstrapEntry,
+  }));
+  await symlink(outsideActivation, activationDeltaPath(root, "9".repeat(32)));
+  assert.equal((await loadResolvedRepositoryManifest(root)).generation, null, "reader ignores symlinked activation artifacts");
   await submitPublicationCommand(
     { idempotencyKey: "generation-after-rebuild", revision },
     { spoolRoot, dataRoot: root, enqueue: async () => undefined },
   );
-  assert.equal((await loadPublicationCommand("generation-after-rebuild", spoolRoot)).generation, generation(4));
+  assert.equal((await loadPublicationCommand("generation-after-rebuild", spoolRoot)).generation, generation(9));
   assert.match(
     JSON.parse(await readFile(publicationGenerationReservationPath(spoolRoot, generation(7)), "utf8")).checksum,
     /^sha256:[0-9a-f]{64}$/,
@@ -277,10 +290,61 @@ test("durable generation reservations linearize submitters and survive rebuild a
       },
     },
   );
-  assert.equal((await loadPublicationCommand("generation-after-collision", spoolRoot)).generation, generation(6));
+  assert.equal((await loadPublicationCommand("generation-after-collision", spoolRoot)).generation, generation(11));
   assert.notEqual(
     (await loadPublicationCommand("generation-after-rebuild", spoolRoot)).generation,
     (await loadPublicationCommand("generation-after-collision", spoolRoot)).generation,
+  );
+});
+
+test("reservation installation crashes and ownership loss cannot persist an unowned generation", async (t) => {
+  const root = await temporaryRepository(t);
+  const revision = await nextRevision(root, "2026-08-06T01:52:00.000Z");
+  const crashSpool = resolve(dirname(root), "pre-link-crash-spool");
+  await assert.rejects(
+    submitPublicationCommand(
+      { idempotencyKey: "pre-link-crash", revision },
+      {
+        spoolRoot: crashSpool,
+        dataRoot: root,
+        enqueue: async () => undefined,
+        beforeGenerationLink: () => { throw new Error("crash before final reservation link"); },
+      },
+    ),
+    /crash before final reservation link/,
+  );
+  assert.deepEqual(
+    (await readdir(dirname(publicationGenerationReservationPath(crashSpool, generation(1))))).filter((name) => name.endsWith(".json")),
+    [],
+  );
+  await submitPublicationCommand(
+    { idempotencyKey: "after-pre-link-crash", revision },
+    { spoolRoot: crashSpool, dataRoot: root, enqueue: async () => undefined },
+  );
+  assert.equal((await loadPublicationCommand("after-pre-link-crash", crashSpool)).generation, generation(1));
+
+  const ownershipSpool = resolve(dirname(root), "ownership-loss-spool");
+  let corrupted = false;
+  await submitPublicationCommand(
+    { idempotencyKey: "ownership-loss", revision },
+    {
+      spoolRoot: ownershipSpool,
+      dataRoot: root,
+      enqueue: async () => undefined,
+      afterGenerationReserved: async (reservedGeneration) => {
+        if (corrupted) return;
+        corrupted = true;
+        await writeFile(
+          publicationGenerationReservationPath(ownershipSpool, reservedGeneration),
+          JSON.stringify(createPublicationGenerationReservation(reservedGeneration, "ownership-loss", 2)),
+        );
+      },
+    },
+  );
+  assert.equal((await loadPublicationCommand("ownership-loss", ownershipSpool)).generation, generation(2));
+  assert.equal(
+    JSON.parse(await readFile(publicationGenerationReservationPath(ownershipSpool, generation(1)), "utf8")).reservedAt,
+    2,
   );
 });
 
