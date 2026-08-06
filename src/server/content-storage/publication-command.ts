@@ -18,21 +18,33 @@ import {
   type CanonicalRevision,
   type JsonValue,
 } from "./repository.ts";
-import { assertCanonicalRevision } from "./validation.ts";
+import { assertCanonicalRevision, assertDeletionContractSupported } from "./validation.ts";
 
-export type PublicationCommand = Readonly<{
+type LegacyPublicationCommand = Readonly<{
   schemaVersion: 1;
   kind: "publishCanonicalRevision";
   idempotencyKey: string;
   generation: string;
   revision: CanonicalRevision;
+}>;
+
+type GuardedPublicationCommand = Readonly<{
+  schemaVersion: 2;
+  kind: "publishCanonicalRevision";
+  idempotencyKey: string;
+  generation: string;
+  expectedActiveRevisionId: string | null;
+  revision: CanonicalRevision;
 }> | Readonly<{
-  schemaVersion: 1;
+  schemaVersion: 2;
   kind: "unpublishCanonicalEntry";
   idempotencyKey: string;
   generation: string;
+  expectedActiveRevisionId: string | null;
   entryId: string;
 }>;
+
+export type PublicationCommand = LegacyPublicationCommand | GuardedPublicationCommand;
 
 export type PublicationOutboxState = Readonly<{
   schemaVersion: 1;
@@ -72,35 +84,37 @@ export function getPublicationSpoolRoot(environment: NodeJS.ProcessEnv = process
 }
 
 export async function submitPublicationCommand(
-  input: Readonly<{ idempotencyKey: string; revision: CanonicalRevision }>,
+  input: Readonly<{ idempotencyKey: string; expectedActiveRevisionId: string | null; revision: CanonicalRevision }>,
   options: SubmitOptions = {},
 ): Promise<Readonly<{ commandPath: string; existing: boolean }>> {
   assertCanonicalRevision(input.revision);
   return submitCanonicalCommand({
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: "publishCanonicalRevision",
     idempotencyKey: input.idempotencyKey,
+    expectedActiveRevisionId: input.expectedActiveRevisionId,
     revision: input.revision,
   }, options);
 }
 
 export async function submitUnpublicationCommand(
-  input: Readonly<{ idempotencyKey: string; entryId: string }>,
+  input: Readonly<{ idempotencyKey: string; expectedActiveRevisionId: string | null; entryId: string }>,
   options: SubmitOptions = {},
 ): Promise<Readonly<{ commandPath: string; existing: boolean }>> {
   assertStableId(input.idempotencyKey, "idempotencyKey");
   assertStableId(input.entryId, "entryId");
   return submitCanonicalCommand({
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: "unpublishCanonicalEntry",
     idempotencyKey: input.idempotencyKey,
+    expectedActiveRevisionId: input.expectedActiveRevisionId,
     entryId: input.entryId,
   }, options);
 }
 
 type UnreservedPublicationCommand =
-  | Omit<Extract<PublicationCommand, { kind: "publishCanonicalRevision" }>, "generation">
-  | Omit<Extract<PublicationCommand, { kind: "unpublishCanonicalEntry" }>, "generation">;
+  | Omit<Extract<GuardedPublicationCommand, { kind: "publishCanonicalRevision" }>, "generation">
+  | Omit<Extract<GuardedPublicationCommand, { kind: "unpublishCanonicalEntry" }>, "generation">;
 
 async function submitCanonicalCommand(
   input: UnreservedPublicationCommand,
@@ -114,6 +128,8 @@ async function submitCanonicalCommand(
     return enqueueExistingCommand(existingCommand, commandPath, options, spoolRoot);
   }
   const dataRoot = resolve(options.dataRoot ?? getDataRoot());
+  assertExpectedActiveRevisionId(input.expectedActiveRevisionId);
+  if (input.kind === "unpublishCanonicalEntry") await assertDeletionContractSupported(dataRoot);
   let generation: string;
   for (;;) {
     const reservation = await reservePublicationGeneration({
@@ -235,7 +251,7 @@ export async function loadPublicationCommand(
   const value: unknown = JSON.parse(await readFile(commandPath, "utf8"));
   if (
     !isRecord(value) ||
-    value.schemaVersion !== 1 ||
+    ![1, 2].includes(Number(value.schemaVersion)) ||
     !["publishCanonicalRevision", "unpublishCanonicalEntry"].includes(String(value.kind)) ||
     value.idempotencyKey !== idempotencyKey ||
     typeof value.generation !== "string" ||
@@ -244,12 +260,19 @@ export async function loadPublicationCommand(
     throw new PublicationCommandError(`Publication command ${idempotencyKey} is invalid.`);
   }
   const keys = Object.keys(value).sort().join(",");
-  if (value.kind === "publishCanonicalRevision") {
+  if (value.schemaVersion === 1 && value.kind === "publishCanonicalRevision") {
     if (keys !== "generation,idempotencyKey,kind,revision,schemaVersion") throw new PublicationCommandError(`Publication command ${idempotencyKey} is invalid.`);
     assertCanonicalRevision(value.revision);
-  } else {
-    if (keys !== "entryId,generation,idempotencyKey,kind,schemaVersion") throw new PublicationCommandError(`Publication command ${idempotencyKey} is invalid.`);
+  } else if (value.schemaVersion === 2 && value.kind === "publishCanonicalRevision") {
+    if (keys !== "expectedActiveRevisionId,generation,idempotencyKey,kind,revision,schemaVersion") throw new PublicationCommandError(`Publication command ${idempotencyKey} is invalid.`);
+    assertExpectedActiveRevisionId(value.expectedActiveRevisionId);
+    assertCanonicalRevision(value.revision);
+  } else if (value.schemaVersion === 2 && value.kind === "unpublishCanonicalEntry") {
+    if (keys !== "entryId,expectedActiveRevisionId,generation,idempotencyKey,kind,schemaVersion") throw new PublicationCommandError(`Publication command ${idempotencyKey} is invalid.`);
+    assertExpectedActiveRevisionId(value.expectedActiveRevisionId);
     assertStableId(String(value.entryId), "entryId");
+  } else {
+    throw new PublicationCommandError(`Publication command ${idempotencyKey} is invalid.`);
   }
   return value as PublicationCommand;
 }
@@ -580,5 +603,11 @@ function assertSameCommand(command: PublicationCommand, input: UnreservedPublica
   delete persisted.generation;
   if (canonicalJson(persisted as unknown as JsonValue) !== canonicalJson(input as unknown as JsonValue)) {
     throw new Error(`Idempotency key ${idempotencyKey} is already bound to another publication.`);
+  }
+}
+
+function assertExpectedActiveRevisionId(value: unknown): asserts value is string | null {
+  if (value !== null && (typeof value !== "string" || !/^rev-[0-9a-f]{64}$/.test(value))) {
+    throw new PublicationCommandError("expectedActiveRevisionId must be an explicit revision ID or null.");
   }
 }

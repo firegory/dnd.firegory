@@ -10,14 +10,16 @@ The admin workspace at `/admin/compendium/imports` exposes successful and failed
 - `invalid` and `duplicate` candidates require an explicit merged JSON payload before publication.
 - Only `missing` candidates can enqueue unpublication.
 - Bulk mutations lock and validate every selected candidate before persisting any decision.
-- Every decision, queue transition, failure, and observed worker completion records actor and timestamp.
+- Every decision and publication transition records actor and timestamp. Terminal outcomes are written by the worker, not by dashboard reads.
 - Completed publication rows and audit events are immutable in PostgreSQL.
 
 ## Publication boundary
 
 The application does not update `compendium_versions`, `compendium_revisions`, canonical manifests, or canonical NFS paths. Approval and merge create a validated canonical revision in memory and call `submitPublicationCommand`; unpublish calls `submitUnpublicationCommand`. Both write only to the #96 upload spool and enqueue worker work.
 
-The worker serializes canonical changes and installs an immutable activation delta. Unpublication is represented by a delta whose `entry` is `null`. Until that final delta is atomically installed, readers continue resolving the previous active revision. A staging, validation, lease, queue, or activation failure therefore leaves active content unchanged. Failed review publications retain their decision and can be retried with a new idempotency key.
+Each review captures the current active revision ID, including explicit absence, in review state and the immutable v2 publication command. Under the canonical fence the worker rejects the command if the target changed, preventing a later run from being overwritten by a stale approval or unpublication. Failed review publications retain that expectation when retried.
+
+The worker serializes canonical changes and installs an immutable activation delta. Version 1 remains replacement-only. Unpublication uses a version 2 delta whose `entry` is `null`, and submission is blocked until the repository bootstrap declares deletion-capable reader contract v2. Until that delta is atomically installed, readers continue resolving the previous active revision.
 
 ## Candidate payload
 
@@ -25,6 +27,6 @@ Approved or merged candidate `content` must contain canonical `entry`, `text`, a
 
 ## Migration 0013
 
-`0013_compendium_import_review.sql` is necessary because import candidates from migration 0008 are immutable extraction artifacts and intentionally contain no mutable review or publication state. Migration 0013 adds separate review and append-only audit tables without changing candidate rows or canonical publication tables.
+`0013_compendium_import_review.sql` is necessary because import candidates from migration 0008 are immutable extraction artifacts and intentionally contain no mutable review or publication state. Migration 0013 adds separate review and append-only audit tables, immutable active-revision expectations, and separate system/initiating audit identities without changing candidate rows or canonical publication tables.
 
 The migration runner executes each file in one transaction and records it in `schema_migrations`. The migration also uses guarded enum/table/index creation and replaceable functions/triggers, so rerunning the SQL after a rolled-back or manually provisioned deployment is safe. Apply it with `npm run db:migrate` before enabling the review routes.

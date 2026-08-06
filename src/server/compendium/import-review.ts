@@ -2,18 +2,18 @@ import type { QueryResultRow } from "pg";
 
 import { assertAdminContext, type AdminContext } from "../admin/admin-context.ts";
 import {
-  readOutboxState,
   submitPublicationCommand,
   submitUnpublicationCommand,
 } from "../content-storage/publication-command.ts";
 import {
   createCanonicalRevision,
+  getDataRoot,
   type CanonicalRevision,
   type CanonicalRevisionInput,
   type ContentSource,
   type JsonValue,
 } from "../content-storage/repository.ts";
-import { assertCanonicalRevision } from "../content-storage/validation.ts";
+import { assertCanonicalRevision, loadResolvedRepositoryManifest } from "../content-storage/validation.ts";
 import { withTransaction } from "../db/client.ts";
 
 type DbClient = Readonly<{
@@ -84,6 +84,8 @@ type CandidateRow = QueryResultRow & Readonly<{
   publication_status: ReviewPublicationStatus | null;
   publication_attempt: number | null;
   idempotency_key: string | null;
+  expected_active_revision_id: string | null;
+  expected_active_revision_captured: boolean | null;
   last_error: string | null;
   reviewed_by: string | null;
   reviewed_at: Date | string | null;
@@ -92,8 +94,8 @@ type CandidateRow = QueryResultRow & Readonly<{
 type Submitters = Readonly<{
   publish: typeof submitPublicationCommand;
   unpublish: typeof submitUnpublicationCommand;
-  readState: typeof readOutboxState;
 }>;
+type ActiveRevisionReader = (entryId: string) => Promise<string | null>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const FILTERS = new Set(["new", "unchanged", "changed", "missing", "duplicate", "invalid"]);
@@ -101,17 +103,19 @@ const FILTERS = new Set(["new", "unchanged", "changed", "missing", "duplicate", 
 export class CompendiumImportReviewService {
   private readonly transaction: TransactionRunner;
   private readonly submitters: Submitters;
+  private readonly readActiveRevision: ActiveRevisionReader;
 
   constructor(
     transaction: TransactionRunner = withTransaction as TransactionRunner,
     submitters: Submitters = {
       publish: submitPublicationCommand,
       unpublish: submitUnpublicationCommand,
-      readState: readOutboxState,
     },
+    readActiveRevision: ActiveRevisionReader = defaultActiveRevisionReader,
   ) {
     this.transaction = transaction;
     this.submitters = submitters;
+    this.readActiveRevision = readActiveRevision;
   }
 
   async listRuns(admin: AdminContext, options: Readonly<{ status?: string; limit?: number; offset?: number }> = {}): Promise<readonly ImportRunSummary[]> {
@@ -162,7 +166,6 @@ export class CompendiumImportReviewService {
   }>> {
     assertAdminContext(admin); requireUuid(runId, "runId");
     if (diffStatus && !FILTERS.has(diffStatus)) throw new ImportReviewError("Invalid candidate status filter.");
-    await this.reconcilePublicationStates(admin, runId);
     return this.transaction(async (client) => {
       const runs = await this.listRunsWithClient(client, runId);
       const run = runs[0];
@@ -175,7 +178,8 @@ export class CompendiumImportReviewService {
          FROM compendium_import_diagnostics WHERE import_run_id = $1 ORDER BY created_at, id`, [runId],
       );
       const audit = await client.query<QueryResultRow & Record<string, unknown>>(
-        `SELECT event_type AS "eventType", candidate_id AS "candidateId", actor, details, created_at AS "createdAt"
+        `SELECT event_type AS "eventType", candidate_id AS "candidateId", actor,
+                initiating_actor AS "initiatingActor", details, created_at AS "createdAt"
          FROM compendium_import_review_audit WHERE import_run_id = $1 ORDER BY created_at DESC, id DESC LIMIT 200`, [runId],
       );
       return { run, candidates: candidates.rows.map(mapCandidate), diagnostics: diagnostics.rows, audit: audit.rows };
@@ -193,16 +197,30 @@ export class CompendiumImportReviewService {
       throw new ImportReviewError("candidateIds must contain between 1 and 200 candidates.");
     }
     const ids = [...new Set(input.candidateIds)];
+    if (ids.length !== input.candidateIds.length) throw new ImportReviewError("candidateIds must not contain duplicates.");
     ids.forEach((id) => requireUuid(id, "candidateId"));
     if (!["approve", "reject", "merge", "unpublish", "retry"].includes(input.action)) throw new ImportReviewError("Invalid review action.");
-    if (input.action === "merge" && ids.length > 1 && !input.resolvedContents) {
-      throw new ImportReviewError("Bulk merge requires resolvedContents keyed by candidate ID.");
+    if (input.action !== "merge" && (input.resolvedContent !== undefined || input.resolvedContents !== undefined)) {
+      throw new ImportReviewError("Resolved content is only accepted for merge actions.");
+    }
+    if (input.action === "merge" && (input.resolvedContent === undefined) === (input.resolvedContents === undefined)) {
+      throw new ImportReviewError("Merge requires exactly one resolved content payload.");
+    }
+    if (input.resolvedContent !== undefined && ids.length !== 1) {
+      throw new ImportReviewError("resolvedContent is only valid for a single candidate merge.");
+    }
+    if (input.resolvedContents) {
+      const keys = Object.keys(input.resolvedContents).sort();
+      const expected = [...ids].sort();
+      if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+        throw new ImportReviewError("resolvedContents must contain exactly every selected candidate ID.");
+      }
     }
 
     const prepared = await this.transaction(async (client) => {
       const rows = await client.query<CandidateRow>(candidateSelect("AND candidate.id = ANY($2::uuid[]) ORDER BY candidate.id FOR UPDATE OF candidate"), [runId, ids]);
       if (rows.rows.length !== ids.length) throw new ImportReviewError("One or more candidates were not found in this run.", 404);
-      const actions: Array<{ row: CandidateRow; key: string | null; revision: CanonicalRevision | null }> = [];
+      const actions: Array<{ row: CandidateRow; key: string | null; revision: CanonicalRevision | null; expectedActiveRevisionId: string | null }> = [];
       for (const row of rows.rows) {
         const currentStatus = row.publication_status ?? "idle";
         const currentDecision = row.decision ?? "pending";
@@ -225,20 +243,29 @@ export class CompendiumImportReviewService {
         const revision = decision === "approved" || decision === "merged"
           ? await buildRevision(client, row, decision === "merged" ? resolved! : row.content)
           : null;
+        const expectedActiveRevisionId = shouldPublish
+          ? input.action === "retry"
+            ? requireCapturedExpectation(row)
+            : await this.readActiveRevision(row.candidate_key)
+          : null;
         await client.query(
           `INSERT INTO compendium_import_candidate_reviews
              (candidate_id, import_run_id, decision, resolved_content, publication_status,
-              publication_attempt, idempotency_key, last_error, reviewed_by, reviewed_at, updated_at)
-           VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,NULL,$8,now(),now())
+              publication_attempt, idempotency_key, expected_active_revision_id,
+              expected_active_revision_captured, last_error, reviewed_by, reviewed_at, updated_at)
+           VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,NULL,$10,now(),now())
            ON CONFLICT (candidate_id) DO UPDATE SET
              decision = EXCLUDED.decision, resolved_content = EXCLUDED.resolved_content,
              publication_status = EXCLUDED.publication_status,
              publication_attempt = EXCLUDED.publication_attempt, idempotency_key = EXCLUDED.idempotency_key,
+             expected_active_revision_id = EXCLUDED.expected_active_revision_id,
+             expected_active_revision_captured = EXCLUDED.expected_active_revision_captured,
              last_error = NULL, reviewed_by = EXCLUDED.reviewed_by, reviewed_at = EXCLUDED.reviewed_at, updated_at = now()`,
-          [row.id, runId, decision, resolved ? JSON.stringify(resolved) : null, shouldPublish ? "pending" : "idle", attempt, key, admin.userId],
+          [row.id, runId, decision, resolved ? JSON.stringify(resolved) : null, shouldPublish ? "pending" : "idle", attempt, key,
+            expectedActiveRevisionId, shouldPublish, admin.userId],
         );
-        await audit(client, runId, row.id, input.action, admin.userId, { decision, publicationAttempt: attempt || undefined });
-        actions.push({ row, key, revision });
+        await audit(client, runId, row.id, input.action, admin.userId, admin.userId, { decision, publicationAttempt: attempt || undefined, expectedActiveRevisionId });
+        actions.push({ row, key, revision, expectedActiveRevisionId });
       }
       return actions;
     });
@@ -250,8 +277,8 @@ export class CompendiumImportReviewService {
         continue;
       }
       try {
-        if (item.revision) await this.submitters.publish({ idempotencyKey: item.key, revision: item.revision });
-        else await this.submitters.unpublish({ idempotencyKey: item.key, entryId: item.row.candidate_key });
+        if (item.revision) await this.submitters.publish({ idempotencyKey: item.key, expectedActiveRevisionId: item.expectedActiveRevisionId, revision: item.revision });
+        else await this.submitters.unpublish({ idempotencyKey: item.key, expectedActiveRevisionId: item.expectedActiveRevisionId, entryId: item.row.candidate_key });
         await this.setPublicationResult(runId, item.row.id, item.key, "queued", null, admin.userId);
         results.push({ candidateId: item.row.id, publicationStatus: "queued" as const });
       } catch (error) {
@@ -263,28 +290,14 @@ export class CompendiumImportReviewService {
     return results;
   }
 
-  private async reconcilePublicationStates(admin: AdminContext, runId: string): Promise<void> {
-    const active = await this.transaction((client) => client.query<QueryResultRow & { candidate_id: string; idempotency_key: string; publication_status: ReviewPublicationStatus }>(
-      `SELECT candidate_id, idempotency_key, publication_status FROM compendium_import_candidate_reviews
-       WHERE import_run_id = $1 AND publication_status IN ('pending','queued','failed')`, [runId],
-    ));
-    for (const row of active.rows) {
-      let state;
-      try { state = await this.submitters.readState(process.env.PUBLICATION_SPOOL_ROOT ?? `${process.env.STORAGE_ROOT ?? "./storage"}/publication-spool`, row.idempotency_key); }
-      catch { continue; }
-      if (!state || state.status === row.publication_status) continue;
-      await this.setPublicationResult(runId, row.candidate_id, row.idempotency_key, state.status, state.lastError ?? null, admin.userId);
-    }
-  }
-
-  private async setPublicationResult(runId: string, candidateId: string, key: string, status: ReviewPublicationStatus, error: string | null, actor: string): Promise<void> {
+  private async setPublicationResult(runId: string, candidateId: string, key: string, status: ReviewPublicationStatus, error: string | null, initiatingActor: string): Promise<void> {
     await this.transaction(async (client) => {
       const updated = await client.query(
         `UPDATE compendium_import_candidate_reviews SET publication_status = $4, last_error = $5, updated_at = now()
          WHERE import_run_id = $1 AND candidate_id = $2 AND idempotency_key = $3 AND publication_status <> 'completed'`,
         [runId, candidateId, key, status, error],
       );
-      if (updated.rowCount) await audit(client, runId, candidateId, `publication_${status}`, actor, error ? { error } : {});
+      if (updated.rowCount) await audit(client, runId, candidateId, `publication_${status}`, "publication-system", initiatingActor, error ? { error } : {});
     });
   }
 
@@ -310,6 +323,7 @@ function candidateSelect(suffix: string): string {
                  occurrence.locator, occurrence.chunk_id, chunk.page_number,
                  review.decision, review.resolved_content, review.publication_status,
                  review.publication_attempt, review.idempotency_key, review.last_error,
+                 review.expected_active_revision_id, review.expected_active_revision_captured,
                  review.reviewed_by, review.reviewed_at
           FROM compendium_import_candidates candidate
           JOIN compendium_import_runs run ON run.id = candidate.import_run_id
@@ -387,8 +401,18 @@ function reviewIdempotencyKey(runId: string, candidateId: string, attempt: numbe
   return `review-${runId.replaceAll("-", "")}-${candidateId.replaceAll("-", "")}-${attempt}`;
 }
 
-async function audit(client: DbClient, runId: string, candidateId: string, event: string, actor: string, details: Record<string, unknown>): Promise<void> {
-  await client.query(`INSERT INTO compendium_import_review_audit (import_run_id, candidate_id, event_type, actor, details) VALUES ($1,$2,$3,$4,$5::jsonb)`, [runId, candidateId, event, actor, JSON.stringify(details)]);
+async function audit(client: DbClient, runId: string, candidateId: string, event: string, actor: string, initiatingActor: string | null, details: Record<string, unknown>): Promise<void> {
+  await client.query(`INSERT INTO compendium_import_review_audit (import_run_id, candidate_id, event_type, actor, initiating_actor, details) VALUES ($1,$2,$3,$4,$5,$6::jsonb)`, [runId, candidateId, event, actor, initiatingActor, JSON.stringify(details)]);
+}
+
+function requireCapturedExpectation(row: CandidateRow): string | null {
+  if (!row.expected_active_revision_captured) throw new ImportReviewError("Publication retry is missing its captured active revision.", 409);
+  return row.expected_active_revision_id;
+}
+
+async function defaultActiveRevisionReader(entryId: string): Promise<string | null> {
+  const { manifest } = await loadResolvedRepositoryManifest(getDataRoot());
+  return manifest.entries.find((entry) => entry.entryId === entryId)?.revisionId ?? null;
 }
 
 function boundedInteger(value: number | undefined, fallback: number, minimum: number, maximum: number): number {

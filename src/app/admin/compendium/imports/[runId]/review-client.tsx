@@ -81,15 +81,11 @@ function CandidateCard({ candidate, sourceId, fileId, selected, disabled, t, onS
   const terminal = candidate.publicationStatus !== "idle";
   async function submitMerge() { try { const value = JSON.parse(mergeText); if (!value || Array.isArray(value) || typeof value !== "object") throw new Error(); await onAct("merge", value); setMergeOpen(false); } catch { alert(t("invalidMergeJson")); } }
   return <article className={`rounded-xl border bg-surface p-4 sm:p-5 ${selected ? "border-accent" : "border-border"}`}>
-    <div className="flex flex-wrap items-start gap-3"><input aria-label={t("selectCandidate")} type="checkbox" checked={selected} onChange={(event) => onSelect(event.target.checked)} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 className="font-mono text-base font-bold text-text-primary">{candidate.candidateKey}</h2><Badge value={candidate.diffStatus} /><Badge value={candidate.decision} /><Badge value={candidate.publicationStatus} /></div><p className="mt-1 text-xs text-text-muted">{candidate.entryType ?? "—"} · {candidate.locator ?? t("noLocator")}</p></div></div>
+    <div className="flex flex-wrap items-start gap-3"><input aria-label={`${t("selectCandidate")}: ${candidate.candidateKey}`} type="checkbox" checked={selected} onChange={(event) => onSelect(event.target.checked)} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 className="font-mono text-base font-bold text-text-primary">{candidate.candidateKey}</h2><Badge value={candidate.diffStatus} /><Badge value={candidate.decision} /><Badge value={candidate.publicationStatus} /></div><p className="mt-1 text-xs text-text-muted">{candidate.entryType ?? "—"} · {candidate.locator ?? t("noLocator")}</p></div></div>
     {candidate.invalidReason && <p className="mt-3 rounded-md bg-danger/10 p-3 text-sm text-danger">{candidate.invalidReason}</p>}
     {candidate.lastError && <p className="mt-3 rounded-md bg-danger/10 p-3 text-sm text-danger">{candidate.lastError}</p>}
     <div className="mt-4 grid gap-3 lg:grid-cols-2"><JsonPanel title={t("activeCandidate")} value={candidate.previousContent} empty={t("noActiveCandidate")} /><JsonPanel title={t("importCandidate")} value={candidate.content} /></div>
-    {candidate.page && <details className="mt-4"><summary className="cursor-pointer text-sm font-bold text-accent">{t("citationPreview")} · {t("pageShort")} {candidate.page}</summary>
-      {/* The authenticated preview endpoint cannot be delegated to the image optimizer. */}
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img loading="lazy" className="mt-3 max-h-[34rem] w-full rounded-lg border border-border object-contain" src={`/api/citations/preview?sourceId=${sourceId}&fileId=${fileId}&page=${candidate.page}`} alt={t("candidateCitationPreview")} />
-    </details>}
+    {candidate.page && <CandidateCitationPreview candidateKey={candidate.candidateKey} sourceId={sourceId} fileId={fileId} page={candidate.page} t={t} />}
     {mergeOpen && <div className="mt-4"><label className="text-sm font-bold">{t("resolvedContent")}<textarea className="mt-2 h-64 w-full rounded-md border border-border bg-primary p-3 font-mono text-xs text-text-primary" value={mergeText} onChange={(event) => setMergeText(event.target.value)} /></label><button onClick={() => void submitMerge()} className="mt-2 rounded-md bg-accent px-3 py-2 text-sm font-bold text-white">{t("publishMerge")}</button></div>}
     <div className="mt-4 flex flex-wrap gap-2">
       {!terminal && ["new", "changed", "unchanged"].includes(candidate.diffStatus) && <button disabled={disabled} onClick={() => void onAct("approve")} className="rounded-md bg-success px-3 py-1.5 text-sm font-bold text-white">{t("approve")}</button>}
@@ -103,3 +99,14 @@ function CandidateCard({ candidate, sourceId, fileId, selected, disabled, t, onS
 
 function JsonPanel({ title, value, empty }: { title: string; value: unknown; empty?: string }) { return <section className="min-w-0"><h3 className="mb-2 text-xs font-bold tracking-wider text-text-muted uppercase">{title}</h3><pre className="max-h-80 overflow-auto rounded-lg bg-primary p-3 font-mono text-xs whitespace-pre-wrap text-text-secondary">{value == null ? empty ?? "—" : JSON.stringify(value, null, 2)}</pre></section>; }
 function Badge({ value }: { value: string }) { const danger = ["invalid", "missing", "failed", "rejected", "unpublish"].includes(value); return <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${danger ? "bg-danger/15 text-danger" : "bg-accent/15 text-accent"}`}>{value}</span>; }
+
+function CandidateCitationPreview({ candidateKey, sourceId, fileId, page, t }: { candidateKey: string; sourceId: string; fileId: string; page: number; t: ReturnType<typeof useUiLanguage>["t"] }) {
+  const [failed, setFailed] = useState(false);
+  return <details className="mt-4"><summary className="cursor-pointer text-sm font-bold text-accent">{t("citationPreview")} · {t("pageShort")} {page}</summary>
+    {failed ? <p role="alert" className="mt-3 rounded-md bg-danger/10 p-3 text-sm text-danger">{t("candidatePreviewFailed", { candidate: candidateKey })}</p> : <>
+      {/* The authenticated preview endpoint cannot be delegated to the image optimizer. */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img loading="lazy" onError={() => setFailed(true)} className="mt-3 max-h-[34rem] w-full rounded-lg border border-border object-contain" src={`/api/citations/preview?sourceId=${sourceId}&fileId=${fileId}&page=${page}`} alt={`${t("candidateCitationPreview")}: ${candidateKey}, ${t("pageShort")} ${page}`} />
+    </>}
+  </details>;
+}

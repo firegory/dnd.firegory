@@ -21,6 +21,8 @@ import {
   assertCanonicalRevision,
   ContentIntegrityError,
   loadRepositoryBootstrapDescriptor,
+  loadValidRepositoryActivationDeltas,
+  loadResolvedRepositoryManifest,
   validateCanonicalRevisionDependencies,
 } from "../../server/content-storage/validation.ts";
 import {
@@ -54,6 +56,13 @@ export class PublicationFenceUnavailableError extends Error {
   constructor(targetId: string) {
     super(`Canonical publication target ${targetId} is fenced by another database session.`);
     this.name = "PublicationFenceUnavailableError";
+  }
+}
+
+export class StalePublicationCommandError extends ContentIntegrityError {
+  constructor(entryId: string, expected: string | null, actual: string | null) {
+    super(`Stale publication command for ${entryId}: expected active revision ${expected ?? "absent"}, found ${actual ?? "absent"}.`);
+    this.name = "StalePublicationCommandError";
   }
 }
 
@@ -108,8 +117,34 @@ export async function publishCanonicalRevision(options: Readonly<{
       if (bootstrap.repositoryId !== initialBootstrap.repositoryId) {
         throw new ContentIntegrityError("Repository identity changed while acquiring its publication fence.");
       }
+      const targetEntryId = options.command.kind === "publishCanonicalRevision"
+        ? options.command.revision.entryId
+        : options.command.entryId;
+      if (options.command.schemaVersion === 2) {
+        const existingActivation = (await loadValidRepositoryActivationDeltas(root))
+          .find((delta) => delta.generation === options.command.generation);
+        if (existingActivation) {
+          const expectedRevisionId = options.command.kind === "publishCanonicalRevision"
+            ? options.command.revision.revisionId
+            : null;
+          if (existingActivation.idempotencyKey !== options.command.idempotencyKey
+              || existingActivation.targetEntryId !== targetEntryId
+              || (existingActivation.entry?.revisionId ?? null) !== expectedRevisionId) {
+            throw new ContentIntegrityError(`Publication generation is already bound to another activation: ${options.command.generation}`);
+          }
+          return { entryId: targetEntryId, revisionId: expectedRevisionId, alreadyActive: true };
+        }
+        const resolved = await loadResolvedRepositoryManifest(root);
+        const actual = resolved.manifest.entries.find((entry) => entry.entryId === targetEntryId)?.revisionId ?? null;
+        if (actual !== options.command.expectedActiveRevisionId) {
+          throw new StalePublicationCommandError(targetEntryId, options.command.expectedActiveRevisionId, actual);
+        }
+      }
 
       if (options.command.kind === "unpublishCanonicalEntry") {
+        if (bootstrap.readerContractVersion !== 2) {
+          throw new ContentIntegrityError("Repository readers do not support deletion activation deltas.");
+        }
         await assertLease(lease, leaseLost);
         await ensureCanonicalDirectory(root, activationDirectoryPath(root));
         await options.hooks?.beforeActivationInstall?.(options.command.generation);
@@ -118,7 +153,7 @@ export async function publishCanonicalRevision(options: Readonly<{
           {
             schemaVersion: 1,
             kind: "repositoryActivationDelta",
-            readerContractVersion: 1,
+            readerContractVersion: 2,
             generation: options.command.generation,
             idempotencyKey: options.command.idempotencyKey,
             targetEntryId: options.command.entryId,

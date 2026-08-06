@@ -19,6 +19,7 @@ function candidate(overrides: Record<string, unknown> = {}) {
     previous_content: null, invalid_reason: null, locator: "page:257", chunk_id: null, page_number: 257,
     created_at: "2026-08-06T00:00:00.000Z", run_status: "succeeded", decision: null, resolved_content: null,
     publication_status: null, publication_attempt: null, idempotency_key: null, last_error: null, reviewed_by: null, reviewed_at: null,
+    expected_active_revision_id: null, expected_active_revision_captured: false,
     ...overrides };
 }
 
@@ -42,11 +43,11 @@ test("approval persists audit intent and submits only a worker publication comma
   const service = new CompendiumImportReviewService(async (callback) => callback(db), {
     publish: async (input) => { submitted = input; return { commandPath: "/spool/command", existing: false }; },
     unpublish: async () => { throw new Error("unexpected unpublish"); },
-    readState: async () => null,
-  });
+  }, async () => null);
   const result = await service.act(admin, runId, { candidateIds: [candidateId], action: "approve" });
   assert.equal(result[0].publicationStatus, "queued");
   assert.equal((submitted as { revision: { entryId: string } }).revision.entryId, "magic-missile");
+  assert.equal((submitted as { expectedActiveRevisionId: string | null }).expectedActiveRevisionId, null, "explicit absence is captured");
   assert.ok(statements.some((sql) => sql.includes("INSERT INTO compendium_import_candidate_reviews")));
   assert.ok(statements.some((sql) => sql.includes("INSERT INTO compendium_import_review_audit")));
   assert.equal(statements.some((sql) => /(?:INSERT|UPDATE)\s+(?:INTO\s+)?compendium_(?:versions|revisions)/i.test(sql)), false);
@@ -59,8 +60,8 @@ test("invalid candidates cannot bypass merge safeguards", async () => {
     return { rows: [], rowCount: 1 };
   } };
   const service = new CompendiumImportReviewService(async (callback) => callback(db), {
-    publish: async () => { throw new Error("queue unavailable"); }, unpublish: async () => { throw new Error("queue unavailable"); }, readState: async () => null,
-  });
+    publish: async () => { throw new Error("queue unavailable"); }, unpublish: async () => { throw new Error("queue unavailable"); },
+  }, async () => null);
   await assert.rejects(service.act(admin, runId, { candidateIds: [candidateId], action: "approve" }), /cannot be approved without a merge/);
   const result = await service.act(admin, runId, { candidateIds: [candidateId], action: "unpublish" }).catch((error) => error);
   assert.match(result.message, /Only missing candidates/);
@@ -75,11 +76,32 @@ test("publication submission failures are audited and remain retryable", async (
     return { rows: [], rowCount: 1 };
   } };
   const service = new CompendiumImportReviewService(async (callback) => callback(db), {
-    publish: async () => { throw new Error("queue unavailable"); }, unpublish: async () => { throw new Error("queue unavailable"); }, readState: async () => null,
-  });
+    publish: async () => { throw new Error("queue unavailable"); }, unpublish: async () => { throw new Error("queue unavailable"); },
+  }, async () => null);
   const result = await service.act(admin, runId, { candidateIds: [candidateId], action: "approve" });
   assert.equal(result[0].publicationStatus, "failed");
   assert.equal(result[0].error, "queue unavailable");
   assert.equal(updates.at(-1)?.[3], "failed");
   assert.equal(updates.at(-1)?.[4], "queue unavailable");
 });
+
+test("loading a run never reconciles outcomes or writes audit actors", async () => {
+  const statements: string[] = [];
+  const db = { async query(sql: string) {
+    statements.push(sql);
+    if (sql.includes("FROM compendium_import_runs run JOIN sources")) return { rows: [{
+      id: runId, source_id: firstSourceId(), source_title: "Source", file_id: fileId, status: "succeeded",
+      created_at: "2026-08-06T00:00:00Z", finished_at: "2026-08-06T00:01:00Z", candidate_count: 0,
+      new_count: 0, unchanged_count: 0, changed_count: 0, missing_count: 0, duplicate_count: 0,
+      invalid_count: 0, diagnostic_count: 0, pending_review_count: 0, failed_publication_count: 0,
+    }] };
+    return { rows: [] };
+  } };
+  const service = new CompendiumImportReviewService(async (callback) => callback(db), {
+    publish: async () => { throw new Error("unused"); }, unpublish: async () => { throw new Error("unused"); },
+  }, async () => { throw new Error("GET must not inspect canonical state"); });
+  await service.getRun(admin, runId);
+  assert.equal(statements.every((sql) => /^SELECT\b/.test(sql.trim())), true);
+});
+
+function firstSourceId() { return "55555555-5555-4555-8555-555555555555"; }

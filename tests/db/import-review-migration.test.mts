@@ -22,4 +22,7 @@ test("review migration enforces successful runs, immutable audit, and publicatio
   assert.match(sql, /publication_status = 'idle' OR decision IN \('approved', 'merged', 'unpublish'\)/);
   assert.match(sql, /candidate review audit records are immutable/);
   assert.match(sql, /compendium_import_review_idempotency_idx/);
+  assert.match(sql, /expected_active_revision_captured boolean NOT NULL DEFAULT false/);
+  assert.match(sql, /captured active revision expectation is immutable/);
+  assert.match(sql, /initiating_actor text/);
 });

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 export const CONTENT_SCHEMA_VERSION = 1 as const;
-export const REPOSITORY_READER_CONTRACT_VERSION = 1 as const;
+export const REPOSITORY_READER_CONTRACT_VERSION = 2 as const;
 
 const STABLE_ID = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
 const REVISION_ID = /^rev-[0-9a-f]{64}$/;
@@ -69,21 +69,33 @@ export type RepositoryManifestEntry = Readonly<{
 export type RepositoryManifest = Readonly<{
   schemaVersion: typeof CONTENT_SCHEMA_VERSION;
   kind: "repositoryManifest";
-  readerContractVersion: typeof REPOSITORY_READER_CONTRACT_VERSION;
+  readerContractVersion: 1 | typeof REPOSITORY_READER_CONTRACT_VERSION;
   repositoryId: string;
   schemas: readonly Readonly<{ schemaId: string; path: string }>[];
   entries: readonly RepositoryManifestEntry[];
 }>;
 
-export type RepositoryActivationDelta = Readonly<{
+export type RepositoryActivationDeltaV1 = Readonly<{
   schemaVersion: typeof CONTENT_SCHEMA_VERSION;
   kind: "repositoryActivationDelta";
-  readerContractVersion: typeof REPOSITORY_READER_CONTRACT_VERSION;
+  readerContractVersion: 1;
+  generation: string;
+  idempotencyKey: string;
+  targetEntryId: string;
+  entry: RepositoryManifestEntry;
+}>;
+
+export type RepositoryActivationDeltaV2 = Readonly<{
+  schemaVersion: typeof CONTENT_SCHEMA_VERSION;
+  kind: "repositoryActivationDelta";
+  readerContractVersion: 2;
   generation: string;
   idempotencyKey: string;
   targetEntryId: string;
   entry: RepositoryManifestEntry | null;
 }>;
+
+export type RepositoryActivationDelta = RepositoryActivationDeltaV1 | RepositoryActivationDeltaV2;
 
 export function getDataRoot(environment: NodeJS.ProcessEnv = process.env): string {
   const root = environment.DND_DATA_ROOT?.trim();

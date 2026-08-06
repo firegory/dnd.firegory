@@ -12,7 +12,7 @@ import {
   markPublicationFailed,
   readOutboxState,
   reconcilePublicationOutbox,
-  submitPublicationCommand,
+  submitPublicationCommand as submitGuardedPublicationCommand,
   submitUnpublicationCommand,
   type PublicationCommand,
 } from "../../src/server/content-storage/publication-command.ts";
@@ -46,6 +46,13 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const fixtureRoot = resolve(projectRoot, "content-repository");
 const generation = (value: number) => formatPublicationGeneration(BigInt(value));
 
+function submitPublicationCommand(
+  input: Omit<Parameters<typeof submitGuardedPublicationCommand>[0], "expectedActiveRevisionId">,
+  options?: Parameters<typeof submitGuardedPublicationCommand>[1],
+) {
+  return submitGuardedPublicationCommand({ ...input, expectedActiveRevisionId: null }, options);
+}
+
 test("read-only app submission durably records intent and reconciliation closes enqueue crash windows", async (t) => {
   const root = await temporaryRepository(t);
   const spoolRoot = resolve(dirname(root), "spool");
@@ -69,7 +76,11 @@ test("read-only app submission durably records intent and reconciliation closes 
   );
 
   assert.equal((await readOutboxState(spoolRoot, "publish-dash-v2"))?.status, "pending");
-  assert.deepEqual((await loadPublicationCommand("publish-dash-v2", spoolRoot)).revision, revision);
+  const guardedCommand = await loadPublicationCommand("publish-dash-v2", spoolRoot);
+  assert.equal(guardedCommand.schemaVersion, 2);
+  assert.equal(guardedCommand.expectedActiveRevisionId, null);
+  assert.equal(guardedCommand.kind, "publishCanonicalRevision");
+  assert.deepEqual(guardedCommand.revision, revision);
   assert.equal(await readFile(repositoryBootstrapPath(root), "utf8"), manifestBefore);
   assert.deepEqual(queued, ["publish-dash-v2"]);
 
@@ -821,6 +832,28 @@ test("normal publication contention requeues without consuming retry budget", as
   assert.notEqual((await readOutboxState(spoolRoot, "contention"))?.status, "failed");
 });
 
+test("publication processor records review outcomes as worker-owned state", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "dnd-review-outcome-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const spoolRoot = resolve(parent, "spool");
+  const revision = await revisionFromFixture("2026-08-06T12:30:00.000Z");
+  await submitGuardedPublicationCommand(
+    { idempotencyKey: "review-worker-outcome", expectedActiveRevisionId: null, revision },
+    { spoolRoot, dataRoot: fixtureRoot, enqueue: async () => undefined },
+  );
+  const outcomes: unknown[][] = [];
+  const actions = queueActionRecorder();
+  assert.equal(await processPublicationReservation({
+    reservation: reservation("review-outcome-delivery", "review-outcome-reservation", "review-worker-outcome", 0),
+    dataRoot: "/unused",
+    spoolRoot,
+    publish: async () => ({ entryId: revision.entryId, revisionId: revision.revisionId, alreadyActive: false }),
+    recordOutcome: async (...args) => { outcomes.push(args); },
+    queue: actions.queue,
+  }), "completed");
+  assert.deepEqual(outcomes, [["review-worker-outcome", "completed", null]]);
+});
+
 test("unpublication is worker-only, idempotent, and preserves the active entry before activation", async (t) => {
   const root = await temporaryRepository(t);
   const parent = dirname(root);
@@ -829,20 +862,20 @@ test("unpublication is worker-only, idempotent, and preserves the active entry b
   const entry = before.entries[0];
   const queued: string[] = [];
   await submitUnpublicationCommand(
-    { idempotencyKey: "unpublish-dash-review", entryId: entry.entryId },
+    { idempotencyKey: "unpublish-dash-review", expectedActiveRevisionId: entry.revisionId, entryId: entry.entryId },
     { spoolRoot, dataRoot: root, enqueue: async (key) => { queued.push(key); } },
   );
   const command = await loadPublicationCommand("unpublish-dash-review", spoolRoot);
   assert.equal(command.kind, "unpublishCanonicalEntry");
   assert.deepEqual(queued, ["unpublish-dash-review"]);
   await submitUnpublicationCommand(
-    { idempotencyKey: "unpublish-dash-review", entryId: entry.entryId },
+    { idempotencyKey: "unpublish-dash-review", expectedActiveRevisionId: entry.revisionId, entryId: entry.entryId },
     { spoolRoot, dataRoot: root, enqueue: async (key) => { queued.push(key); } },
   );
   assert.deepEqual(queued, ["unpublish-dash-review", "unpublish-dash-review"]);
   await assert.rejects(
     submitUnpublicationCommand(
-      { idempotencyKey: "unpublish-dash-review", entryId: "another-entry" },
+      { idempotencyKey: "unpublish-dash-review", expectedActiveRevisionId: entry.revisionId, entryId: "another-entry" },
       { spoolRoot, dataRoot: root, enqueue: async () => undefined },
     ),
     /already bound to another publication/,
@@ -858,6 +891,36 @@ test("unpublication is worker-only, idempotent, and preserves the active entry b
   assert.equal(result.revisionId, null);
   assert.equal((await readManifest(root)).entries.some((candidate) => candidate.entryId === entry.entryId), false);
   assert.equal((await publish(root, command)).alreadyActive, true);
+});
+
+test("cross-run stale approval and unpublication commands cannot replace a newer active revision", async (t) => {
+  const approvalRoot = await temporaryRepository(t);
+  const approvalOriginal = await currentRevision(approvalRoot);
+  const firstApproval = revise(approvalOriginal, "2026-08-06T13:00:00.000Z");
+  const staleApproval = revise(approvalOriginal, "2026-08-06T13:01:00.000Z");
+  await publish(approvalRoot, guardedPublicationCommand("first-cross-run-approval", firstApproval, approvalOriginal.revisionId, 1));
+  await assert.rejects(
+    publish(approvalRoot, guardedPublicationCommand("stale-cross-run-approval", staleApproval, approvalOriginal.revisionId, 2)),
+    /Stale publication command/,
+  );
+  assert.equal((await currentRevision(approvalRoot)).revisionId, firstApproval.revisionId);
+
+  const unpublishRoot = await temporaryRepository(t);
+  const unpublishOriginal = await currentRevision(unpublishRoot);
+  const replacement = revise(unpublishOriginal, "2026-08-06T13:02:00.000Z");
+  await publish(unpublishRoot, guardedPublicationCommand("newer-cross-run-approval", replacement, unpublishOriginal.revisionId, 1));
+  await assert.rejects(
+    publish(unpublishRoot, {
+      schemaVersion: 2,
+      kind: "unpublishCanonicalEntry",
+      idempotencyKey: "stale-cross-run-unpublish",
+      generation: generation(2),
+      expectedActiveRevisionId: unpublishOriginal.revisionId,
+      entryId: unpublishOriginal.entryId,
+    }),
+    /Stale publication command/,
+  );
+  assert.equal((await currentRevision(unpublishRoot)).revisionId, replacement.revisionId);
 });
 
 async function publish(
@@ -917,6 +980,15 @@ function revise(current: CanonicalRevision, createdAt: string): CanonicalRevisio
 
 function publicationCommand(idempotencyKey: string, revision: CanonicalRevision, assignedGeneration = 1): PublicationCommand {
   return { schemaVersion: 1, kind: "publishCanonicalRevision", idempotencyKey, generation: generation(assignedGeneration), revision };
+}
+
+function guardedPublicationCommand(
+  idempotencyKey: string,
+  revision: CanonicalRevision,
+  expectedActiveRevisionId: string | null,
+  assignedGeneration = 1,
+): PublicationCommand {
+  return { schemaVersion: 2, kind: "publishCanonicalRevision", idempotencyKey, generation: generation(assignedGeneration), expectedActiveRevisionId, revision };
 }
 
 function memoryLeaseCommands(now: () => number = Date.now) {

@@ -1,28 +1,33 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:dnd-firegory:schema:content-repository:activation-delta:1",
-  "title": "Content repository activation delta",
-  "description": "A readerContractVersion 1 immutable single-target replacement folded over the bootstrap descriptor.",
+  "$id": "urn:dnd-firegory:schema:content-repository:activation-delta:2",
+  "title": "Content repository activation delta with deletion",
+  "description": "A readerContractVersion 2 immutable single-target replacement or removal.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "kind", "readerContractVersion", "generation", "idempotencyKey", "targetEntryId", "entry"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "kind": { "const": "repositoryActivationDelta" },
-    "readerContractVersion": { "const": 1 },
+    "readerContractVersion": { "const": 2 },
     "generation": { "type": "string", "pattern": "^[0-9]{32}$" },
     "idempotencyKey": { "$ref": "#/$defs/stableId" },
     "targetEntryId": { "$ref": "#/$defs/stableId" },
     "entry": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["entryId", "revisionId", "path", "contentHash"],
-      "properties": {
-        "entryId": { "$ref": "#/$defs/stableId" },
-        "revisionId": { "type": "string", "pattern": "^rev-[0-9a-f]{64}$" },
-        "path": { "$ref": "#/$defs/relativePath" },
-        "contentHash": { "$ref": "#/$defs/contentHash" }
-      }
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["entryId", "revisionId", "path", "contentHash"],
+          "properties": {
+            "entryId": { "$ref": "#/$defs/stableId" },
+            "revisionId": { "type": "string", "pattern": "^rev-[0-9a-f]{64}$" },
+            "path": { "$ref": "#/$defs/relativePath" },
+            "contentHash": { "$ref": "#/$defs/contentHash" }
+          }
+        }
+      ]
     }
   },
   "$defs": {

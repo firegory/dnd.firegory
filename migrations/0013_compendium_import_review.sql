@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS compendium_import_candidate_reviews (
   publication_status compendium_review_publication_status NOT NULL DEFAULT 'idle',
   publication_attempt integer NOT NULL DEFAULT 0,
   idempotency_key text,
+  expected_active_revision_id text,
+  expected_active_revision_captured boolean NOT NULL DEFAULT false,
   last_error text,
   reviewed_by text,
   reviewed_at timestamptz,
@@ -40,6 +42,13 @@ CREATE TABLE IF NOT EXISTS compendium_import_candidate_reviews (
   CONSTRAINT compendium_review_idempotency_key_format CHECK (
     idempotency_key IS NULL OR idempotency_key ~ '^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$'
   ),
+  CONSTRAINT compendium_review_expected_revision_format CHECK (
+    expected_active_revision_id IS NULL OR expected_active_revision_id ~ '^rev-[0-9a-f]{64}$'
+  ),
+  CONSTRAINT compendium_review_expected_revision_shape CHECK (
+    (publication_status = 'idle' AND expected_active_revision_captured = false AND expected_active_revision_id IS NULL)
+    OR (publication_status <> 'idle' AND expected_active_revision_captured = true)
+  ),
   CONSTRAINT compendium_review_publishable_decision CHECK (
     publication_status = 'idle' OR decision IN ('approved', 'merged', 'unpublish')
   )
@@ -55,9 +64,13 @@ CREATE TABLE IF NOT EXISTS compendium_import_review_audit (
   candidate_id uuid REFERENCES compendium_import_candidates(id),
   event_type text NOT NULL,
   actor text NOT NULL,
+  initiating_actor text,
   details jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT compendium_import_review_audit_text CHECK (btrim(event_type) <> '' AND btrim(actor) <> ''),
+  CONSTRAINT compendium_import_review_audit_text CHECK (
+    btrim(event_type) <> '' AND btrim(actor) <> ''
+    AND (initiating_actor IS NULL OR btrim(initiating_actor) <> '')
+  ),
   CONSTRAINT compendium_import_review_audit_details CHECK (jsonb_typeof(details) = 'object')
 );
 CREATE INDEX IF NOT EXISTS compendium_import_review_audit_run_created_idx
@@ -82,6 +95,11 @@ BEGIN
   IF TG_OP = 'UPDATE' AND OLD.publication_status = 'completed'
      AND NEW IS DISTINCT FROM OLD THEN
     RAISE EXCEPTION 'completed candidate publication state is immutable';
+  END IF;
+  IF TG_OP = 'UPDATE' AND OLD.expected_active_revision_captured
+     AND (NEW.expected_active_revision_captured, NEW.expected_active_revision_id)
+         IS DISTINCT FROM (OLD.expected_active_revision_captured, OLD.expected_active_revision_id) THEN
+    RAISE EXCEPTION 'captured active revision expectation is immutable';
   END IF;
   RETURN NEW;
 END $$;
