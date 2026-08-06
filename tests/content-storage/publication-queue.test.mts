@@ -6,6 +6,7 @@ import {
   deadLetterPublication,
   enqueuePublication,
   reclaimExpiredPublications,
+  renewPublicationReservation,
   reservePublication,
   retryPublication,
   type PublicationQueueBackend,
@@ -23,10 +24,12 @@ test("queue reservations use unique deliveries and only the current owner can ac
   const liveDuplicate = await reservePublication({ backend, now: 10, visibilityTimeoutMs: 200 });
   assert.ok(liveDuplicate?.message);
   assert.equal(await acknowledgePublication({ ...first, reservationId: "stale-owner" }, backend), false);
-  assert.equal(await reclaimExpiredPublications(109, backend), 0, "live reservations are never reclaimed");
-  assert.equal(await reclaimExpiredPublications(110, backend), 1);
+  assert.equal(await renewPublicationReservation({ ...first, reservationId: "stale-owner" }, { backend, now: 100, visibilityTimeoutMs: 100 }), false);
+  assert.equal(await renewPublicationReservation(first, { backend, now: 100, visibilityTimeoutMs: 100 }), true);
+  assert.equal(await reclaimExpiredPublications(199, backend), 0, "renewed reservations are not reclaimed");
+  assert.equal(await reclaimExpiredPublications(200, backend), 1);
 
-  const recovered = await reservePublication({ backend, now: 110, visibilityTimeoutMs: 100 });
+  const recovered = await reservePublication({ backend, now: 200, visibilityTimeoutMs: 100 });
   assert.ok(recovered);
   assert.equal(recovered.deliveryId, first.deliveryId);
   assert.notEqual(recovered.reservationId, first.reservationId);
@@ -49,6 +52,15 @@ test("retry increments attempts, respects backoff, and malformed bodies can be r
   assert.ok(retried?.message);
   assert.equal(retried.message.attempt, 1);
   assert.equal(await acknowledgePublication(retried, backend), true);
+
+  await enqueuePublication("contention-command", { backend, now: 50 });
+  const contended = await reservePublication({ backend, now: 50 });
+  assert.ok(contended?.message);
+  assert.equal(await retryPublication(contended, { backend, now: 50, delayMs: 10, consumeAttempt: false }), true);
+  const contentionRetry = await reservePublication({ backend, now: 60 });
+  assert.equal(contentionRetry?.message?.attempt, 0);
+  assert.ok(contentionRetry);
+  await acknowledgePublication(contentionRetry, backend);
 
   backend.putRaw("malformed-delivery", "{not-json", 60);
   const malformed = await reservePublication({ backend, now: 60 });
@@ -96,6 +108,11 @@ function memoryQueueBackend() {
       reservations.delete(deliveryId);
       processing.delete(deliveryId);
       deliveries.delete(deliveryId);
+      return true;
+    },
+    async renew(deliveryId, reservationId, deadline) {
+      if (reservations.get(deliveryId) !== reservationId || !processing.has(deliveryId)) return false;
+      processing.set(deliveryId, deadline);
       return true;
     },
     async retry(deliveryId, reservationId, availableAt, raw) {

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const migrationSql = await readFile("migrations/0001_initial_schema.sql", "utf8");
+const publicationMigrationSql = await readFile("migrations/0003_publication_fencing_token.sql", "utf8");
 
 test("initial migration enables required Postgres extensions", () => {
   assert.match(migrationSql, /CREATE EXTENSION IF NOT EXISTS pgcrypto;/);
@@ -60,4 +61,8 @@ test("chunks can store pgvector embeddings and search indexes", () => {
   assert.match(migrationSql, /embedding vector\(1024\)/);
   assert.match(migrationSql, /USING hnsw \(embedding vector_cosine_ops\)/);
   assert.match(migrationSql, /chunks_text_search_idx/);
+});
+
+test("publication migration creates a monotonic bigint fencing sequence", () => {
+  assert.match(publicationMigrationSql, /CREATE SEQUENCE publication_fencing_token_seq AS bigint;/);
 });

@@ -31,6 +31,7 @@ export interface PublicationQueueBackend {
   enqueue(message: PublicationQueueMessage, availableAt: number): Promise<void>;
   reserve(now: number, deadline: number, reservationId: string): Promise<readonly [string, string] | null>;
   acknowledge(deliveryId: string, reservationId: string): Promise<boolean>;
+  renew(deliveryId: string, reservationId: string, deadline: number): Promise<boolean>;
   retry(deliveryId: string, reservationId: string, availableAt: number, raw: string): Promise<boolean>;
   reclaim(now: number): Promise<number>;
   deadLetter(deliveryId: string, reservationId: string, reason: string, now: number): Promise<boolean>;
@@ -51,6 +52,12 @@ if redis.call("HGET", KEYS[1], ARGV[1]) ~= ARGV[2] then return 0 end
 redis.call("HDEL", KEYS[1], ARGV[1])
 redis.call("ZREM", KEYS[2], ARGV[1])
 redis.call("HDEL", KEYS[3], ARGV[1])
+return 1`;
+
+const RENEW_RESERVATION_SCRIPT = `
+if redis.call("HGET", KEYS[1], ARGV[1]) ~= ARGV[2] then return 0 end
+if redis.call("ZSCORE", KEYS[2], ARGV[1]) == false then return 0 end
+redis.call("ZADD", KEYS[2], ARGV[3], ARGV[1])
 return 1`;
 
 const RETRY_SCRIPT = `
@@ -136,12 +143,36 @@ export async function acknowledgePublication(
   return backend.acknowledge(reservation.deliveryId, reservation.reservationId);
 }
 
+export async function renewPublicationReservation(
+  reservation: PublicationReservation,
+  options: Readonly<{
+    now?: number;
+    visibilityTimeoutMs?: number;
+    backend?: PublicationQueueBackend;
+  }> = {},
+): Promise<boolean> {
+  const now = options.now ?? Date.now();
+  return (options.backend ?? redisBackend).renew(
+    reservation.deliveryId,
+    reservation.reservationId,
+    now + (options.visibilityTimeoutMs ?? PUBLICATION_VISIBILITY_TIMEOUT_MS),
+  );
+}
+
 export async function retryPublication(
   reservation: PublicationReservation,
-  options: Readonly<{ now?: number; delayMs: number; backend?: PublicationQueueBackend }>,
+  options: Readonly<{
+    now?: number;
+    delayMs: number;
+    consumeAttempt?: boolean;
+    backend?: PublicationQueueBackend;
+  }>,
 ): Promise<boolean> {
   if (!reservation.message) return false;
-  const nextMessage = { ...reservation.message, attempt: reservation.message.attempt + 1 };
+  const nextMessage = {
+    ...reservation.message,
+    attempt: reservation.message.attempt + (options.consumeAttempt === false ? 0 : 1),
+  };
   return (options.backend ?? redisBackend).retry(
     reservation.deliveryId,
     reservation.reservationId,
@@ -192,6 +223,13 @@ const redisBackend: PublicationQueueBackend = {
     return Number(await getRedisClient().eval(ACK_SCRIPT, {
       keys: [PUBLICATION_RESERVATIONS_KEY, PUBLICATION_PROCESSING_KEY, PUBLICATION_DELIVERIES_KEY],
       arguments: [deliveryId, reservationId],
+    })) === 1;
+  },
+  async renew(deliveryId, reservationId, deadline) {
+    await ensureRedisConnection();
+    return Number(await getRedisClient().eval(RENEW_RESERVATION_SCRIPT, {
+      keys: [PUBLICATION_RESERVATIONS_KEY, PUBLICATION_PROCESSING_KEY],
+      arguments: [deliveryId, reservationId, String(deadline)],
     })) === 1;
   },
   async retry(deliveryId, reservationId, availableAt, raw) {

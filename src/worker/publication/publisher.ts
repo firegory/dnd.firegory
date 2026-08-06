@@ -7,19 +7,23 @@ import {
   type PublicationCommand,
 } from "../../server/content-storage/publication-command.ts";
 import {
+  activationDirectoryPath,
+  activationManifestPath,
+  activationTemporaryPath,
   canonicalJson,
   canonicalRevisionPath,
-  manifestPath,
-  publicationManifestTemporaryPath,
+  formatActivationToken,
+  parseActivationToken,
   publicationStagingPath,
   publicationStagingTemporaryPath,
   type JsonValue,
+  type RepositoryActivation,
   type RepositoryManifest,
 } from "../../server/content-storage/repository.ts";
 import {
   assertCanonicalRevision,
-  assertRepositoryManifest,
   ContentIntegrityError,
+  loadActiveRepositoryManifest,
   validateCanonicalRevisionDependencies,
 } from "../../server/content-storage/validation.ts";
 import {
@@ -39,6 +43,12 @@ import {
   openDirectoryNoFollow,
   openExclusiveNoFollow,
 } from "./safe-filesystem.ts";
+import {
+  createPostgresActivationTokenAllocator,
+  type ActivationTokenAllocator,
+} from "./token.ts";
+
+export const PUBLICATION_TEMPORARY_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
 export class PublicationLeaseUnavailableError extends Error {
   constructor(targetId: string) {
@@ -65,7 +75,8 @@ export type PublicationHooks = Readonly<{
   afterStagingTemporarySynced?: () => void | Promise<void>;
   afterStagingInstalled?: () => void | Promise<void>;
   beforeActivation?: () => void | Promise<void>;
-  beforeManifestRename?: () => void | Promise<void>;
+  afterActivationTokenAllocated?: (fencingToken: string) => void | Promise<void>;
+  afterActivationTemporarySynced?: () => void | Promise<void>;
 }>;
 
 export async function publishCanonicalRevision(options: Readonly<{
@@ -73,12 +84,15 @@ export async function publishCanonicalRevision(options: Readonly<{
   command: PublicationCommand;
   leaseManager?: PublicationLeaseManager;
   fenceManager?: PublicationFenceManager;
+  tokenAllocator?: ActivationTokenAllocator;
   leaseTtlMs?: number;
+  now?: () => number;
   hooks?: PublicationHooks;
 }>): Promise<PublicationResult> {
   assertCanonicalRevision(options.command.revision);
   const root = await canonicalRoot(options.dataRoot);
-  const initialManifest = await readManifest(root);
+  const initialActive = await loadActiveRepositoryManifest(root);
+  const initialManifest = initialActive.manifest;
   const leaseManager = options.leaseManager ?? new RedisPublicationLeaseManager();
   const leaseTtlMs = options.leaseTtlMs ?? 30_000;
   const lease = await leaseManager.acquire(initialManifest.repositoryId, leaseTtlMs);
@@ -99,15 +113,16 @@ export async function publishCanonicalRevision(options: Readonly<{
       options.hooks?.onCanonicalPhase?.(true);
       await assertLease(lease, leaseLost);
       await fence.verify();
-      const manifest = await readManifest(root);
+      const active = await loadActiveRepositoryManifest(root);
+      const manifest = active.manifest;
       if (manifest.repositoryId !== initialManifest.repositoryId) {
         throw new ContentIntegrityError("Repository identity changed while acquiring its publication fence.");
       }
 
       const revision = options.command.revision;
       await validateCanonicalRevisionDependencies(root, revision);
-      const active = manifest.entries.find((entry) => entry.entryId === revision.entryId);
-      if (active?.revisionId === revision.revisionId) {
+      const activeEntry = manifest.entries.find((entry) => entry.entryId === revision.entryId);
+      if (activeEntry?.revisionId === revision.revisionId) {
         return { entryId: revision.entryId, revisionId: revision.revisionId, alreadyActive: true };
       }
 
@@ -115,10 +130,24 @@ export async function publishCanonicalRevision(options: Readonly<{
       const revisionFile = canonicalRevisionPath(root, revision.entryId, revision.revisionId);
       const stagingDirectory = dirname(stagingFile);
       const revisionDirectory = dirname(revisionFile);
+      const activationDirectory = activationDirectoryPath(root);
       await ensureCanonicalDirectory(root, stagingDirectory);
       await ensureCanonicalDirectory(root, revisionDirectory);
-      await removeAbandonedTemporaryFiles(root, stagingDirectory, /^\.rev-[0-9a-f]{64}\.[a-z0-9-]+\.tmp$/);
-      await removeAbandonedTemporaryFiles(root, dirname(manifestPath(root)), /^\.repository-[a-z0-9-]+\.tmp$/);
+      await ensureCanonicalDirectory(root, activationDirectory);
+
+      const now = options.now?.() ?? Date.now();
+      await removeAbandonedTemporaryFiles(
+        root,
+        stagingDirectory,
+        /^\.rev-[0-9a-f]{64}\.([0-9]+)\.[a-z0-9-]+\.tmp$/,
+        now - PUBLICATION_TEMPORARY_RETENTION_MS,
+      );
+      await removeAbandonedTemporaryFiles(
+        root,
+        activationDirectory,
+        /^\.[0-9]{20}\.([0-9]+)\.[a-z0-9-]+\.tmp$/,
+        now - PUBLICATION_TEMPORARY_RETENTION_MS,
+      );
 
       await fence.verify();
       const encodedRevision = `${canonicalJson(revision as unknown as JsonValue)}\n`;
@@ -126,6 +155,7 @@ export async function publishCanonicalRevision(options: Readonly<{
         root,
         stagingFile,
         contents: encodedRevision,
+        createdAt: now,
         afterTemporarySynced: options.hooks?.afterStagingTemporarySynced,
       });
       await options.hooks?.afterStagingInstalled?.();
@@ -133,10 +163,8 @@ export async function publishCanonicalRevision(options: Readonly<{
       await assertLease(lease, leaseLost);
       await fence.verify();
       await promoteRevision(root, stagingFile, revisionFile, encodedRevision);
-
       await options.hooks?.beforeActivation?.();
-      await assertLease(lease, leaseLost);
-      await fence.verify();
+
       const nextManifest: RepositoryManifest = {
         ...manifest,
         entries: [
@@ -149,8 +177,25 @@ export async function publishCanonicalRevision(options: Readonly<{
           },
         ].sort((left, right) => left.entryId.localeCompare(right.entryId)),
       };
-      assertRepositoryManifest(nextManifest);
-      await activateManifest(root, nextManifest, lease.ownerId.toLowerCase(), options.hooks?.beforeManifestRename, fence.verify);
+
+      await assertLease(lease, leaseLost);
+      const tokenResource = options.tokenAllocator ? null : await createPostgresActivationTokenAllocator();
+      try {
+        const maximumToken = await maximumActivationToken(root);
+        const token = await (options.tokenAllocator ?? tokenResource!.allocator).allocate(maximumToken);
+        const fencingToken = formatActivationToken(token);
+        await options.hooks?.afterActivationTokenAllocated?.(fencingToken);
+        await installActivation(
+          root,
+          nextManifest,
+          fencingToken,
+          lease.ownerId.toLowerCase(),
+          now,
+          options.hooks?.afterActivationTemporarySynced,
+        );
+      } finally {
+        tokenResource?.release();
+      }
 
       return { entryId: revision.entryId, revisionId: revision.revisionId, alreadyActive: false };
     } finally {
@@ -172,6 +217,7 @@ export async function publishSpooledCommand(options: Readonly<{
   idempotencyKey: string;
   leaseManager?: PublicationLeaseManager;
   fenceManager?: PublicationFenceManager;
+  tokenAllocator?: ActivationTokenAllocator;
   leaseTtlMs?: number;
 }>): Promise<PublicationResult> {
   const command = await loadPublicationCommand(options.idempotencyKey, options.spoolRoot);
@@ -180,28 +226,28 @@ export async function publishSpooledCommand(options: Readonly<{
     command,
     leaseManager: options.leaseManager,
     fenceManager: options.fenceManager,
+    tokenAllocator: options.tokenAllocator,
     leaseTtlMs: options.leaseTtlMs,
   });
-}
-
-async function readManifest(root: string): Promise<RepositoryManifest> {
-  const path = manifestPath(root);
-  await assertCanonicalRegularFile(root, path);
-  const value: unknown = JSON.parse(await readFile(path, "utf8"));
-  assertRepositoryManifest(value);
-  return value;
 }
 
 async function stageRevision(options: Readonly<{
   root: string;
   stagingFile: string;
   contents: string;
+  createdAt: number;
   afterTemporarySynced?: () => void | Promise<void>;
 }>): Promise<void> {
   const temporaryId = randomUUID();
   const revisionId = basename(options.stagingFile, ".json");
   const entryId = basename(dirname(options.stagingFile));
-  const temporary = publicationStagingTemporaryPath(options.root, entryId, revisionId, temporaryId);
+  const temporary = publicationStagingTemporaryPath(
+    options.root,
+    entryId,
+    revisionId,
+    options.createdAt,
+    temporaryId,
+  );
   const file = await openExclusiveNoFollow(temporary, 0o640);
   try {
     await file.writeFile(options.contents, "utf8");
@@ -242,39 +288,52 @@ async function promoteRevision(root: string, stagingFile: string, revisionFile: 
   await syncDirectory(dirname(stagingFile));
 }
 
-async function activateManifest(
+async function installActivation(
   root: string,
   manifest: RepositoryManifest,
+  fencingToken: string,
   ownerId: string,
-  beforeRename?: () => void | Promise<void>,
-  verifyFence?: () => Promise<void>,
+  createdAt: number,
+  afterTemporarySynced?: () => void | Promise<void>,
 ): Promise<void> {
-  const activeManifest = manifestPath(root);
-  await assertCanonicalRegularFile(root, activeManifest);
-  const temporary = publicationManifestTemporaryPath(root, ownerId);
+  const activation: RepositoryActivation = {
+    schemaVersion: 1,
+    kind: "repositoryActivation",
+    fencingToken,
+    manifest,
+  };
+  const activationFile = activationManifestPath(root, fencingToken);
+  const temporary = activationTemporaryPath(root, fencingToken, createdAt, ownerId);
   const file = await openExclusiveNoFollow(temporary, 0o640);
   try {
-    await file.writeFile(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await file.writeFile(`${JSON.stringify(activation, null, 2)}\n`, "utf8");
     await file.sync();
   } finally {
     await file.close();
   }
   try {
-    await beforeRename?.();
-    await verifyFence?.();
-    await assertCanonicalAncestors(root, activeManifest);
-    await assertCanonicalRegularFile(root, activeManifest);
-    await rename(temporary, activeManifest);
-    await syncDirectory(dirname(activeManifest));
+    await afterTemporarySynced?.();
+    await assertCanonicalAncestors(root, activationFile);
+    if (await regularFileExists(root, activationFile)) {
+      throw new ContentIntegrityError(`Activation fencing token already exists: ${fencingToken}`);
+    }
+    await rename(temporary, activationFile);
+    await syncDirectory(dirname(activationFile));
   } finally {
     await rm(temporary, { force: true });
   }
 }
 
-async function removeAbandonedTemporaryFiles(root: string, directory: string, pattern: RegExp): Promise<void> {
+async function removeAbandonedTemporaryFiles(
+  root: string,
+  directory: string,
+  pattern: RegExp,
+  olderThan: number,
+): Promise<void> {
   await assertCanonicalAncestors(root, resolve(directory, "placeholder"));
   for (const name of await readdir(directory)) {
-    if (!pattern.test(name)) continue;
+    const match = pattern.exec(name);
+    if (!match || Number(match[1]) >= olderThan) continue;
     const path = resolve(directory, name);
     const metadata = await lstat(path);
     if (metadata.isDirectory()) {
@@ -283,6 +342,17 @@ async function removeAbandonedTemporaryFiles(root: string, directory: string, pa
     await rm(path);
   }
   await syncDirectory(directory);
+}
+
+async function maximumActivationToken(root: string): Promise<bigint> {
+  let maximum = BigInt(0);
+  for (const name of await readdir(activationDirectoryPath(root))) {
+    const match = /^([0-9]{20})\.json$/.exec(name);
+    if (!match) continue;
+    const token = parseActivationToken(match[1]);
+    if (token > maximum) maximum = token;
+  }
+  return maximum;
 }
 
 async function regularFileExists(root: string, path: string): Promise<boolean> {

@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
+import { link, lstat, mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { enqueuePublication } from "./publication-queue.ts";
 import {
   canonicalJson,
+  publicationOutboxEventPath,
   publicationOutboxStatePath,
   publicationQuarantinePath,
   publicationSpoolPath,
@@ -22,9 +23,11 @@ export type PublicationCommand = Readonly<{
 
 export type PublicationOutboxState = Readonly<{
   schemaVersion: 1;
-  kind: "publicationOutboxState";
+  kind: "publicationOutboxEvent";
   idempotencyKey: string;
   status: "pending" | "queued" | "completed" | "failed";
+  generation: number;
+  eventId: string;
   updatedAt: number;
   lastError?: string;
 }>;
@@ -37,6 +40,7 @@ export class PublicationCommandError extends Error {
 }
 
 type Enqueue = (idempotencyKey: string) => Promise<unknown>;
+const OUTBOX_TEMPORARY_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
 export function getPublicationSpoolRoot(environment: NodeJS.ProcessEnv = process.env): string {
   const configured = environment.PUBLICATION_SPOOL_ROOT?.trim();
@@ -64,10 +68,11 @@ export async function submitPublicationCommand(
   };
   const encoded = `${canonicalJson(command as unknown as JsonValue)}\n`;
   await mkdir(dirname(commandPath), { recursive: true, mode: 0o750 });
-  await mkdir(dirname(publicationOutboxStatePath(spoolRoot, input.idempotencyKey)), { recursive: true, mode: 0o750 });
+  await mkdir(publicationOutboxStatePath(spoolRoot, input.idempotencyKey), { recursive: true, mode: 0o750 });
 
-  const existing = await installImmutableCommand(commandPath, encoded);
-  await ensurePendingState(spoolRoot, input.idempotencyKey, options.now ?? Date.now());
+  const now = options.now ?? Date.now();
+  const existing = await installImmutableCommand(commandPath, encoded, now);
+  await ensurePendingState(spoolRoot, input.idempotencyKey, now);
   const currentState = await readOutboxState(spoolRoot, input.idempotencyKey);
   if (currentState?.status === "completed") return { commandPath, existing };
   if (currentState?.status === "failed") {
@@ -75,12 +80,14 @@ export async function submitPublicationCommand(
   }
   await (options.enqueue ?? enqueuePublication)(input.idempotencyKey);
   await options.afterEnqueue?.();
-  await writeOutboxState(spoolRoot, {
+  await writeOutboxEvent(spoolRoot, {
     schemaVersion: 1,
-    kind: "publicationOutboxState",
+    kind: "publicationOutboxEvent",
     idempotencyKey: input.idempotencyKey,
     status: "queued",
-    updatedAt: options.now ?? Date.now(),
+    generation: now,
+    eventId: randomUUID(),
+    updatedAt: now,
   });
   return { commandPath, existing };
 }
@@ -96,9 +103,9 @@ export async function reconcilePublicationOutbox(options: Readonly<{
   const stateDirectory = dirname(publicationOutboxStatePath(spoolRoot, "placeholder"));
   await mkdir(commandDirectory, { recursive: true, mode: 0o750 });
   await mkdir(stateDirectory, { recursive: true, mode: 0o750 });
-  await removeCommandTemporaries(commandDirectory);
-  await removeStateTemporaries(stateDirectory);
   const now = options.now ?? Date.now();
+  await removeCommandTemporaries(commandDirectory, now - OUTBOX_TEMPORARY_RETENTION_MS);
+  await removeStateTemporaries(stateDirectory, now - OUTBOX_TEMPORARY_RETENTION_MS);
   const redeliveryAfterMs = options.redeliveryAfterMs ?? 5 * 60_000;
   let enqueued = 0;
   let failed = 0;
@@ -131,11 +138,13 @@ export async function reconcilePublicationOutbox(options: Readonly<{
 
     try {
       await (options.enqueue ?? enqueuePublication)(idempotencyKey);
-      await writeOutboxState(spoolRoot, {
+      await writeOutboxEvent(spoolRoot, {
         schemaVersion: 1,
-        kind: "publicationOutboxState",
+        kind: "publicationOutboxEvent",
         idempotencyKey,
         status: "queued",
+        generation: now,
+        eventId: randomUUID(),
         updatedAt: now,
       });
       enqueued++;
@@ -168,35 +177,52 @@ export async function readOutboxState(
   spoolRoot: string,
   idempotencyKey: string,
 ): Promise<PublicationOutboxState | null> {
+  const directory = publicationOutboxStatePath(resolve(spoolRoot), idempotencyKey);
+  let names: string[];
   try {
-    const value: unknown = JSON.parse(await readFile(publicationOutboxStatePath(resolve(spoolRoot), idempotencyKey), "utf8"));
-    if (
-      !isRecord(value) ||
-      value.schemaVersion !== 1 ||
-      value.kind !== "publicationOutboxState" ||
-      value.idempotencyKey !== idempotencyKey ||
-      !["pending", "queued", "completed", "failed"].includes(String(value.status)) ||
-      !Number.isSafeInteger(value.updatedAt)
-    ) {
-      throw new Error(`Publication outbox state ${idempotencyKey} is invalid.`);
-    }
-    return value as PublicationOutboxState;
+    names = await readdir(directory);
   } catch (error) {
     if (hasCode(error, "ENOENT")) return null;
     throw error;
   }
+
+  const events: PublicationOutboxState[] = [];
+  for (const name of names) {
+    if (!/^[0-9]+-(?:pending|queued|completed|failed)-[a-z0-9-]+\.json$/.test(name)) continue;
+    const value: unknown = JSON.parse(await readFile(resolve(directory, name), "utf8"));
+    if (
+      !isRecord(value) ||
+      value.schemaVersion !== 1 ||
+      value.kind !== "publicationOutboxEvent" ||
+      value.idempotencyKey !== idempotencyKey ||
+      !["pending", "queued", "completed", "failed"].includes(String(value.status)) ||
+      !Number.isSafeInteger(value.generation) ||
+      typeof value.eventId !== "string" ||
+      !Number.isSafeInteger(value.updatedAt)
+    ) {
+      throw new Error(`Publication outbox state ${idempotencyKey} is invalid.`);
+    }
+    if (`${value.generation}-${value.status}-${value.eventId}.json` !== name) {
+      throw new Error(`Publication outbox event filename does not match its contents: ${name}`);
+    }
+    events.push(value as PublicationOutboxState);
+  }
+  return events.sort(compareOutboxEvents).at(-1) ?? null;
 }
 
 export async function markPublicationCompleted(
   idempotencyKey: string,
   spoolRoot = getPublicationSpoolRoot(),
   now = Date.now(),
+  generation = now,
 ): Promise<void> {
-  await writeOutboxState(resolve(spoolRoot), {
+  await writeOutboxEvent(resolve(spoolRoot), {
     schemaVersion: 1,
-    kind: "publicationOutboxState",
+    kind: "publicationOutboxEvent",
     idempotencyKey,
     status: "completed",
+    generation,
+    eventId: randomUUID(),
     updatedAt: now,
   });
 }
@@ -206,12 +232,15 @@ export async function markPublicationFailed(
   reason: string,
   spoolRoot = getPublicationSpoolRoot(),
   now = Date.now(),
+  generation = now,
 ): Promise<void> {
-  await writeOutboxState(resolve(spoolRoot), {
+  await writeOutboxEvent(resolve(spoolRoot), {
     schemaVersion: 1,
-    kind: "publicationOutboxState",
+    kind: "publicationOutboxEvent",
     idempotencyKey,
     status: "failed",
+    generation,
+    eventId: randomUUID(),
     updatedAt: now,
     lastError: reason,
   });
@@ -229,8 +258,8 @@ export async function quarantinePublication(
   await atomicDurableWrite(path, `${JSON.stringify({ deliveryId, raw, reason, failedAt: now }, null, 2)}\n`);
 }
 
-async function installImmutableCommand(path: string, contents: string): Promise<boolean> {
-  const temporaryPath = `${path}.${randomUUID()}.tmp`;
+async function installImmutableCommand(path: string, contents: string, createdAt: number): Promise<boolean> {
+  const temporaryPath = `${path}.${createdAt}.${randomUUID()}.tmp`;
   const file = await open(temporaryPath, "wx", 0o600);
   try {
     await file.writeFile(contents, "utf8");
@@ -259,19 +288,40 @@ async function installImmutableCommand(path: string, contents: string): Promise<
 async function ensurePendingState(spoolRoot: string, idempotencyKey: string, now: number): Promise<void> {
   const state = await readOutboxState(spoolRoot, idempotencyKey);
   if (state) return;
-  await writeOutboxState(spoolRoot, {
+  await writeOutboxEvent(spoolRoot, {
     schemaVersion: 1,
-    kind: "publicationOutboxState",
+    kind: "publicationOutboxEvent",
     idempotencyKey,
     status: "pending",
+    generation: now,
+    eventId: randomUUID(),
     updatedAt: now,
   });
 }
 
-async function writeOutboxState(spoolRoot: string, state: PublicationOutboxState): Promise<void> {
-  const path = publicationOutboxStatePath(resolve(spoolRoot), state.idempotencyKey);
+async function writeOutboxEvent(spoolRoot: string, state: PublicationOutboxState): Promise<void> {
+  const path = publicationOutboxEventPath(
+    resolve(spoolRoot),
+    state.idempotencyKey,
+    state.generation,
+    state.status,
+    state.eventId,
+  );
   await mkdir(dirname(path), { recursive: true, mode: 0o750 });
-  await atomicDurableWrite(path, `${JSON.stringify(state, null, 2)}\n`);
+  const temporary = `${path}.tmp`;
+  const file = await open(temporary, "wx", 0o600);
+  try {
+    await file.writeFile(`${JSON.stringify(state, null, 2)}\n`, "utf8");
+    await file.sync();
+  } finally {
+    await file.close();
+  }
+  try {
+    await rename(temporary, path);
+    await syncDirectory(dirname(path));
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 async function atomicDurableWrite(path: string, contents: string): Promise<void> {
@@ -291,18 +341,24 @@ async function atomicDurableWrite(path: string, contents: string): Promise<void>
   }
 }
 
-async function removeStateTemporaries(directory: string): Promise<void> {
+async function removeStateTemporaries(directory: string, olderThan: number): Promise<void> {
   for (const name of await readdir(directory)) {
-    if (/^[a-z0-9-]+\.json\.[a-z0-9-]+\.tmp$/.test(name)) {
-      await rm(resolve(directory, name), { force: true });
+    const path = resolve(directory, name);
+    const metadata = await lstat(path);
+    if (!metadata.isDirectory()) continue;
+    for (const eventName of await readdir(path)) {
+      const match = /^([0-9]+)-.*\.json\.tmp$/.exec(eventName);
+      if (match && Number(match[1]) < olderThan) await rm(resolve(path, eventName), { force: true });
     }
+    await syncDirectory(path);
   }
   await syncDirectory(directory);
 }
 
-async function removeCommandTemporaries(directory: string): Promise<void> {
+async function removeCommandTemporaries(directory: string, olderThan: number): Promise<void> {
   for (const name of await readdir(directory)) {
-    if (/^[a-z0-9-]+\.json\.[a-z0-9-]+\.tmp$/.test(name)) {
+    const match = /^[a-z0-9-]+\.json\.([0-9]+)\.[a-z0-9-]+\.tmp$/.exec(name);
+    if (match && Number(match[1]) < olderThan) {
       await rm(resolve(directory, name), { force: true });
     }
   }
@@ -343,4 +399,11 @@ function hasCode(error: unknown, code: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function compareOutboxEvents(left: PublicationOutboxState, right: PublicationOutboxState): number {
+  const precedence = { pending: 0, queued: 1, failed: 2, completed: 3 } as const;
+  return precedence[left.status] - precedence[right.status]
+    || left.generation - right.generation
+    || left.eventId.localeCompare(right.eventId);
 }

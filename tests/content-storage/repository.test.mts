@@ -10,15 +10,18 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
 import {
+  activationManifestPath,
   canonicalJson,
   canonicalRevisionPath,
   contentHash,
   createCanonicalRevision,
   exportPath,
+  formatActivationToken,
   generationPath,
   getDataRoot,
   hasValidRevisionIdentity,
   manifestPath,
+  parseActivationToken,
   revisionIdentity,
   schemaPath,
   snapshotPath,
@@ -50,10 +53,13 @@ test("repository paths are deterministic for stable IDs", () => {
     generationPath(dataRoot, "search-index-1"),
     snapshotPath(dataRoot, "release-1"),
     exportPath(dataRoot, "website-1"),
+    activationManifestPath(dataRoot, formatActivationToken(BigInt(42))),
   ];
 
   assert.deepEqual(paths(), paths());
   assert.equal(paths()[3], resolve(dataRoot, "compendium/dash/revisions", `${revisionId}.json`));
+  assert.equal(paths()[7], resolve(dataRoot, "manifests/activations/00000000000000000042.json"));
+  assert.equal(parseActivationToken("00000000000000000042"), BigInt(42));
 });
 
 test("repository paths reject traversal and ambiguous IDs", () => {
@@ -62,6 +68,7 @@ test("repository paths reject traversal and ambiguous IDs", () => {
   assert.throws(() => canonicalRevisionPath(dataRoot, "dash/other", revisionId), /stable ID/);
   assert.throws(() => canonicalRevisionPath(dataRoot, "dash", "latest"), /SHA-256/);
   assert.throws(() => schemaPath(dataRoot, "entry", 0), /positive integer/);
+  assert.throws(() => activationManifestPath(dataRoot, "42"), /fixed-width/);
 });
 
 test("DND_DATA_ROOT is explicit and independent of a storage server", () => {

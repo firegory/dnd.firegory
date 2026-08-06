@@ -9,12 +9,15 @@ import { fileURLToPath } from "node:url";
 import {
   loadPublicationCommand,
   markPublicationCompleted,
+  markPublicationFailed,
   readOutboxState,
   reconcilePublicationOutbox,
   submitPublicationCommand,
   type PublicationCommand,
 } from "../../src/server/content-storage/publication-command.ts";
 import {
+  activationDirectoryPath,
+  activationManifestPath,
   publicationOutboxStatePath,
   publicationQuarantinePath,
   createCanonicalRevision,
@@ -26,14 +29,16 @@ import {
   type RepositoryManifest,
 } from "../../src/server/content-storage/repository.ts";
 import { type PublicationReservation } from "../../src/server/content-storage/publication-queue.ts";
-import { validateContentRepository } from "../../src/server/content-storage/validation.ts";
+import { loadActiveRepositoryManifest, validateContentRepository } from "../../src/server/content-storage/validation.ts";
 import { PostgresPublicationFenceManager, type PublicationFenceManager } from "../../src/worker/publication/fence.ts";
 import { RedisPublicationLeaseManager } from "../../src/worker/publication/lease.ts";
 import { processPublicationReservation } from "../../src/worker/publication/processor.ts";
 import {
   PublicationFenceUnavailableError,
+  PUBLICATION_TEMPORARY_RETENTION_MS,
   publishCanonicalRevision,
 } from "../../src/worker/publication/publisher.ts";
+import { PostgresActivationTokenAllocator, type ActivationTokenAllocator } from "../../src/worker/publication/token.ts";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const fixtureRoot = resolve(projectRoot, "content-repository");
@@ -71,7 +76,7 @@ test("read-only app submission durably records intent and reconciliation closes 
   assert.deepEqual(queued, ["publish-dash-v2", "publish-dash-v2"]);
   assert.equal((await readOutboxState(spoolRoot, "publish-dash-v2"))?.status, "queued");
 
-  await rm(publicationOutboxStatePath(spoolRoot, "publish-dash-v2"));
+  await rm(publicationOutboxStatePath(spoolRoot, "publish-dash-v2"), { recursive: true });
   assert.deepEqual(
     await reconcilePublicationOutbox({ spoolRoot, now: 300, enqueue: async (key) => { queued.push(key); } }),
     { enqueued: 1, failed: 0 },
@@ -117,7 +122,33 @@ test("read-only app submission durably records intent and reconciliation closes 
   assert.equal(await readFile(publicationQuarantinePath(spoolRoot, "malformed-spool"), "utf8").then(Boolean), true);
 });
 
-test("database session fence prevents an expired Redis lease from enabling a stale-writer overlap", async (t) => {
+test("immutable outbox events prevent completed state from regressing under races", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "dnd-outbox-race-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const spoolRoot = resolve(parent, "spool");
+  const revision = await revisionFromFixture("2026-08-06T01:45:00.000Z");
+  await submitPublicationCommand(
+    { idempotencyKey: "outbox-race", revision },
+    { spoolRoot, now: 100, enqueue: async () => undefined },
+  );
+
+  await Promise.allSettled([
+    markPublicationCompleted("outbox-race", spoolRoot, 200),
+    markPublicationFailed("outbox-race", "late duplicate failure", spoolRoot, 300),
+    reconcilePublicationOutbox({ spoolRoot, now: 400, redeliveryAfterMs: 0, enqueue: async () => undefined }),
+    submitPublicationCommand(
+      { idempotencyKey: "outbox-race", revision },
+      { spoolRoot, now: 500, enqueue: async () => undefined },
+    ),
+  ]);
+
+  const state = await readOutboxState(spoolRoot, "outbox-race");
+  assert.equal(state?.status, "completed");
+  assert.equal(state?.generation, 200);
+  assert.ok((await readdir(publicationOutboxStatePath(spoolRoot, "outbox-race"))).length >= 3);
+});
+
+test("higher immutable activation remains active when a stale lower-token writer resumes", async (t) => {
   const root = await temporaryRepository(t);
   const firstRevision = await nextRevision(root, "2026-08-06T02:00:00.000Z");
   const secondRevision = await nextRevision(root, "2026-08-06T03:00:00.000Z");
@@ -128,25 +159,23 @@ test("database session fence prevents an expired Redis lease from enabling a sta
   const fenceState = { owner: null as symbol | null };
   const firstFenceManager = memoryFenceManager(fenceState);
   const secondFenceManager = memoryFenceManager(fenceState);
+  const tokenAllocator = memoryTokenAllocator();
   let resumeFirst!: () => void;
   const pauseFirst = new Promise<void>((resolvePause) => { resumeFirst = resolvePause; });
   let firstPaused!: () => void;
   const reachedPause = new Promise<void>((resolveReached) => { firstPaused = resolveReached; });
-  let active = 0;
-  let maximumActive = 0;
 
   const first = publishCanonicalRevision({
     dataRoot: root,
     command: publicationCommand("stale-writer-first", firstRevision),
     leaseManager: firstLeaseManager,
     fenceManager: firstFenceManager,
+    tokenAllocator,
     leaseTtlMs: 100,
     hooks: {
-      onCanonicalPhase(value) {
-        active += value ? 1 : -1;
-        maximumActive = Math.max(maximumActive, active);
-      },
-      beforeActivation: async () => {
+      afterActivationTokenAllocated: async (token) => {
+        assert.equal(token, "00000000000000000001");
+        fenceState.owner = null; // Simulate loss of the old PostgreSQL session lock.
         firstPaused();
         await pauseFirst;
       },
@@ -155,30 +184,38 @@ test("database session fence prevents an expired Redis lease from enabling a sta
   await reachedPause;
   now = 101;
 
-  await assert.rejects(
-    publishCanonicalRevision({
-      dataRoot: root,
-      command: publicationCommand("stale-writer-second", secondRevision),
-      leaseManager: secondLeaseManager,
-      fenceManager: secondFenceManager,
-      leaseTtlMs: 100,
-    }),
-    PublicationFenceUnavailableError,
-  );
-  assert.equal(maximumActive, 1);
-  resumeFirst();
-  await assert.rejects(first, /lease ownership was lost/);
-  assert.equal(active, 0);
-
-  const result = await publishCanonicalRevision({
+  const newer = await publishCanonicalRevision({
     dataRoot: root,
     command: publicationCommand("stale-writer-second", secondRevision),
     leaseManager: secondLeaseManager,
     fenceManager: secondFenceManager,
+    tokenAllocator,
     leaseTtlMs: 100,
   });
-  assert.equal(result.revisionId, secondRevision.revisionId);
+  assert.equal(newer.revisionId, secondRevision.revisionId);
+  assert.equal((await loadActiveRepositoryManifest(root)).fencingToken, "00000000000000000002");
+
+  resumeFirst();
+  await first;
+  assert.deepEqual(await readdir(activationDirectoryPath(root)), [
+    "00000000000000000001.json",
+    "00000000000000000002.json",
+  ]);
   assert.equal((await readManifest(root)).entries[0].revisionId, secondRevision.revisionId);
+});
+
+test("activation resolution skips corrupt higher files and rebuilt allocation resumes above them", async (t) => {
+  const root = await temporaryRepository(t);
+  const firstRevision = await nextRevision(root, "2026-08-06T03:15:00.000Z");
+  await publish(root, publicationCommand("activation-one", firstRevision));
+  await writeFile(activationManifestPath(root, "00000000000000000002"), "{broken");
+  assert.equal((await loadActiveRepositoryManifest(root)).fencingToken, "00000000000000000001");
+
+  const secondRevision = await nextRevision(root, "2026-08-06T03:30:00.000Z");
+  await publish(root, publicationCommand("activation-three", secondRevision));
+  const active = await loadActiveRepositoryManifest(root);
+  assert.equal(active.fencingToken, "00000000000000000003");
+  assert.equal(active.manifest.entries[0].revisionId, secondRevision.revisionId);
 });
 
 test("PostgreSQL fence holds one dedicated session through verification and release", async () => {
@@ -203,16 +240,35 @@ test("PostgreSQL fence holds one dedicated session through verification and rele
   assert.equal(releases, 1);
 });
 
+test("PostgreSQL token allocation advances above the filesystem maximum after database rebuild", async () => {
+  const queries: string[] = [];
+  let nextCalls = 0;
+  const client = {
+    async query(sql: string) {
+      queries.push(sql);
+      if (sql.includes("nextval")) return { rows: [{ token: ++nextCalls === 1 ? "1" : "6" }] };
+      return { rows: [] };
+    },
+  } as unknown as PoolClient;
+  const allocator = new PostgresActivationTokenAllocator(client);
+  assert.equal(await allocator.allocate(BigInt(5)), BigInt(6));
+  assert.ok(queries.some((query) => query.includes("setval")));
+});
+
 test("all pre-activation crash windows preserve the old manifest and retry cleanly", async (t) => {
-  await t.test("abandoned partial unique staging temporary is removed while fenced", async (st) => {
+  await t.test("cleanup removes only old temporaries and preserves a concurrent recent temporary", async (st) => {
     const root = await temporaryRepository(st);
     const revision = await nextRevision(root, "2026-08-06T04:00:00.000Z");
     const staging = publicationStagingPath(root, revision.entryId, revision.revisionId);
     await mkdir(dirname(staging), { recursive: true });
-    const abandoned = resolve(dirname(staging), `.${revision.revisionId}.abandoned-worker.tmp`);
+    const now = PUBLICATION_TEMPORARY_RETENTION_MS * 2;
+    const abandoned = resolve(dirname(staging), `.${revision.revisionId}.1.abandoned-worker.tmp`);
+    const recent = resolve(dirname(staging), `.${revision.revisionId}.${now - 1}.active-worker.tmp`);
     await writeFile(abandoned, "partial");
-    await publish(root, publicationCommand("partial-temporary", revision));
+    await writeFile(recent, "active");
+    await publish(root, publicationCommand("partial-temporary", revision), {}, now);
     await assert.rejects(readFile(abandoned), hasErrorCode("ENOENT"));
+    assert.equal(await readFile(recent, "utf8"), "active");
     await validateContentRepository(root);
   });
 
@@ -246,14 +302,14 @@ test("all pre-activation crash windows preserve the old manifest and retry clean
     assert.equal((await publish(root, command)).alreadyActive, true);
   });
 
-  await t.test("crash after manifest fsync but before replacement preserves old active revision", async (st) => {
+  await t.test("crash after activation fsync but before installation preserves old active revision", async (st) => {
     const root = await temporaryRepository(st);
     const oldManifest = await readManifest(root);
     const revision = await nextRevision(root, "2026-08-06T07:00:00.000Z");
     const command = publicationCommand("manifest-crash", revision);
     await assert.rejects(
-      publish(root, command, { beforeManifestRename: () => { throw new Error("manifest crash"); } }),
-      /manifest crash/,
+      publish(root, command, { afterActivationTemporarySynced: () => { throw new Error("activation crash"); } }),
+      /activation crash/,
     );
     assert.deepEqual(await readManifest(root), oldManifest);
     await publish(root, command);
@@ -274,7 +330,7 @@ test("canonical mutation rejects symlinked ancestors without touching outside pa
 
       await assert.rejects(
         publish(root, publicationCommand(`symlink-${directory.replaceAll(".", "dot")}`, revision)),
-        /no-follow/,
+        /no-follow|ENOENT|escapes/,
       );
       assert.deepEqual(await readdir(outside), ["marker"]);
       assert.equal(await readFile(resolve(outside, "marker"), "utf8"), "unchanged");
@@ -395,16 +451,85 @@ test("processor applies bounded exponential retry and dead-letters the final att
   assert.equal((await readOutboxState(spoolRoot, "bounded-retry"))?.status, "failed");
 });
 
+test("processor renews long reservations and stops queue transitions after ownership loss", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "dnd-reservation-renewal-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const spoolRoot = resolve(parent, "spool");
+  const revision = await revisionFromFixture("2026-08-06T11:00:00.000Z");
+  await submitPublicationCommand(
+    { idempotencyKey: "long-publication", revision },
+    { spoolRoot, enqueue: async () => undefined },
+  );
+  const healthy = queueActionRecorder();
+  assert.equal(await processPublicationReservation({
+    reservation: reservation("long-delivery", "long-reservation", "long-publication", 0),
+    dataRoot: "/unused",
+    spoolRoot,
+    visibilityTimeoutMs: 15,
+    publish: async () => {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 45));
+      return { entryId: "dash", revisionId: revision.revisionId, alreadyActive: false };
+    },
+    queue: healthy.queue,
+  }), "completed");
+  assert.ok(healthy.renewals >= 3);
+
+  await submitPublicationCommand(
+    { idempotencyKey: "lost-reservation", revision },
+    { spoolRoot, enqueue: async () => undefined },
+  );
+  const stolen = queueActionRecorder((renewal) => renewal === 1);
+  assert.equal(await processPublicationReservation({
+    reservation: reservation("lost-delivery", "lost-reservation", "lost-reservation", 0),
+    dataRoot: "/unused",
+    spoolRoot,
+    visibilityTimeoutMs: 15,
+    publish: async () => {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 30));
+      return { entryId: "dash", revisionId: revision.revisionId, alreadyActive: false };
+    },
+    queue: stolen.queue,
+  }), "reservation-lost");
+  assert.equal(stolen.acknowledged.length, 0);
+  assert.equal(stolen.retried.length, 0);
+  assert.equal(stolen.deadLettered.length, 0);
+  assert.equal((await readOutboxState(spoolRoot, "lost-reservation"))?.status, "completed");
+});
+
+test("normal publication contention requeues without consuming retry budget", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "dnd-contention-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const spoolRoot = resolve(parent, "spool");
+  const revision = await revisionFromFixture("2026-08-06T12:00:00.000Z");
+  await submitPublicationCommand(
+    { idempotencyKey: "contention", revision },
+    { spoolRoot, enqueue: async () => undefined },
+  );
+  const actions = queueActionRecorder();
+  assert.equal(await processPublicationReservation({
+    reservation: reservation("contention-delivery", "contention-reservation", "contention", 99),
+    dataRoot: "/unused",
+    spoolRoot,
+    publish: async () => { throw new PublicationFenceUnavailableError("repository"); },
+    queue: actions.queue,
+  }), "retried");
+  assert.equal(actions.retried[0]?.options.consumeAttempt, false);
+  assert.notEqual((await readOutboxState(spoolRoot, "contention"))?.status, "failed");
+});
+
 async function publish(
   root: string,
   command: PublicationCommand,
   hooks: Parameters<typeof publishCanonicalRevision>[0]["hooks"] = {},
+  now = Date.now(),
 ) {
   return publishCanonicalRevision({
     dataRoot: root,
     command,
     leaseManager: new RedisPublicationLeaseManager(memoryLeaseCommands()),
     fenceManager: memoryFenceManager({ owner: null }),
+    tokenAllocator: memoryTokenAllocator(),
+    now: () => now,
     hooks,
   });
 }
@@ -421,7 +546,7 @@ async function temporaryRepository(t: TestContext): Promise<string> {
 }
 
 async function readManifest(root: string): Promise<RepositoryManifest> {
-  return JSON.parse(await readFile(manifestPath(root), "utf8")) as RepositoryManifest;
+  return (await loadActiveRepositoryManifest(root)).manifest;
 }
 
 async function nextRevision(root: string, createdAt: string): Promise<CanonicalRevision> {
@@ -488,22 +613,35 @@ function memoryFenceManager(state: { owner: symbol | null }): PublicationFenceMa
   };
 }
 
+function memoryTokenAllocator(): ActivationTokenAllocator {
+  let current = BigInt(0);
+  return {
+    async allocate(minimumExclusive) {
+      current = (current > minimumExclusive ? current : minimumExclusive) + BigInt(1);
+      return current;
+    },
+  };
+}
+
 function reservation(deliveryId: string, reservationId: string, idempotencyKey: string, attempt: number): PublicationReservation {
   const message = { deliveryId, idempotencyKey, attempt, createdAt: 1 };
   return { deliveryId, reservationId, raw: JSON.stringify(message), message };
 }
 
-function queueActionRecorder() {
+function queueActionRecorder(renew: (renewal: number) => boolean = () => true) {
   const acknowledged: PublicationReservation[] = [];
-  const retried: Array<{ reservation: PublicationReservation; options: { now?: number; delayMs: number } }> = [];
+  const retried: Array<{ reservation: PublicationReservation; options: { now?: number; delayMs: number; consumeAttempt?: boolean } }> = [];
   const deadLettered: PublicationReservation[] = [];
+  let renewals = 0;
   return {
     acknowledged,
     retried,
     deadLettered,
+    get renewals() { return renewals; },
     queue: {
       async acknowledge(value: PublicationReservation) { acknowledged.push(value); return true; },
-      async retry(value: PublicationReservation, options: { now?: number; delayMs: number }) { retried.push({ reservation: value, options }); return true; },
+      async renew() { renewals++; return renew(renewals); },
+      async retry(value: PublicationReservation, options: { now?: number; delayMs: number; consumeAttempt?: boolean }) { retried.push({ reservation: value, options }); return true; },
       async deadLetter(value: PublicationReservation) { deadLettered.push(value); return true; },
     },
   };

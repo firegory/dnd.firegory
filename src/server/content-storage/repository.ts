@@ -5,6 +5,7 @@ export const CONTENT_SCHEMA_VERSION = 1 as const;
 
 const STABLE_ID = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
 const REVISION_ID = /^rev-[0-9a-f]{64}$/;
+const ACTIVATION_TOKEN = /^[0-9]{20}$/;
 
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 
@@ -59,6 +60,13 @@ export type RepositoryManifest = Readonly<{
   entries: readonly RepositoryManifestEntry[];
 }>;
 
+export type RepositoryActivation = Readonly<{
+  schemaVersion: typeof CONTENT_SCHEMA_VERSION;
+  kind: "repositoryActivation";
+  fencingToken: string;
+  manifest: RepositoryManifest;
+}>;
+
 export function getDataRoot(environment: NodeJS.ProcessEnv = process.env): string {
   const root = environment.DND_DATA_ROOT?.trim();
   if (!root) throw new Error("DND_DATA_ROOT must name the content repository root.");
@@ -67,6 +75,39 @@ export function getDataRoot(environment: NodeJS.ProcessEnv = process.env): strin
 
 export function manifestPath(root: string): string {
   return resolve(root, "manifests", "repository.json");
+}
+
+export function activationDirectoryPath(root: string): string {
+  return resolve(root, "manifests", "activations");
+}
+
+export function activationManifestPath(root: string, fencingToken: string): string {
+  assertActivationToken(fencingToken);
+  return resolve(activationDirectoryPath(root), `${fencingToken}.json`);
+}
+
+export function activationTemporaryPath(
+  root: string,
+  fencingToken: string,
+  createdAt: number,
+  ownerId: string,
+): string {
+  assertActivationToken(fencingToken);
+  if (!Number.isSafeInteger(createdAt) || createdAt < 0) throw new TypeError("createdAt must be a nonnegative integer.");
+  assertStableId(ownerId, "ownerId");
+  return resolve(activationDirectoryPath(root), `.${fencingToken}.${createdAt}.${ownerId}.tmp`);
+}
+
+export function formatActivationToken(token: bigint): string {
+  if (token < BigInt(0) || token > BigInt("9223372036854775807")) throw new TypeError("Activation token is outside PostgreSQL bigint range.");
+  return token.toString().padStart(20, "0");
+}
+
+export function parseActivationToken(token: string): bigint {
+  assertActivationToken(token);
+  const parsed = BigInt(token);
+  if (parsed > BigInt("9223372036854775807")) throw new TypeError("Activation token is outside PostgreSQL bigint range.");
+  return parsed;
 }
 
 export function schemaPath(root: string, schemaName: string, schemaVersion = CONTENT_SCHEMA_VERSION): string {
@@ -102,17 +143,14 @@ export function publicationStagingTemporaryPath(
   root: string,
   entryId: string,
   revisionId: string,
+  createdAt: number,
   temporaryId: string,
 ): string {
   assertStableId(entryId, "entryId");
   assertRevisionId(revisionId);
+  if (!Number.isSafeInteger(createdAt) || createdAt < 0) throw new TypeError("createdAt must be a nonnegative integer.");
   assertStableId(temporaryId, "temporaryId");
-  return resolve(root, ".publication-staging", entryId, `.${revisionId}.${temporaryId}.tmp`);
-}
-
-export function publicationManifestTemporaryPath(root: string, ownerId: string): string {
-  assertStableId(ownerId, "ownerId");
-  return resolve(root, "manifests", `.repository-${ownerId}.tmp`);
+  return resolve(root, ".publication-staging", entryId, `.${revisionId}.${createdAt}.${temporaryId}.tmp`);
 }
 
 export function publicationSpoolPath(root: string, idempotencyKey: string): string {
@@ -122,7 +160,20 @@ export function publicationSpoolPath(root: string, idempotencyKey: string): stri
 
 export function publicationOutboxStatePath(root: string, idempotencyKey: string): string {
   assertStableId(idempotencyKey, "idempotencyKey");
-  return resolve(root, "state", `${idempotencyKey}.json`);
+  return resolve(root, "state", idempotencyKey);
+}
+
+export function publicationOutboxEventPath(
+  root: string,
+  idempotencyKey: string,
+  generation: number,
+  status: "pending" | "queued" | "completed" | "failed",
+  eventId: string,
+): string {
+  assertStableId(idempotencyKey, "idempotencyKey");
+  if (!Number.isSafeInteger(generation) || generation < 0) throw new TypeError("generation must be a nonnegative integer.");
+  assertStableId(eventId, "eventId");
+  return resolve(publicationOutboxStatePath(root, idempotencyKey), `${generation}-${status}-${eventId}.json`);
 }
 
 export function publicationQuarantinePath(root: string, deliveryId: string): string {
@@ -187,6 +238,10 @@ export function assertStableId(value: string, name: string): void {
 
 function assertRevisionId(value: string): void {
   if (!REVISION_ID.test(value)) throw new TypeError("revisionId must be a SHA-256-derived revision ID.");
+}
+
+function assertActivationToken(value: string): void {
+  if (!ACTIVATION_TOKEN.test(value)) throw new TypeError("fencingToken must be a fixed-width decimal activation token.");
 }
 
 function assertPositiveInteger(value: number, name: string): void {

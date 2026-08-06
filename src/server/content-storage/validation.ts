@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
 import Ajv2020, { type ErrorObject, type ValidateFunction } from "ajv/dist/2020.js";
@@ -10,13 +10,16 @@ import repositoryManifestSchema from "../../../content-repository/schemas/v1/rep
 import sourceSchema from "../../../content-repository/schemas/v1/source.schema.json" with { type: "json" };
 import {
   canonicalJson,
+  activationDirectoryPath,
   hasValidRevisionIdentity,
   manifestPath,
+  parseActivationToken,
   sourceMetadataPath,
   type CanonicalRevision,
   type ContentSource,
   type JsonValue,
   type RepositoryManifest,
+  type RepositoryActivation,
 } from "./repository.ts";
 
 type Section = Readonly<{
@@ -42,7 +45,7 @@ ajv.addSchema(sourceSchema);
 
 const validateSource = ajv.getSchema(sourceSchema.$id) as ValidateFunction<ContentSource>;
 const validateRevision = ajv.compile(canonicalRevisionSchema) as ValidateFunction<CanonicalRevision>;
-const validateManifest = ajv.compile(repositoryManifestSchema) as ValidateFunction<RepositoryManifest>;
+const validateManifestDocument = ajv.compile(repositoryManifestSchema) as ValidateFunction<RepositoryManifest>;
 
 export class ContentSchemaValidationError extends Error {
   readonly errors: readonly ErrorObject[];
@@ -113,20 +116,74 @@ export function assertCanonicalRevision(document: unknown): asserts document is 
 }
 
 export function assertRepositoryManifest(document: unknown): asserts document is RepositoryManifest {
-  if (!validateManifest(document)) {
-    throw new ContentSchemaValidationError("Repository manifest", validateManifest.errors ?? []);
+  if (!validateManifestDocument(document)) {
+    throw new ContentSchemaValidationError("Repository manifest", validateManifestDocument.errors ?? []);
   }
   assertUnique(document.schemas.map((schema) => schema.schemaId), "Manifest schema IDs");
   assertUnique(document.schemas.map((schema) => schema.path), "Manifest schema paths");
   assertUnique(document.entries.map((entry) => entry.entryId), "Manifest entry IDs");
 }
 
+export function assertRepositoryActivation(document: unknown): asserts document is RepositoryActivation {
+  if (
+    !isRecord(document) ||
+    Object.keys(document).some((key) => !["schemaVersion", "kind", "fencingToken", "manifest"].includes(key)) ||
+    document.schemaVersion !== 1 ||
+    document.kind !== "repositoryActivation" ||
+    typeof document.fencingToken !== "string" ||
+    !/^[0-9]{20}$/.test(document.fencingToken)
+  ) {
+    throw new ContentIntegrityError("Repository activation does not match the supported activation contract.");
+  }
+  parseActivationToken(document.fencingToken);
+  assertRepositoryManifest(document.manifest);
+}
+
 export async function validateContentRepository(dataRoot: string): Promise<void> {
   const root = await realpath(dataRoot);
+  await loadActiveRepositoryManifest(root);
+}
+
+export async function loadActiveRepositoryManifest(dataRoot: string): Promise<Readonly<{
+  manifest: RepositoryManifest;
+  fencingToken: string | null;
+}>> {
+  const root = await realpath(dataRoot);
+  const activationDirectory = activationDirectoryPath(root);
+  let activationNames: string[] = [];
+  try {
+    activationNames = (await readdir(activationDirectory, { withFileTypes: true }))
+      .filter((entry) => entry.isFile() && /^[0-9]{20}\.json$/.test(entry.name))
+      .map((entry) => entry.name)
+      .sort()
+      .reverse();
+  } catch (error) {
+    if (!hasCode(error, "ENOENT")) throw error;
+  }
+
+  for (const name of activationNames) {
+    try {
+      const file = await resolveRepositoryFile(root, relative(root, resolve(activationDirectory, name)));
+      const activation = await readJson(file, `Repository activation ${name}`);
+      assertRepositoryActivation(activation);
+      if (`${activation.fencingToken}.json` !== name) {
+        throw new ContentIntegrityError(`Repository activation token does not match filename ${name}.`);
+      }
+      await validateManifestContents(root, activation.manifest);
+      return { manifest: activation.manifest, fencingToken: activation.fencingToken };
+    } catch {
+      // A corrupt or incomplete higher activation is ignored in favor of the next valid token.
+    }
+  }
+
   const manifestFile = await resolveRepositoryFile(root, relative(root, manifestPath(root)));
   const manifest = await readJson(manifestFile, "Repository manifest");
   assertRepositoryManifest(manifest);
+  await validateManifestContents(root, manifest);
+  return { manifest, fencingToken: null };
+}
 
+async function validateManifestContents(root: string, manifest: RepositoryManifest): Promise<void> {
   for (const declaration of manifest.schemas) {
     const file = await resolveRepositoryFile(root, declaration.path);
     const schema = await readJson(file, `Schema ${declaration.schemaId}`);
@@ -248,4 +305,8 @@ function assertUnique(values: readonly string[], name: string): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
 }
