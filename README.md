@@ -163,7 +163,7 @@ npm run ingest -- \
 | `--edition` | yes | `5e` or `5.5e` |
 | `--language` | yes | `en` or `ru` |
 | `--access` | yes | `open`, `premium`, or `personal` |
-| `--owner-user-id` | no | Owner user ID for personal content |
+| `--owner-user-id` | conditional | Plain UUID required for `personal`; forbidden for `open` and `premium` |
 | `--help` | no | Show usage information |
 
 ### Worker system dependencies

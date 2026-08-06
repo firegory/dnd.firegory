@@ -78,6 +78,7 @@ const VALID_INPUT = {
   language: "en",
   access: "open",
 };
+const OWNER_UUID = "11111111-1111-4111-8111-111111111111";
 
 describe("validateIngestionArgs", () => {
   it("returns typed args for valid input", () => {
@@ -91,12 +92,13 @@ describe("validateIngestionArgs", () => {
     assert.strictEqual(result.ownerUserId, undefined);
   });
 
-  it("accepts optional ownerUserId", () => {
+  it("requires a plain UUID owner for personal access", () => {
     const result = validateIngestionArgs({
       ...VALID_INPUT,
-      ownerUserId: "user-uuid-123",
+      access: "personal",
+      ownerUserId: OWNER_UUID.toUpperCase(),
     });
-    assert.strictEqual(result.ownerUserId, "user-uuid-123");
+    assert.strictEqual(result.ownerUserId, OWNER_UUID);
   });
 
   it("accepts 5.5e edition", () => {
@@ -111,7 +113,11 @@ describe("validateIngestionArgs", () => {
 
   it("accepts all access tiers", () => {
     for (const tier of ["open", "premium", "personal"] as const) {
-      const result = validateIngestionArgs({ ...VALID_INPUT, access: tier });
+      const result = validateIngestionArgs({
+        ...VALID_INPUT,
+        access: tier,
+        ...(tier === "personal" ? { ownerUserId: OWNER_UUID } : {}),
+      });
       assert.strictEqual(result.access, tier);
     }
   });
@@ -200,5 +206,31 @@ describe("validateIngestionArgs", () => {
         return true;
       },
     );
+  });
+
+  it("rejects missing or malformed personal owners", () => {
+    assert.throws(
+      () => validateIngestionArgs({ ...VALID_INPUT, access: "personal" }),
+      /--owner-user-id is required/,
+    );
+    for (const ownerUserId of [
+      "user-uuid-123",
+      `urn:uuid:${OWNER_UUID}`,
+      ` ${OWNER_UUID} `,
+    ]) {
+      assert.throws(
+        () => validateIngestionArgs({ ...VALID_INPUT, access: "personal", ownerUserId }),
+        /--owner-user-id must be a plain UUID/,
+      );
+    }
+  });
+
+  it("rejects owners for open and premium access", () => {
+    for (const access of ["open", "premium"] as const) {
+      assert.throws(
+        () => validateIngestionArgs({ ...VALID_INPUT, access, ownerUserId: OWNER_UUID }),
+        new RegExp(`--owner-user-id is not allowed when --access is ${access}`),
+      );
+    }
   });
 });

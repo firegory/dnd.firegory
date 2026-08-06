@@ -333,7 +333,7 @@ test("publication validation rejects malformed and contradictory metadata", () =
   );
   assert.throws(
     () => normalizeSourceInput({ ...base, publication: { origin: { url: "file:\/\/book", id: "book" } } }),
-    /HTTP\(S\)/,
+    /absolute HTTPS URL/,
   );
   assert.throws(
     () => normalizeSourceInput({ ...base, canonicalSourceId: "Not Stable" }),

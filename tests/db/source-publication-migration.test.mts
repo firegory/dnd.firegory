@@ -5,13 +5,38 @@ import test from "node:test";
 import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 
 const sql = await readFile("migrations/0003_source_publication_metadata.sql", "utf8");
+const constraintsSql = await readFile("migrations/0004_source_publication_constraints.sql", "utf8");
 
 test("publication migration is registered after existing migrations", () => {
   assert.deepEqual(MIGRATION_FILENAMES, [
     "0001_initial_schema.sql",
     "0002_telegram_links.sql",
     "0003_source_publication_metadata.sql",
+    "0004_source_publication_constraints.sql",
   ]);
+});
+
+test("constraint hardening migration aligns feasible canonical write rules", () => {
+  assert.match(constraintsSql, /title !~ '\^\[\[:space:\]\]\*\$'/);
+  assert.match(constraintsSql, /publication_title !~ '\^\[\[:space:\]\]\*\$'/);
+  assert.match(constraintsSql, /publisher IS NULL OR publisher !~ '\^\[\[:space:\]\]\*\$'/);
+  assert.match(constraintsSql, /publication_code ~ '\^\[A-Za-z0-9\]\[A-Za-z0-9\._-\]\{0,127\}\$'/);
+  assert.match(constraintsSql, /external_origin_id !~ '\^\[\[:space:\]\]\*\$'/);
+  assert.match(constraintsSql, /external_origin_url ~ '\^https:\/\/\[\^%\[\:space:\]\/\?#\]\+'/);
+  assert.match(constraintsSql, /external_origin_url !~ '\[\[:space:\]\]'/);
+  assert.match(constraintsSql, /external_origin_url !~ '%\(/);
+});
+
+test("constraint hardening SQL is rerunnable but only statically verified", () => {
+  for (const constraint of [
+    "sources_publication_text_not_blank",
+    "sources_publication_code_format",
+    "sources_origin_complete",
+  ]) {
+    assert.match(constraintsSql, new RegExp(`DROP CONSTRAINT IF EXISTS ${constraint}`));
+    assert.match(constraintsSql, new RegExp(`ADD CONSTRAINT ${constraint}`));
+  }
+  assert.match(constraintsSql, /PostgreSQL cannot reproduce full WHATWG URL parsing/);
 });
 
 test("publication migration projects canonical identity fields and is rerunnable", () => {

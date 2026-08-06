@@ -44,6 +44,7 @@ import {
   normalizeSourceInput,
   type SourceMetadataRecord,
 } from "../../src/server/content/metadata.ts";
+import { validateIngestionArgs } from "../../src/cli/validate-args.ts";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const dataRoot = resolve(repositoryRoot, "content-repository");
@@ -214,16 +215,82 @@ test("canonical schema and runtime agree on every publication field contract", a
   }
 });
 
-test("origin URL scheme acceptance and normalization match across layers", async () => {
+test("canonical HTTPS URL vectors match schema and runtime", async (t) => {
   const source = (await readJson(resolve(dataRoot, "sources/srd-2014/source.json"))) as ContentSource;
-  const candidate = structuredClone(source) as unknown as MutableSource;
-  candidate.publication.origin.url = "HTTPS://example.com/books/basic-rules";
+  const canonicalUrls = [
+    "https://example.com/",
+    "https://example.com/books/basic-rules",
+    "https://example.com/a%20book?q=rules#section",
+    "https://example.com:8443/path",
+  ];
+  for (const url of canonicalUrls) {
+    await t.test(`accepts ${url}`, () => {
+      const candidate = sourceWithOriginUrl(source, url);
+      assertContentSource(candidate);
+      assert.equal(runtimeOriginUrl(candidate), url);
+    });
+  }
 
-  assertContentSource(candidate);
-  const normalized = normalizeSourceInput(
-    sourceMetadataInputFromContentSource(candidate as unknown as ContentSource),
-  );
-  assert.equal(normalized.publication.origin?.url, "https://example.com/books/basic-rules");
+  const invalidUrls = [
+    "http://example.com/book",
+    "ftp://example.com/book",
+    "//example.com/book",
+    "/relative/book",
+    "https://",
+    "https:///missing-authority",
+    " https://example.com/book",
+    "https://example.com/book ",
+    "https://example.com/a b",
+    "https://example.com/%",
+    "https://example.com/%2",
+    "https://example.com/%GG",
+    "https://%65xample.com/book",
+  ];
+  for (const url of invalidUrls) {
+    await t.test(`rejects ${url}`, () => {
+      const candidate = sourceWithOriginUrl(source, url);
+      assert.throws(() => assertContentSource(candidate), ContentSchemaValidationError);
+      assert.throws(() => runtimeOriginUrl(candidate), ContentMetadataValidationError);
+    });
+  }
+});
+
+test("runtime normalizes HTTPS URLs to schema-valid canonical values", async () => {
+  const source = (await readJson(resolve(dataRoot, "sources/srd-2014/source.json"))) as ContentSource;
+  const candidate = sourceWithOriginUrl(source, "HTTPS://EXAMPLE.COM/books/basic-rules");
+
+  assert.throws(() => assertContentSource(candidate), ContentSchemaValidationError);
+  const normalizedUrl = runtimeOriginUrl(candidate);
+  assert.equal(normalizedUrl, "https://example.com/books/basic-rules");
+  assertContentSource(sourceWithOriginUrl(source, normalizedUrl));
+});
+
+test("CLI, runtime, and schema share plain UUID ownership rules", async () => {
+  const source = (await readJson(resolve(dataRoot, "sources/srd-2014/source.json"))) as ContentSource;
+  const personal = { ...source, accessTier: "personal" as const, shared: false, ownerUserId };
+  assertContentSource(personal);
+  assert.equal(normalizeSourceInput(sourceMetadataInputFromContentSource(personal)).ownerUserId, ownerUserId);
+  assert.equal(validateIngestionArgs(cliInput("personal", ownerUserId)).ownerUserId, ownerUserId);
+
+  for (const invalidOwner of ["user-uuid-123", `urn:uuid:${ownerUserId}`, ` ${ownerUserId} `]) {
+    const candidate = { ...personal, ownerUserId: invalidOwner };
+    assert.throws(() => assertContentSource(candidate), ContentSchemaValidationError);
+    assert.throws(
+      () => normalizeSourceInput(sourceMetadataInputFromContentSource(candidate as ContentSource)),
+      ContentMetadataValidationError,
+    );
+    assert.throws(() => validateIngestionArgs(cliInput("personal", invalidOwner)), /plain UUID/);
+  }
+
+  for (const accessTier of ["open", "premium"] as const) {
+    const candidate = { ...source, accessTier, shared: accessTier === "premium", ownerUserId };
+    assert.throws(() => assertContentSource(candidate), ContentSchemaValidationError);
+    assert.throws(
+      () => normalizeSourceInput(sourceMetadataInputFromContentSource(candidate as ContentSource)),
+      ContentMetadataValidationError,
+    );
+    assert.throws(() => validateIngestionArgs(cliInput(accessTier, ownerUserId)), /not allowed/);
+  }
 });
 
 test("canonical schema and runtime agree on source identity and corpus fields", async (t) => {
@@ -465,6 +532,33 @@ type MutableSource = {
   };
   license: string;
 };
+
+function sourceWithOriginUrl(source: ContentSource, url: string): ContentSource {
+  return {
+    ...source,
+    publication: {
+      ...source.publication,
+      origin: { ...source.publication.origin!, url },
+    },
+  };
+}
+
+function runtimeOriginUrl(source: ContentSource): string {
+  const normalized = normalizeSourceInput(sourceMetadataInputFromContentSource(source));
+  return normalized.publication.origin?.url ?? "";
+}
+
+function cliInput(access: "open" | "premium" | "personal", owner?: string) {
+  return {
+    pdf: "/tmp/book.pdf",
+    title: "Book",
+    category: "core_rules",
+    edition: "5e",
+    language: "en",
+    access,
+    ...(owner === undefined ? {} : { ownerUserId: owner }),
+  };
+}
 
 function mutate(revision: CanonicalRevision, mutation: (value: MutableRevision) => void): CanonicalRevision {
   const value = structuredClone(revision) as unknown as MutableRevision;

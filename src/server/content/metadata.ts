@@ -11,6 +11,7 @@ import {
   type SourceEdition,
   type SourceLanguage,
 } from "../access/retrieval-filter.ts";
+import { normalizeCanonicalHttpsUrl, normalizePlainUuid } from "./canonical-values.ts";
 
 export type Queryable = Readonly<{
   query<T = unknown>(sql: string, values?: readonly unknown[]): Promise<{ rows: T[] }>;
@@ -457,7 +458,9 @@ export function normalizeSourceInput(input: CreateSourceMetadataInput): Omit<Req
   const canonicalSourceId = optionalStableId(input.canonicalSourceId, "canonicalSourceId");
   const publication = normalizePublication(input.publication, title, input.edition);
   const license = optionalTrimmed(input.license, "license");
-  const ownerUserId = input.ownerUserId ? requireUuid(input.ownerUserId, "ownerUserId") : null;
+  const ownerUserId = input.ownerUserId === undefined || input.ownerUserId === null
+    ? null
+    : requireUuid(input.ownerUserId, "ownerUserId");
 
   if (input.accessTier === "open") {
     if (ownerUserId) throw new ContentMetadataValidationError("Open/SRD sources cannot have an owner.");
@@ -523,21 +526,17 @@ function normalizeOrigin(origin: PublicationMetadataInput["origin"]): Publicatio
   for (const key of Object.keys(origin)) {
     if (key !== "url" && key !== "id") throw new ContentMetadataValidationError(`publication.origin.${key} is not supported.`);
   }
-  const url = optionalTrimmed(origin.url, "publication.origin.url");
-  const id = optionalTrimmed(origin.id, "publication.origin.id");
-  if ((url === null) !== (id === null)) {
+  if (origin.url === undefined || origin.url === null || origin.id === undefined || origin.id === null) {
     throw new ContentMetadataValidationError("publication.origin.url and publication.origin.id must be provided together.");
   }
-  if (!url || !id) return null;
-  const normalizedUrl = url.replace(/^https?:/i, (scheme) => scheme.toLowerCase());
-  let parsed: URL;
-  try {
-    parsed = new URL(normalizedUrl);
-  } catch {
-    throw new ContentMetadataValidationError("publication.origin.url must be a valid HTTP(S) URL.");
+  if (typeof origin.url !== "string") {
+    throw new ContentMetadataValidationError("publication.origin.url must be a string.");
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new ContentMetadataValidationError("publication.origin.url must be a valid HTTP(S) URL.");
+  const url = origin.url;
+  const id = requireTrimmed(origin.id, "publication.origin.id");
+  const normalizedUrl = normalizeCanonicalHttpsUrl(url);
+  if (!normalizedUrl) {
+    throw new ContentMetadataValidationError("publication.origin.url must be an absolute HTTPS URL with valid encoding and no whitespace.");
   }
   return { url: normalizedUrl, id };
 }
@@ -595,8 +594,9 @@ function optionalStableId(value: string | null | undefined, field: string): stri
 }
 
 function requireUuid(value: string, field: string): string {
-  const uuid = requireTrimmed(value, field).toLowerCase();
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(uuid)) {
+  if (typeof value !== "string") throw new ContentMetadataValidationError(`${field} must be a UUID.`);
+  const uuid = normalizePlainUuid(value);
+  if (!uuid) {
     throw new ContentMetadataValidationError(`${field} must be a UUID.`);
   }
   return uuid;
