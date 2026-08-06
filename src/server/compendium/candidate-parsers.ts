@@ -1,6 +1,8 @@
 import {
   CandidateValidationError,
   makeCitation,
+  parseMoneyToCp,
+  parseWeights,
   validateCandidateWire,
   type CandidateCitation,
   type CandidateWire,
@@ -31,6 +33,14 @@ const sizes: Readonly<Record<string, string>> = {
   gargantuan: "gargantuan", громадный: "gargantuan", громадное: "gargantuan", громадная: "gargantuan",
 };
 
+const equipmentCategories: Readonly<Record<string, string>> = {
+  "adventuring gear": "adventuring_gear", снаряжение: "adventuring_gear",
+  ammunition: "ammunition", боеприпасы: "ammunition", armor: "armor", доспехи: "armor",
+  focus: "focus", фокусировка: "focus", mount: "mount", "верховые животные": "mount",
+  tool: "tool", инструменты: "tool", vehicle: "vehicle", транспорт: "vehicle",
+  weapon: "weapon", оружие: "weapon", other: "other", прочее: "other",
+};
+
 export function parseDeterministicChunk(chunk: EvidenceChunk, language: CompendiumLanguage): readonly ParsedCandidate[] {
   return parseSpell(chunk, language)
     ?? parseCreature(chunk, language)
@@ -41,7 +51,7 @@ export function parseDeterministicChunk(chunk: EvidenceChunk, language: Compendi
 
 export function classifyChunkType(text: string): CompendiumEntryType | null {
   if (/^(?:Casting Time|Время накладывания|Время сотворения)\s*:/im.test(text)) return "spell";
-  if (/^(?:Armor Class|Класс Доспеха)\s*:/im.test(text) && /^(?:Hit Points|Хиты)\s*:/im.test(text)) return "creature";
+  if (/^(?:Armor Class|Класс Доспеха)\s*:?[ \t]*\d/im.test(text) && /^(?:Hit Points|Хиты)\s*:?[ \t]*\d/im.test(text)) return "creature";
   if (/\|[^\n]*(?:Cost|Стоимость)[^\n]*\|/i.test(text)) return "equipment";
   if (/(?:\d+(?:st|nd|rd|th)-Level .* Feature|Умение .* \d+(?:-го|-й) уровня)/i.test(text)) return "feature";
   return null;
@@ -100,16 +110,16 @@ function parseCreature(chunk: EvidenceChunk, language: CompendiumLanguage): read
   if (lines.length < 7) return null;
   const labels = language === "ru"
     ? {
-        armorClass: /^Класс Доспеха\s*:\s*(\d+)/i,
-        hitPoints: /^Хиты\s*:\s*(\d+)/i,
-        speed: /^Скорость\s*:\s*(.+)$/i,
-        challengeRating: /^(?:Опасность|Показатель опасности)\s*:\s*(1\/[248]|\d+)/i,
+        armorClass: /^Класс Доспеха\s*:?[ \t]*(\d+)/i,
+        hitPoints: /^Хиты\s*:?[ \t]*(\d+)/i,
+        speed: /^Скорость\s*:?[ \t]*(.+)$/i,
+        challengeRating: /^(?:Опасность|Показатель опасности)\s*:?[ \t]*(1\/[248]|\d+)/i,
       }
     : {
-        armorClass: /^Armor Class\s*:\s*(\d+)/i,
-        hitPoints: /^Hit Points\s*:\s*(\d+)/i,
-        speed: /^Speed\s*:\s*(.+)$/i,
-        challengeRating: /^Challenge\s*:\s*(1\/[248]|\d+)/i,
+        armorClass: /^Armor Class\s*:?[ \t]*(\d+)/i,
+        hitPoints: /^Hit Points\s*:?[ \t]*(\d+)/i,
+        speed: /^Speed\s*:?[ \t]*(.+)$/i,
+        challengeRating: /^Challenge\s*:?[ \t]*(1\/[248]|\d+)/i,
       };
   const fields = Object.fromEntries(Object.entries(labels).map(([key, regex]) => [key, findLabeledLine(lines, regex)]));
   if (Object.values(fields).some((field) => field === null)) return null;
@@ -152,6 +162,9 @@ function parseEquipmentTable(chunk: EvidenceChunk, language: CompendiumLanguage)
   const costIndex = header.findIndex((cell) => /^(?:Cost|Стоимость|Цена)$/i.test(cell));
   const weightIndex = header.findIndex((cell) => /^(?:Weight|Вес)$/i.test(cell));
   if (nameIndex < 0 || costIndex < 0 || weightIndex < 0) return null;
+  const categoryLine = rawLines.slice(0, headerIndex).reverse().find((line) => equipmentCategory(line) !== null);
+  const category = categoryLine ? equipmentCategory(categoryLine) : null;
+  if (!category || !categoryLine) return null;
   const candidates: ParsedCandidate[] = [];
   for (const line of rawLines.slice(headerIndex + 1)) {
     if (/^\|?\s*:?-{3}/.test(line)) continue;
@@ -159,9 +172,10 @@ function parseEquipmentTable(chunk: EvidenceChunk, language: CompendiumLanguage)
     if (row.length !== header.length) break;
     const title = row[nameIndex];
     if (!title) continue;
-    const attributes = { category: "other", costCp: parseCost(row[costIndex]), weightLb: parseWeight(row[weightIndex]) };
+    const attributes = { category, costCp: parseCost(row[costIndex]), weightLb: parseWeight(row[weightIndex]) };
     const citations = baseCitations(chunk, title, line, rawLines[headerIndex], Object.keys(attributes));
     for (const key of Object.keys(attributes)) replaceCitation(citations, `$.attributes.${key}`, chunk, line);
+    replaceCitation(citations, "$.attributes.category", chunk, categoryLine);
     candidates.push(validated({ entryType: "equipment", candidateKey: stableCandidateKey(title), title, body: line, attributes, citations }, chunk, "table-parser"));
   }
   return candidates.length > 0 ? candidates : null;
@@ -263,16 +277,17 @@ function cells(line: string): string[] {
 }
 
 function parseCost(value: string): number | null {
-  const match = value.replace(",", ".").match(/([0-9]+(?:\.[0-9]+)?)\s*(cp|sp|gp|pp|мм|см|зм|пм)/i);
-  if (!match) return null;
-  const multiplier: Readonly<Record<string, number>> = { cp: 1, мм: 1, sp: 10, см: 10, gp: 100, зм: 100, pp: 1000, пм: 1000 };
-  return Math.round(Number(match[1]) * multiplier[match[2].toLocaleLowerCase("und")]);
+  return parseMoneyToCp(value)[0] ?? null;
 }
 
 function parseWeight(value: string): number | null {
   if (/^(?:-|—|нет)$/i.test(value.trim())) return null;
-  const number = Number(value.replace(",", ".").match(/[0-9]+(?:\.[0-9]+)?/)?.[0]);
-  return Number.isFinite(number) ? number : null;
+  return parseWeights(value)[0] ?? null;
+}
+
+function equipmentCategory(value: string): string | null {
+  const normalized = value.trim().toLocaleLowerCase("und");
+  return Object.entries(equipmentCategories).find(([label]) => normalized.includes(label))?.[1] ?? null;
 }
 
 function parseFraction(value: string): number {

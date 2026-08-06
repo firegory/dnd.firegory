@@ -82,6 +82,7 @@ async function ollamaChatCompletion(
   messages: readonly ChatMessage[],
   cfg: LlmConfig,
   format?: "json",
+  signal?: AbortSignal,
 ): Promise<ChatCompletionResult> {
   const url = new URL(cfg.baseUrl);
   const nativeUrl = `${url.origin}/api/chat`;
@@ -103,6 +104,7 @@ async function ollamaChatCompletion(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
 
   if (!response.ok) {
@@ -173,6 +175,7 @@ async function openAiChatCompletion(
   messages: readonly ChatMessage[],
   cfg: LlmConfig,
   format?: "json",
+  signal?: AbortSignal,
 ): Promise<ChatCompletionResult> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -197,6 +200,7 @@ async function openAiChatCompletion(
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    signal,
   });
 
   if (!response.ok) {
@@ -241,21 +245,21 @@ async function openAiChatCompletion(
  */
 export async function chatCompletion(
   messages: readonly ChatMessage[],
-  config?: Partial<LlmConfig> & { preferOllamaNative?: boolean; responseFormat?: "json" },
+  config?: Partial<LlmConfig> & { preferOllamaNative?: boolean; responseFormat?: "json"; signal?: AbortSignal },
 ): Promise<ChatCompletionResult> {
-  const { preferOllamaNative, responseFormat, ...rest } = config ?? {};
+  const { preferOllamaNative, responseFormat, signal, ...rest } = config ?? {};
   const cfg = { ...getLlmConfig(), ...rest };
 
   if (isOllama(cfg.baseUrl, cfg.apiKey)) {
     if (preferOllamaNative || responseFormat === "json") {
-      return ollamaChatCompletion(messages, cfg, responseFormat);
+      return ollamaChatCompletion(messages, cfg, responseFormat, signal);
     }
-    return openAiChatCompletion(messages, cfg, responseFormat);
+    return openAiChatCompletion(messages, cfg, responseFormat, signal);
   }
 
   if (!cfg.apiKey && !isPrivateUrl(cfg.baseUrl)) {
     throw new Error("LLM_API_KEY is not configured");
   }
 
-  return openAiChatCompletion(messages, cfg, responseFormat);
+  return openAiChatCompletion(messages, cfg, responseFormat, signal);
 }

@@ -263,9 +263,9 @@ test("candidate diff retains unchanged, changed, missing, duplicate, and invalid
     async query(sql: string, values: unknown[] = []) {
       if (sql.includes("FROM compendium_import_runs") && sql.includes("FOR UPDATE")) return { rows: [runRow] } as never;
       if (sql.includes("FROM compendium_import_occurrences") && sql.includes("ORDER BY occurrence_index")) {
-        return { rows: [0, 1, 2, 3].map((index) => occurrenceRow(index)) } as never;
+        return { rows: [0, 1, 2, 3, 4].map((index) => occurrenceRow(index)) } as never;
       }
-      if (sql.includes("DISTINCT ON (candidate.candidate_key)")) return { rows: [
+      if (sql.includes("DISTINCT ON (candidate.entry_type, candidate.candidate_key)")) return { rows: [
         { id: "old-a", candidate_key: "a", entry_type: "spell", diff_status: "new", content: { name: "same" }, content_sha256: sameHash },
         { id: "old-b", candidate_key: "b", entry_type: "spell", diff_status: "new", content: { name: "old" }, content_sha256: hash('{"name":"old"}') },
         { id: "old-c", candidate_key: "c", entry_type: "spell", diff_status: "new", content: { name: "missing" }, content_sha256: hash('{"name":"missing"}') },
@@ -290,8 +290,9 @@ test("candidate diff retains unchanged, changed, missing, duplicate, and invalid
     { occurrenceIndex: 1, candidateKey: "b", entryType: "spell", content: { name: "changed" } },
     { occurrenceIndex: 2, candidateKey: "b", entryType: "spell", content: { name: "duplicate" } },
     { occurrenceIndex: 3, candidateKey: null, entryType: null, content: { raw: "?" }, invalidReason: "parser rejected candidate" },
+    { occurrenceIndex: 4, candidateKey: "b", entryType: "equipment", content: { name: "same key, different type" } },
   ], "worker");
-  assert.deepEqual(result.map(({ diffStatus }) => diffStatus).sort(), ["changed", "duplicate", "invalid", "missing", "unchanged"]);
+  assert.deepEqual(result.map(({ diffStatus }) => diffStatus).sort(), ["changed", "duplicate", "invalid", "missing", "new", "unchanged"]);
   const missing = inserted.find((candidate) => candidate.diff_status === "missing")!;
   assert.equal(missing.candidate_key, "c");
   assert.equal((missing.content as { name: string }).name, "missing");
