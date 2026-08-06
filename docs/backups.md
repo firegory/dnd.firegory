@@ -11,6 +11,8 @@ dnd.firegory stores two categories of persistent data:
 
 Both must be backed up together for a consistent restore.
 
+Canonical NFS content can reconstruct only the explicitly managed content index described in [NFS Content Index Synchronization](content-index-sync.md). It cannot reconstruct users, password hashes, roles, sessions, authentication tokens, search/RAG audit events, ingestion job history, publication state, or unmanaged content. NFS index sync is not a substitute for PostgreSQL backups.
+
 ## Storage location
 
 ### Docker Compose deployment
@@ -167,3 +169,4 @@ docker compose up -d
 - **Original PDFs** are in the file storage, not the database. Both must be restored together.
 - **Redis queue state** is transient — unprocessed jobs are lost on restore. Use the admin UI retry action for any that were interrupted.
 - **Soft-deleted records** are included in dumps by default. If you want to exclude them, use `--exclude-table-data` flags or filter during restore.
+- **NFS rebuild boundary** is intentionally narrow. Even if all canonical content is present, retain database backups for authentication, sessions, audit/diagnostic history, operational state, and content outside the NFS sync ownership tables.

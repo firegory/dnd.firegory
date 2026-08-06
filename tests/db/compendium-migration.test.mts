@@ -6,8 +6,12 @@ import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 
 const sql = await readFile("migrations/0007_compendium_relational_core.sql", "utf8");
 
-test("compendium migration is the next registered additive migration", () => {
-  assert.equal(MIGRATION_FILENAMES.at(-1), "0007_compendium_relational_core.sql");
+test("compendium migration remains registered before later additive migrations", () => {
+  assert.ok(MIGRATION_FILENAMES.includes("0007_compendium_relational_core.sql"));
+  assert.ok(
+    MIGRATION_FILENAMES.indexOf("0007_compendium_relational_core.sql")
+      < MIGRATION_FILENAMES.indexOf("0010_nfs_content_index_sync.sql"),
+  );
   assert.doesNotMatch(sql, /(?:DELETE|UPDATE) FROM (?:sources|files|chunks|documents|pages)\b/i);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS compendium_entries/);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS compendium_versions/);

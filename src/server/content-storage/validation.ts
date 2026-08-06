@@ -229,6 +229,21 @@ export async function loadResolvedRepositoryManifest(dataRoot: string): Promise<
   return { manifest, generation: highestGeneration };
 }
 
+export async function loadResolvedCanonicalRevisions(dataRoot: string): Promise<Readonly<{
+  manifest: RepositoryManifest;
+  generation: string | null;
+  revisions: readonly CanonicalRevision[];
+}>> {
+  const root = await realpath(dataRoot);
+  const resolved = await loadResolvedRepositoryManifest(root);
+  const revisions = await Promise.all(resolved.manifest.entries.map(async (entry) => {
+    const revision = await readJson(await resolveRepositoryFile(root, entry.path), `Revision ${entry.revisionId}`);
+    assertCanonicalRevision(revision);
+    return revision;
+  }));
+  return { ...resolved, revisions };
+}
+
 async function validateSchemaDeclarations(root: string, manifest: RepositoryManifest): Promise<void> {
   for (const declaration of manifest.schemas) {
     const file = await resolveRepositoryFile(root, declaration.path);
