@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cp, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
+import activationDeltaSchemaV1 from "../../content-repository/schemas/v1/repository-activation-delta.schema.json" with { type: "json" };
 
 import {
   activationDeltaPath,
@@ -33,11 +34,13 @@ import {
 import {
   assertCanonicalRevision,
   assertContentSource,
+  assertDeletionContractSupported,
   assertRepositoryActivationDelta,
   assertRepositoryManifest,
   ContentIntegrityError,
   ContentSchemaValidationError,
   loadRepositoryBootstrapDescriptor,
+  loadResolvedRepositoryManifest,
   validateContentRepository,
 } from "../../src/server/content-storage/validation.ts";
 import {
@@ -54,6 +57,7 @@ import { validateIngestionArgs } from "../../src/cli/validate-args.ts";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const dataRoot = resolve(repositoryRoot, "content-repository");
 const schemasRoot = resolve(dataRoot, "schemas/v1");
+const schemasV2Root = resolve(dataRoot, "schemas/v2");
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
 
 test("repository paths are deterministic for stable IDs", () => {
@@ -107,7 +111,11 @@ test("canonical JSON and revision identities are key-order independent", () => {
 
 test("all checked schemas and the complete data-root repository validate", async () => {
   const schemaFiles = (await readdir(schemasRoot)).filter((name) => name.endsWith(".schema.json"));
-  const schemas = await Promise.all(schemaFiles.map((name) => readJson(resolve(schemasRoot, name))));
+  const schemaFilesV2 = (await readdir(schemasV2Root)).filter((name) => name.endsWith(".schema.json"));
+  const schemas = await Promise.all([
+    ...schemaFiles.map((name) => readJson(resolve(schemasRoot, name))),
+    ...schemaFilesV2.map((name) => readJson(resolve(schemasV2Root, name))),
+  ]);
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);
 
@@ -146,10 +154,10 @@ test("unknown and malformed schema versions are rejected for every document type
   }
 });
 
-test("delta-fold reader contract requires explicit version one", async (t) => {
+test("new readers support replacement v1 and deletion v2 while emission requires an upgraded repository", async (t) => {
   const manifest = await loadRepositoryBootstrapDescriptor(dataRoot);
-  assert.equal(manifest.readerContractVersion, 1);
-  const delta = {
+  assert.equal(manifest.readerContractVersion, 2);
+  const replacement = {
     schemaVersion: 1,
     kind: "repositoryActivationDelta",
     readerContractVersion: 1,
@@ -158,22 +166,49 @@ test("delta-fold reader contract requires explicit version one", async (t) => {
     targetEntryId: manifest.entries[0].entryId,
     entry: manifest.entries[0],
   } as const;
-  assert.doesNotThrow(() => assertRepositoryActivationDelta(delta));
-  assert.throws(() => assertRepositoryActivationDelta({ ...delta, readerContractVersion: 2 }), ContentSchemaValidationError);
-  const unversioned = { ...delta } as Record<string, unknown>;
+  const deletion = { ...replacement, readerContractVersion: 2, entry: null } as const;
+  const oldReader = new Ajv2020({ strict: true }).compile(activationDeltaSchemaV1);
+  assert.equal(oldReader(replacement), true);
+  assert.equal(oldReader(deletion), false, "v1 readers never reinterpret a deletion as replacement");
+  assert.doesNotThrow(() => assertRepositoryActivationDelta(replacement));
+  assert.doesNotThrow(() => assertRepositoryActivationDelta(deletion));
+  assert.throws(() => assertRepositoryActivationDelta({ ...replacement, entry: null }), ContentSchemaValidationError);
+  assert.throws(() => assertRepositoryActivationDelta({ ...deletion, readerContractVersion: 3 }), ContentSchemaValidationError);
+  const unversioned = { ...replacement } as Record<string, unknown>;
   delete unversioned.readerContractVersion;
   assert.throws(() => assertRepositoryActivationDelta(unversioned), ContentSchemaValidationError);
 
-  for (const contractVersion of [2, "1", null, undefined]) {
-    await t.test(`bootstrap rejects reader contract ${String(contractVersion)}`, async (st) => {
-      const root = await temporaryRepository(st);
-      const bootstrap = await readJson(repositoryBootstrapPath(root)) as Record<string, unknown>;
-      if (contractVersion === undefined) delete bootstrap.readerContractVersion;
-      else bootstrap.readerContractVersion = contractVersion;
-      await writeJson(repositoryBootstrapPath(root), bootstrap);
-      await assert.rejects(() => loadRepositoryBootstrapDescriptor(root), ContentSchemaValidationError);
-    });
-  }
+  const oldRoot = await temporaryRepository(t);
+  const oldBootstrap = await readJson(repositoryBootstrapPath(oldRoot)) as { readerContractVersion: number; schemas: Array<{ schemaId: string; path: string }> };
+  oldBootstrap.readerContractVersion = 1;
+  oldBootstrap.schemas = oldBootstrap.schemas
+    .filter((schema) => !schema.schemaId.endsWith(":2"));
+  oldBootstrap.schemas.push({ schemaId: "urn:dnd-firegory:schema:content-repository:manifest:1", path: "schemas/v1/repository-manifest.schema.json" });
+  await writeJson(repositoryBootstrapPath(oldRoot), oldBootstrap);
+  assert.equal((await loadRepositoryBootstrapDescriptor(oldRoot)).readerContractVersion, 1);
+  await assert.rejects(() => assertDeletionContractSupported(oldRoot), /do not yet support deletion/);
+  await assert.doesNotReject(() => assertDeletionContractSupported(dataRoot));
+
+  const rollbackRoot = await temporaryRepository(t);
+  const rollbackBootstrap = await readJson(repositoryBootstrapPath(rollbackRoot)) as { readerContractVersion: number; schemas: Array<{ schemaId: string; path: string }>; entries: Array<Record<string, unknown>> };
+  const target = rollbackBootstrap.entries[0];
+  await mkdir(dirname(activationDeltaPath(rollbackRoot, formatPublicationGeneration(BigInt(1)))), { recursive: true });
+  await writeJson(activationDeltaPath(rollbackRoot, formatPublicationGeneration(BigInt(1))), {
+    schemaVersion: 1, kind: "repositoryActivationDelta", readerContractVersion: 1,
+    generation: formatPublicationGeneration(BigInt(1)), idempotencyKey: "rollback-v1", targetEntryId: target.entryId, entry: target,
+  });
+  await writeJson(activationDeltaPath(rollbackRoot, formatPublicationGeneration(BigInt(2))), {
+    schemaVersion: 1, kind: "repositoryActivationDelta", readerContractVersion: 2,
+    generation: formatPublicationGeneration(BigInt(2)), idempotencyKey: "rollback-v2", targetEntryId: target.entryId, entry: null,
+  });
+  assert.equal((await loadResolvedRepositoryManifest(rollbackRoot)).manifest.entries.length, 0);
+  rollbackBootstrap.readerContractVersion = 1;
+  rollbackBootstrap.schemas = rollbackBootstrap.schemas.filter((schema) => !schema.schemaId.endsWith(":2"));
+  rollbackBootstrap.schemas.push({ schemaId: "urn:dnd-firegory:schema:content-repository:manifest:1", path: "schemas/v1/repository-manifest.schema.json" });
+  await writeJson(repositoryBootstrapPath(rollbackRoot), rollbackBootstrap);
+  const rolledBack = await loadResolvedRepositoryManifest(rollbackRoot);
+  assert.equal(rolledBack.manifest.entries[0].entryId, target.entryId);
+  assert.equal(rolledBack.generation, formatPublicationGeneration(BigInt(1)), "unsupported v2 deletion is inert after rollback");
 });
 
 test("source authorization metadata enforces current access invariants", async () => {

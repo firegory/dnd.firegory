@@ -1,13 +1,14 @@
 {
   "schemaVersion": 1,
   "kind": "repositoryManifest",
-  "readerContractVersion": 1,
+  "readerContractVersion": 2,
   "repositoryId": "dnd-firegory-example",
   "schemas": [
     { "schemaId": "urn:dnd-firegory:schema:content-repository:source:1", "path": "schemas/v1/source.schema.json" },
     { "schemaId": "urn:dnd-firegory:schema:content-repository:canonical-revision:1", "path": "schemas/v1/canonical-revision.schema.json" },
-    { "schemaId": "urn:dnd-firegory:schema:content-repository:manifest:1", "path": "schemas/v1/repository-manifest.schema.json" },
-    { "schemaId": "urn:dnd-firegory:schema:content-repository:activation-delta:1", "path": "schemas/v1/repository-activation-delta.schema.json" }
+    { "schemaId": "urn:dnd-firegory:schema:content-repository:manifest:2", "path": "schemas/v2/repository-manifest.schema.json" },
+    { "schemaId": "urn:dnd-firegory:schema:content-repository:activation-delta:1", "path": "schemas/v1/repository-activation-delta.schema.json" },
+    { "schemaId": "urn:dnd-firegory:schema:content-repository:activation-delta:2", "path": "schemas/v2/repository-activation-delta.schema.json" }
   ],
   "entries": [
     {

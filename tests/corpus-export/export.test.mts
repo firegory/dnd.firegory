@@ -27,9 +27,11 @@ test("full export is portable, deterministic, validated, and atomically publishe
   assert.deepEqual(first.changes, { additions: 1, updates: 0, removals: 0 });
 
   const validated = await validateCorpusExport(first.path);
+  const repositoryManifest = JSON.parse(await readFile(resolve(root, "manifests/repository.json"), "utf8")) as RepositoryManifest;
   assert.equal(validated.manifest.noncanonical, true);
   assert.equal(validated.catalog.entries.length, 1);
-  assert.equal(validated.catalog.schemas.length, 4);
+  assert.equal(validated.catalog.schemas.length, repositoryManifest.schemas.length);
+  assert.ok(validated.catalog.schemas.some(({ schemaId }) => schemaId === "urn:dnd-firegory:schema:content-repository:activation-delta:2"));
   assert.match(validated.catalog.schemas[0].contentHash, /^sha256:[0-9a-f]{64}$/);
 
   const entries = await readFile(resolve(first.path, "entries.jsonl"), "utf8");

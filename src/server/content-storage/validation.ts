@@ -6,8 +6,10 @@ import Ajv2020, { type ErrorObject, type ValidateFunction } from "ajv/dist/2020.
 import addFormats from "ajv-formats";
 
 import canonicalRevisionSchema from "../../../content-repository/schemas/v1/canonical-revision.schema.json" with { type: "json" };
-import repositoryActivationDeltaSchema from "../../../content-repository/schemas/v1/repository-activation-delta.schema.json" with { type: "json" };
-import repositoryManifestSchema from "../../../content-repository/schemas/v1/repository-manifest.schema.json" with { type: "json" };
+import repositoryActivationDeltaSchemaV1 from "../../../content-repository/schemas/v1/repository-activation-delta.schema.json" with { type: "json" };
+import repositoryManifestSchemaV1 from "../../../content-repository/schemas/v1/repository-manifest.schema.json" with { type: "json" };
+import repositoryActivationDeltaSchemaV2 from "../../../content-repository/schemas/v2/repository-activation-delta.schema.json" with { type: "json" };
+import repositoryManifestSchemaV2 from "../../../content-repository/schemas/v2/repository-manifest.schema.json" with { type: "json" };
 import sourceSchema from "../../../content-repository/schemas/v1/source.schema.json" with { type: "json" };
 import { normalizeCanonicalHttpUrl } from "../content/canonical-values.ts";
 import {
@@ -46,8 +48,10 @@ ajv.addSchema(sourceSchema);
 
 const validateSource = ajv.getSchema(sourceSchema.$id) as ValidateFunction<ContentSource>;
 const validateRevision = ajv.compile(canonicalRevisionSchema) as ValidateFunction<CanonicalRevision>;
-const validateManifestDocument = ajv.compile(repositoryManifestSchema) as ValidateFunction<RepositoryManifest>;
-const validateActivationDelta = ajv.compile(repositoryActivationDeltaSchema) as ValidateFunction<RepositoryActivationDelta>;
+const validateManifestDocumentV1 = ajv.compile(repositoryManifestSchemaV1) as ValidateFunction<RepositoryManifest>;
+const validateManifestDocumentV2 = ajv.compile(repositoryManifestSchemaV2) as ValidateFunction<RepositoryManifest>;
+const validateActivationDeltaV1 = ajv.compile(repositoryActivationDeltaSchemaV1) as ValidateFunction<RepositoryActivationDelta>;
+const validateActivationDeltaV2 = ajv.compile(repositoryActivationDeltaSchemaV2) as ValidateFunction<RepositoryActivationDelta>;
 
 export class ContentSchemaValidationError extends Error {
   readonly errors: readonly ErrorObject[];
@@ -122,8 +126,9 @@ export function assertCanonicalRevision(document: unknown): asserts document is 
 }
 
 export function assertRepositoryManifest(document: unknown): asserts document is RepositoryManifest {
-  if (!validateManifestDocument(document)) {
-    throw new ContentSchemaValidationError("Repository manifest", validateManifestDocument.errors ?? []);
+  const validator = isRecord(document) && document.readerContractVersion === 2 ? validateManifestDocumentV2 : validateManifestDocumentV1;
+  if (!validator(document)) {
+    throw new ContentSchemaValidationError("Repository manifest", validator.errors ?? []);
   }
   assertUnique(document.schemas.map((schema) => schema.schemaId), "Manifest schema IDs");
   assertUnique(document.schemas.map((schema) => schema.path), "Manifest schema paths");
@@ -131,10 +136,11 @@ export function assertRepositoryManifest(document: unknown): asserts document is
 }
 
 export function assertRepositoryActivationDelta(document: unknown): asserts document is RepositoryActivationDelta {
-  if (!validateActivationDelta(document)) {
-    throw new ContentSchemaValidationError("Repository activation delta", validateActivationDelta.errors ?? []);
+  const validator = isRecord(document) && document.readerContractVersion === 2 ? validateActivationDeltaV2 : validateActivationDeltaV1;
+  if (!validator(document)) {
+    throw new ContentSchemaValidationError("Repository activation delta", validator.errors ?? []);
   }
-  if (document.targetEntryId !== document.entry.entryId) {
+  if (document.entry !== null && document.targetEntryId !== document.entry.entryId) {
     throw new ContentIntegrityError("Repository activation delta target does not match its entry.");
   }
 }
@@ -145,7 +151,7 @@ export async function validateRepositoryActivationDelta(
 ): Promise<RepositoryActivationDelta> {
   assertRepositoryActivationDelta(document);
   const root = await realpath(dataRoot);
-  await validateManifestEntries(root, [document.entry]);
+  if (document.entry !== null) await validateManifestEntries(root, [document.entry]);
   return document;
 }
 
@@ -193,13 +199,36 @@ export async function loadRepositoryBootstrapDescriptor(dataRoot: string): Promi
   const bootstrap = await readJson(bootstrapFile, "Repository bootstrap descriptor");
   assertRepositoryManifest(bootstrap);
   await validateSchemaDeclarations(root, bootstrap);
-  const activationSchema = bootstrap.schemas.find(
-    (declaration) => declaration.schemaId === repositoryActivationDeltaSchema.$id,
+  const manifestSchemaId = bootstrap.readerContractVersion === 2 ? repositoryManifestSchemaV2.$id : repositoryManifestSchemaV1.$id;
+  const manifestSchemaPath = bootstrap.readerContractVersion === 2
+    ? "schemas/v2/repository-manifest.schema.json"
+    : "schemas/v1/repository-manifest.schema.json";
+  const manifestSchema = bootstrap.schemas.find((declaration) => declaration.schemaId === manifestSchemaId);
+  if (manifestSchema?.path !== manifestSchemaPath) {
+    throw new ContentIntegrityError("Repository bootstrap descriptor must declare its reader contract manifest schema.");
+  }
+  const activationSchemaV1 = bootstrap.schemas.find(
+    (declaration) => declaration.schemaId === repositoryActivationDeltaSchemaV1.$id,
   );
-  if (activationSchema?.path !== "schemas/v1/repository-activation-delta.schema.json") {
-    throw new ContentIntegrityError("Repository bootstrap descriptor must declare the activation-delta reader contract schema.");
+  if (activationSchemaV1?.path !== "schemas/v1/repository-activation-delta.schema.json") {
+    throw new ContentIntegrityError("Repository bootstrap descriptor must declare the v1 activation-delta schema.");
+  }
+  if (bootstrap.readerContractVersion === 2) {
+    const activationSchemaV2 = bootstrap.schemas.find(
+      (declaration) => declaration.schemaId === repositoryActivationDeltaSchemaV2.$id,
+    );
+    if (activationSchemaV2?.path !== "schemas/v2/repository-activation-delta.schema.json") {
+      throw new ContentIntegrityError("Repository bootstrap descriptor must declare the deletion-capable v2 activation-delta schema.");
+    }
   }
   return bootstrap;
+}
+
+export async function assertDeletionContractSupported(dataRoot: string): Promise<void> {
+  const bootstrap = await loadRepositoryBootstrapDescriptor(dataRoot);
+  if (bootstrap.readerContractVersion !== 2) {
+    throw new ContentIntegrityError("Repository readers do not yet support deletion activation deltas.");
+  }
 }
 
 export async function loadResolvedRepositoryManifest(dataRoot: string): Promise<Readonly<{
@@ -231,9 +260,11 @@ async function composeResolvedRepositoryManifest(root: string): Promise<Readonly
   const targetGenerations = new Map<string, string>();
   let highestGeneration: string | null = null;
   for (const delta of await loadValidRepositoryActivationDeltas(root)) {
+    if (delta.readerContractVersion === 2 && bootstrap.readerContractVersion !== 2) continue;
     const previous = targetGenerations.get(delta.targetEntryId);
     if (!previous || delta.generation > previous) {
-      entries.set(delta.targetEntryId, delta.entry);
+      if (delta.entry === null) entries.delete(delta.targetEntryId);
+      else entries.set(delta.targetEntryId, delta.entry);
       targetGenerations.set(delta.targetEntryId, delta.generation);
     }
     if (!highestGeneration || delta.generation > highestGeneration) highestGeneration = delta.generation;

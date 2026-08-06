@@ -22,6 +22,7 @@ import {
   ContentIntegrityError,
   ContentSchemaValidationError,
 } from "../../server/content-storage/validation.ts";
+import { recordImportReviewPublicationOutcome } from "../../server/compendium/import-review-outcomes.ts";
 import {
   PublicationFenceUnavailableError,
   PublicationLeaseUnavailableError,
@@ -46,6 +47,7 @@ export async function processPublicationReservation(options: Readonly<{
   visibilityTimeoutMs?: number;
   publish?: typeof publishSpooledCommand;
   queue?: QueueActions;
+  recordOutcome?: typeof recordImportReviewPublicationOutcome;
 }>): Promise<PublicationProcessingResult> {
   const spoolRoot = options.spoolRoot ?? getPublicationSpoolRoot();
   const now = options.now ?? Date.now();
@@ -55,6 +57,7 @@ export async function processPublicationReservation(options: Readonly<{
     retry: retryPublication,
     deadLetter: deadLetterPublication,
   };
+  const recordOutcome = options.recordOutcome ?? recordImportReviewPublicationOutcome;
   const { reservation } = options;
   const clock = options.clock ?? Date.now;
   const visibilityTimeoutMs = options.visibilityTimeoutMs ?? PUBLICATION_VISIBILITY_TIMEOUT_MS;
@@ -77,6 +80,7 @@ export async function processPublicationReservation(options: Readonly<{
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     await markPublicationFailed(idempotencyKey, generation, reason, spoolRoot, now);
+    if (!await recordOutcomeOrRetry(recordOutcome, queue, reservation, idempotencyKey, "failed", reason, now)) return "retried";
     await quarantinePublication(reservation.deliveryId, reservation.raw, reason, spoolRoot, now);
     await queue.deadLetter(reservation, reason, now);
     return "dead-lettered";
@@ -94,6 +98,7 @@ export async function processPublicationReservation(options: Readonly<{
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     await markPublicationFailed(idempotencyKey, generation, reason, spoolRoot, now);
+    if (!await recordOutcomeOrRetry(recordOutcome, queue, reservation, idempotencyKey, "failed", reason, now)) return "retried";
     await quarantinePublication(reservation.deliveryId, reservation.raw, reason, spoolRoot, now);
     await queue.deadLetter(reservation, reason, now);
     return "dead-lettered";
@@ -105,10 +110,12 @@ export async function processPublicationReservation(options: Readonly<{
     return "dead-lettered";
   }
   if (state?.status === "completed") {
+    if (!await recordOutcomeOrRetry(recordOutcome, queue, reservation, idempotencyKey, "completed", null, now)) return "retried";
     await queue.acknowledge(reservation);
     return "already-completed";
   }
   if (state?.status === "failed") {
+    if (!await recordOutcomeOrRetry(recordOutcome, queue, reservation, idempotencyKey, "failed", state.lastError ?? "Publication was previously quarantined.", now)) return "retried";
     await queue.deadLetter(reservation, state.lastError ?? "Publication was previously quarantined.", now);
     return "dead-lettered";
   }
@@ -133,6 +140,7 @@ export async function processPublicationReservation(options: Readonly<{
       expectedGeneration: generation,
     });
     await markPublicationCompleted(idempotencyKey, generation, spoolRoot, now);
+    if (!await recordOutcomeOrRetry(recordOutcome, queue, reservation, idempotencyKey, "completed", null, now)) return "retried";
     if (reservationLost || !await queue.renew(reservation, { now: clock(), visibilityTimeoutMs })) {
       return "reservation-lost";
     }
@@ -149,6 +157,7 @@ export async function processPublicationReservation(options: Readonly<{
     }
     if (isPermanentPublicationFailure(error) || attempt + 1 >= PUBLICATION_MAX_ATTEMPTS) {
       await markPublicationFailed(idempotencyKey, generation, reason, spoolRoot, now);
+      if (!await recordOutcomeOrRetry(recordOutcome, queue, reservation, idempotencyKey, "failed", reason, now)) return "retried";
       await quarantinePublication(reservation.deliveryId, reservation.raw, reason, spoolRoot, now);
       await queue.deadLetter(reservation, reason, now);
       return "dead-lettered";
@@ -159,6 +168,24 @@ export async function processPublicationReservation(options: Readonly<{
     return "retried";
   } finally {
     clearInterval(renewal);
+  }
+}
+
+async function recordOutcomeOrRetry(
+  recordOutcome: typeof recordImportReviewPublicationOutcome,
+  queue: QueueActions,
+  reservation: PublicationReservation,
+  idempotencyKey: string,
+  status: "completed" | "failed",
+  reason: string | null,
+  now: number,
+): Promise<boolean> {
+  try {
+    await recordOutcome(idempotencyKey, status, reason);
+    return true;
+  } catch {
+    await queue.retry(reservation, { now, delayMs: 1_000, consumeAttempt: false });
+    return false;
   }
 }
 

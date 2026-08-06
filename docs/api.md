@@ -112,6 +112,36 @@ Returns the caller-visible source attribution and publication fields. This non-a
 
 ---
 
+## Admin: Compendium import review
+
+All review endpoints require the `admin` role. Candidate responses include `payloadOrigin`, `publicationCapability`, `publicationBlockReason`, evidence source/file/generation IDs, and the type-qualified canonical `entryId` used for active-revision lookup. Collector snapshots are returned as `collector_snapshot` / `requires_extraction` with no canonical entry or active token. Valid `missing` #77 chains are `can_unpublish`: their evidence and target are derived from `previous_candidate_id`, and their active token must equal the deterministically reconstructed prior publication. Mutations additionally require an exact same-origin `Origin` header and reject unknown, mistyped, duplicate, or action-inapplicable fields. Review mutations record the authenticated initiator; terminal publication outcomes use the worker identity while retaining that initiator separately. Application requests only persist intent and submit immutable commands to the #96 spool; they never write canonical repository files.
+
+### GET `/api/admin/compendium/import-runs`
+
+Lists import runs newest first. Optional query parameters are `status`, `limit` (1-200), and `offset`. Each run includes candidate, diff, diagnostic, pending-review, and failed-publication counts.
+
+### GET `/api/admin/compendium/import-runs/[runId]`
+
+Returns one run with candidates, previous content for diffing, source locators, diagnostics, publication state, and the latest 200 immutable review audit events. Use `diffStatus=new|unchanged|changed|missing|duplicate|invalid` to filter candidates.
+
+### POST `/api/admin/compendium/import-runs/[runId]/actions`
+
+Applies an individual or bulk action (up to 200 candidates).
+
+```json
+{
+  "action": "approve",
+  "candidateIds": ["candidate-uuid"],
+  "activeRevisionTokens": {
+    "candidate-uuid": "rev-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+}
+```
+
+Actions are `approve`, `reject`, `merge`, `unpublish`, and `retry`. Every publishing action requires `activeRevisionTokens` with exactly one displayed token (`rev-…` or `null`) per selected candidate. `merge` additionally accepts a corrected #77 extraction payload as `resolvedContent` for one candidate or `resolvedContents` keyed by candidate UUID for bulk use; callers do not construct canonical revision JSON. Invalid or duplicate candidates require merge; only missing candidates can be unpublished. Submission exceptions report `pending` and retain the same key and attempt. Only a worker-recorded terminal failure permits retry with a new attempt and the newly displayed token.
+
+---
+
 ## Admin: Ingestion
 
 ### POST `/api/admin/ingestion/upload`
