@@ -4,6 +4,8 @@
 -- percent-encoding rules enforced by the application.
 -- Both schemes are retained for lossless upgrades from 0003, which accepted
 -- paired HTTP origins.
+-- The hardened origin check is NOT VALID so legacy rows cannot block this
+-- migration; PostgreSQL still enforces it for every new or updated row.
 
 ALTER TABLE sources
   DROP CONSTRAINT IF EXISTS sources_publication_text_not_blank,
@@ -32,4 +34,4 @@ ALTER TABLE sources
       AND external_origin_url !~ '[[:space:]]'
       AND external_origin_url !~ '%([^0-9A-Fa-f]|[0-9A-Fa-f]([^0-9A-Fa-f]|$)|$)'
     )
-  );
+  ) NOT VALID;

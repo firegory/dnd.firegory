@@ -35,6 +35,23 @@ test("0003 to 0004 retains persisted HTTP and HTTPS origin compatibility", () =>
   assert.doesNotMatch(constraintsSql, /UPDATE sources[\s\S]*external_origin_url/);
 });
 
+test("0004 does not immediately validate hardened URL rules against legacy rows", () => {
+  const legacyRows = [
+    { externalOriginUrl: "http://legacy.example/a b", externalOriginId: "legacy-space" },
+    { externalOriginUrl: "https://legacy.example/%GG", externalOriginId: "legacy-percent" },
+  ];
+
+  for (const row of legacyRows) {
+    assert.equal(acceptedBy0003OriginConstraint(row), true);
+  }
+  assert.match(
+    constraintsSql,
+    /ADD CONSTRAINT sources_origin_complete CHECK \([\s\S]*\) NOT VALID;/,
+  );
+  assert.doesNotMatch(constraintsSql, /VALIDATE CONSTRAINT sources_origin_complete/);
+  assert.doesNotMatch(constraintsSql, /UPDATE sources[\s\S]*external_origin_url/);
+});
+
 test("constraint hardening SQL is rerunnable but only statically verified", () => {
   for (const constraint of [
     "sources_publication_text_not_blank",
@@ -104,3 +121,12 @@ test("static migration SQL guards every additive operation and orders the legacy
   assert.ok(sql.indexOf("SET publication_title = title") < sql.indexOf("ALTER COLUMN publication_title SET NOT NULL"));
   assert.doesNotMatch(sql, /\b(?:DROP|RENAME)\b/);
 });
+
+function acceptedBy0003OriginConstraint(row: {
+  externalOriginUrl: string | null;
+  externalOriginId: string | null;
+}): boolean {
+  return (row.externalOriginUrl === null && row.externalOriginId === null)
+    || (row.externalOriginUrl !== null && row.externalOriginId !== null
+      && row.externalOriginUrl.trim() !== "" && row.externalOriginId.trim() !== "");
+}

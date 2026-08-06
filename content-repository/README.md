@@ -26,7 +26,27 @@ Source provenance carries the same authorization meaning as the application mode
 
 Each source has a cohesive `publication` object. `canonicalBookId` identifies the conceptual book, while `code`, `releaseYear`, `revision`, `edition`, and `language` identify a particular publication or reprint; this keeps the 2014 and 2024 rules distinct without assigning a new conceptual identity to every printing. External provenance uses an `origin` object whose absolute HTTP(S) `url` and provider `id` must appear together. Runtime projection uses WHATWG parsing to normalize the scheme, host, default ports, dot segments, and other standard URL components, and rejects whitespace or malformed percent escapes. Canonical files must already contain that exact normalized spelling; validation rejects rather than mutates noncanonical source records. Publication text fields must contain a non-whitespace character. `sourcePriority` is an integer from 0 through 1000 used to rank otherwise equivalent sources.
 
-PostgreSQL projects these values into typed `sources` columns rather than storing a second publication object. Migration `0003_source_publication_metadata.sql` sets existing rows' `publication_title` to their current display title and `source_priority` to `0`; `0004_source_publication_constraints.sql` hardens direct-write checks for canonical text, publication codes, and HTTP(S) origins without invalidating HTTP values persisted under `0003`. Other values, including canonical IDs, publisher, release year, revision, origin, attribution, and license, remain `NULL` because they cannot be inferred safely. Such legacy rows remain readable and editable but cannot be serialized as canonical `source.json` until the required canonical publication fields are supplied.
+PostgreSQL projects these values into typed `sources` columns rather than storing a second publication object. Migration `0003_source_publication_metadata.sql` sets existing rows' `publication_title` to their current display title and `source_priority` to `0`; `0004_source_publication_constraints.sql` hardens direct-write checks for canonical text, publication codes, and HTTP(S) origins without invalidating HTTP values persisted under `0003`. The hardened `sources_origin_complete` check is installed `NOT VALID`: it rejects invalid new or updated rows immediately, but legacy whitespace or malformed-percent origins do not block the migration. Other values, including canonical IDs, publisher, release year, revision, origin, attribution, and license, remain `NULL` because they cannot be inferred safely. Such legacy rows remain readable and editable but cannot be serialized as canonical `source.json` until the required canonical publication fields are supplied.
+
+After legacy origins have been reviewed and normalized through the admin API, validate the pending constraint explicitly:
+
+```sql
+SELECT id, external_origin_url, external_origin_id
+FROM sources
+WHERE NOT (
+  (external_origin_url IS NULL AND external_origin_id IS NULL)
+  OR (
+    external_origin_url IS NOT NULL
+    AND external_origin_id IS NOT NULL
+    AND external_origin_id !~ '^[[:space:]]*$'
+    AND external_origin_url ~ '^https?://[^%[:space:]/?#]+'
+    AND external_origin_url !~ '[[:space:]]'
+    AND external_origin_url !~ '%([^0-9A-Fa-f]|[0-9A-Fa-f]([^0-9A-Fa-f]|$)|$)'
+  )
+);
+
+ALTER TABLE sources VALIDATE CONSTRAINT sources_origin_complete;
+```
 
 Migration tests inspect ordering and SQL constraints statically. Live PostgreSQL execution is not available in this repository test environment and remains a deployment verification step.
 
