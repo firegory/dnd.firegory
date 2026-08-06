@@ -116,6 +116,8 @@ Search filters always include:
 
 Compendium list, count, detail, alias, relation, source, citation, and preview queries reuse this source predicate at the SQL boundary. Grouped entries first discard inaccessible versions and then select one source-bound version, so text, typed fields, aliases, snippets, counts, and metadata cannot fall back to a protected source. Direct UUID and slug lookups deliberately return the same `404` for missing and inaccessible records.
 
+Compendium relations are source-derived and fail closed. A relation is readable only when `compendium_import_links` supplies at least one evidence version that survives the caller's source predicate and deleted/publication checks. A relation with no provenance is an unpublished candidate, not a public/manual relation. The application does not currently support globally visible manual relations; adding them requires an explicit trusted visibility classification rather than treating absent provenance as public.
+
 Canonical content on NFS has a different trust boundary. Direct filesystem access is a trusted administrative bypass and does not apply application RBAC; only administrators and trusted local agents may receive that mount. Untrusted users and scoped integrations must use application APIs, which enforce source access in PostgreSQL. This bypass is intentional and must not be exposed as a multi-tenant share.
 
 ## Retrieval Pipeline

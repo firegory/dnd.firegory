@@ -90,7 +90,7 @@ Lists published entries and returns an authorization-filtered `count`. Query par
 
 ### GET `/api/compendium/entries/[identifier]`
 
-Returns a published entry by UUID or slug, including only source-bound aliases, relations to accessible entries, accessible source versions, and citations from the selected version and revision.
+Returns a published entry by UUID or slug, including only source-bound aliases, relations to accessible entries, accessible source versions, and citations from the selected version and revision. Relations fail closed: each returned relation must have at least one provenance link to an accessible, non-deleted published source version. Relations with zero provenance links or only inaccessible/deleted provenance are omitted.
 
 ### GET `/api/compendium/aliases/[alias]`
 

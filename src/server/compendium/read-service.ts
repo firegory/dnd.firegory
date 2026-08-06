@@ -356,17 +356,11 @@ function entrySelect(includeDetailFields: boolean): string {
 }
 
 function accessibleRelationEvidence(relationAlias: string): string {
-  return `(
-    NOT EXISTS (
-      SELECT 1 FROM compendium_import_links provenance
-      WHERE provenance.relation_id = ${relationAlias}.id
-    )
-    OR EXISTS (
-      SELECT 1
-      FROM compendium_import_links provenance
-      JOIN accessible_versions evidence ON evidence.version_id = provenance.evidence_version_id
-      WHERE provenance.relation_id = ${relationAlias}.id
-    )
+  return `EXISTS (
+    SELECT 1
+    FROM compendium_import_links provenance
+    JOIN accessible_versions evidence ON evidence.version_id = provenance.evidence_version_id
+    WHERE provenance.relation_id = ${relationAlias}.id
   )`;
 }
 

@@ -6,6 +6,12 @@ import {
   CompendiumNotFoundError,
   CompendiumReadService,
 } from "../../src/server/compendium/read-service.ts";
+import {
+  buildRetrievalAuthorizationFilter,
+  sourceMatchesRetrievalAuthorizationFilter,
+  type RetrievalUser,
+  type SourceAccessMetadata,
+} from "../../src/server/access/retrieval-filter.ts";
 
 const ids = {
   source: "10000000-0000-4000-8000-000000000001",
@@ -81,11 +87,69 @@ test("inaccessible UUIDs, slugs, and aliases have the same not-found result", as
   for (const sql of statements) assert.match(sql, /s\.access_tier = 'open'/);
   assert.match(statements[0], /JOIN selected_versions target/);
   assert.match(statements[0], /JOIN accessible_versions evidence ON evidence\.version_id = provenance\.evidence_version_id/);
+  assert.doesNotMatch(statements[0], /NOT EXISTS[\s\S]*provenance\.relation_id/);
   assert.match(statements[0], /FROM accessible_versions source_version/);
   assert.match(statements[0], /citation\.version_id = av\.version_id/);
   assert.match(statements[0], /citation\.revision_id = av\.revision_id/);
   assert.match(statements[0], /citation\.source_id = av\.source_id/);
   assert.match(statements[0], /citation\.file_id = av\.file_id/);
+});
+
+test("relation visibility fails closed across provenance states and every role", () => {
+  const open = provenance({ accessTier: "open" });
+  const premium = provenance({ accessTier: "premium", shared: true });
+  const ownerPersonal = provenance({ accessTier: "personal", ownerUserId: "owner" });
+  const deletedOpen = { ...open, deleted: true };
+  const roles = [
+    { name: "user", user: { role: "user", userId: "user" } as const },
+    { name: "premium owner", user: { role: "premium", userId: "owner" } as const },
+    { name: "premium non-owner", user: { role: "premium", userId: "other" } as const },
+    { name: "admin", user: { role: "admin", userId: "admin" } as const },
+  ];
+
+  for (const { name, user } of roles) {
+    assert.equal(relationVisible([], user), false, `${name}: zero provenance must be hidden`);
+    assert.equal(relationVisible([deletedOpen], user), false, `${name}: deleted provenance must be hidden`);
+    assert.equal(relationVisible([ownerPersonal], user), name === "premium owner" || name === "admin", `${name}: inaccessible-only provenance`);
+    assert.equal(relationVisible([ownerPersonal, open], user), true, `${name}: mixed provenance with an accessible link`);
+    assert.equal(relationVisible([premium], user), name !== "user", `${name}: shared premium provenance`);
+  }
+});
+
+test("relation SQL requires affirmative non-deleted provenance for every role", async () => {
+  const roles: readonly RetrievalUser[] = [
+    { role: "user", userId: "user" },
+    { role: "premium", userId: "owner" },
+    { role: "premium", userId: "nonowner" },
+    { role: "admin", userId: "admin" },
+  ];
+
+  for (const user of roles) {
+    let statement = "";
+    const service = new CompendiumReadService({
+      async query(sql: string) {
+        statement = sql;
+        return { rows: [] } as never;
+      },
+    });
+    await assert.rejects(service.getEntry(user, ids.entry), CompendiumNotFoundError);
+    assert.match(statement, /AND EXISTS \([\s\S]*provenance\.relation_id = relation\.id/);
+    assert.doesNotMatch(statement, /NOT EXISTS[\s\S]*provenance\.relation_id/);
+    assert.match(statement, /s\.deleted_at IS NULL/);
+    assert.match(statement, /f\.deleted_at IS NULL/);
+    if (user.role === "admin") {
+      assert.doesNotMatch(statement, /s\.access_tier/);
+    } else {
+      assert.match(statement, /s\.access_tier = 'open'/);
+    }
+  }
+});
+
+test("detail route serializes the filtered service result and relations default empty", async () => {
+  const route = await readFile(new URL("../../src/app/api/compendium/entries/[identifier]/route.ts", import.meta.url), "utf8");
+  const service = await readFile(new URL("../../src/server/compendium/read-service.ts", import.meta.url), "utf8");
+  assert.match(route, /NextResponse\.json\(await new CompendiumReadService\(\)\.getEntry/);
+  assert.match(service, /coalesce\(\([\s\S]*\), '\[\]'::jsonb\) AS relations/);
 });
 
 test("public source lookup is SQL-filtered and omits administrative metadata", async () => {
@@ -135,3 +199,14 @@ test("both citation preview lookup paths reuse the centralized source predicate"
   assert.match(source, /getAuthorizedCitationPreviewFile[\s\S]*WHERE \$\{accessFilter\.sql\}/);
   assert.match(source, /lookupChunkBbox[\s\S]*AND \$\{accessFilter\.sql\}/);
 });
+
+type Provenance = Readonly<{ source: SourceAccessMetadata; deleted: boolean }>;
+
+function provenance(source: SourceAccessMetadata): Provenance {
+  return { source, deleted: false };
+}
+
+function relationVisible(links: readonly Provenance[], user: RetrievalUser): boolean {
+  const filter = buildRetrievalAuthorizationFilter(user);
+  return links.some((link) => !link.deleted && sourceMatchesRetrievalAuthorizationFilter(link.source, filter));
+}
