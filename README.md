@@ -157,6 +157,8 @@ npm run ingest -- \
   --access open
 ```
 
+The explicitly invoked next.dnd.su 2024 HTML snapshot collector is documented in [docs/next-dnd-snapshots.md](docs/next-dnd-snapshots.md). It retains raw inputs and reports only; it does not publish compendium content.
+
 | Option | Required | Description |
 | --- | --- | --- |
 | `--pdf` | yes | Path to a local PDF file |
@@ -398,6 +400,8 @@ npm run ingest      # CLI ingestion
 npm run content-index -- validate      # Validate canonical NFS content
 npm run content-index -- incremental   # Sync changed managed content
 npm run content-index -- clean         # Reconcile all managed content
+npm run corpus-export -- generate      # Publish a portable Markdown/JSONL corpus
+npm run corpus-export -- validate      # Validate the latest portable corpus
 ```
 
 ## Backups
@@ -405,6 +409,8 @@ npm run content-index -- clean         # Reconcile all managed content
 See [docs/backups.md](docs/backups.md) for backup and restore procedures for PostgreSQL data and file storage.
 
 Canonical NFS index validation, clean/incremental synchronization, dry-run, restart checkpoints, and embedding backfill are documented in [docs/content-index-sync.md](docs/content-index-sync.md).
+
+Database-free deterministic agent corpus generation, incremental/removal manifests, artifact validation, and atomic latest publication are documented in [docs/corpus-exports.md](docs/corpus-exports.md).
 
 ## Project structure
 
