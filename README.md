@@ -126,7 +126,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full architecture document and [M
 | `premium` | Open/SRD + shared premium pool + personal owned content |
 | `admin` | All sources; can manage ingestion, users, and roles |
 
-Access is enforced server-side in all search and retrieval queries.
+Access is enforced at the SQL boundary in search, retrieval, citation previews, and compendium APIs. Direct access to the canonical NFS repository is a trusted administrative bypass; it must not be mounted for untrusted application users.
 
 ## Content categories
 

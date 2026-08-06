@@ -228,6 +228,8 @@ export class CompendiumService {
     targetEntryId: string;
     relationType: "related" | "requires" | "grants" | "replaces" | "member_of" | "prerequisite";
   }>): Promise<string> {
+    // Relations are not visible to readers until an import occurrence links
+    // source-bound evidence through compendium_import_links.
     requireUuid(input.sourceEntryId, "sourceEntryId");
     requireUuid(input.targetEntryId, "targetEntryId");
     enumValue(input.relationType, ["related", "requires", "grants", "replaces", "member_of", "prerequisite"], "relationType");

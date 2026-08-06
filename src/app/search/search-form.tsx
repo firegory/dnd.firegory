@@ -54,7 +54,7 @@ function usePersistentState(key: string, initialValue: string) {
   return [value, setValue] as const;
 }
 
-export function SearchForm() {
+export function SearchForm({ isAdmin = false }: Readonly<{ isAdmin?: boolean }>) {
   const { language: uiLanguage, t } = useUiLanguage();
   const [query, setQuery] = useState("");
   const [edition, setEdition] = usePersistentState(STORAGE_KEYS.edition, "");
@@ -203,12 +203,12 @@ export function SearchForm() {
         </div>
       )}
 
-      {status === "success" && result && <SearchResultView result={result} />}
+      {status === "success" && result && <SearchResultView result={result} isAdmin={isAdmin} />}
     </div>
   );
 }
 
-function SearchResultView({ result }: { result: SearchResult }) {
+function SearchResultView({ result, isAdmin }: { result: SearchResult; isAdmin: boolean }) {
   const { t } = useUiLanguage();
   const [previewCitation, setPreviewCitation] = useState<Citation | null>(null);
 
@@ -250,6 +250,7 @@ function SearchResultView({ result }: { result: SearchResult }) {
               <CitationCard
                 key={`${citation.sourceId}-${citation.fileId}-${citation.page}-${i}`}
                 citation={citation}
+                isAdmin={isAdmin}
                 onPreview={setPreviewCitation}
               />
             ))}
@@ -264,7 +265,7 @@ function SearchResultView({ result }: { result: SearchResult }) {
   );
 }
 
-function CitationCard({ citation, onPreview }: { citation: Citation; onPreview: (citation: Citation) => void }) {
+function CitationCard({ citation, isAdmin, onPreview }: { citation: Citation; isAdmin: boolean; onPreview: (citation: Citation) => void }) {
   const { language: uiLanguage, t } = useUiLanguage();
   const canPreview = Boolean(citation.sourceId && citation.fileId && citation.page !== null);
 
@@ -281,12 +282,16 @@ function CitationCard({ citation, onPreview }: { citation: Citation; onPreview: 
       </button>
 
       <div className="flex flex-wrap items-center gap-2">
-        <Link
-          href={`/admin/sources/${citation.sourceId}`}
-          className="font-semibold text-accent hover:underline"
-        >
-          {citation.sourceTitle}
-        </Link>
+        {isAdmin ? (
+          <Link
+            href={`/admin/sources/${citation.sourceId}`}
+            className="font-semibold text-accent hover:underline"
+          >
+            {citation.sourceTitle}
+          </Link>
+        ) : (
+          <span className="font-semibold text-accent">{citation.sourceTitle}</span>
+        )}
         <span className="rounded-full bg-accent/15 px-2 py-0.5 text-xs font-medium text-accent">
           {citation.edition}
         </span>
