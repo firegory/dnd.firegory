@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "kind": "canonicalRevision",
+  "entryId": "dash",
+  "revisionId": "rev-207dc963e06b6aa52c9061a356104da93e9a9c916c34789bdd30b9a15dad8ebe",
+  "contentHash": "sha256:207dc963e06b6aa52c9061a356104da93e9a9c916c34789bdd30b9a15dad8ebe",
+  "createdAt": "2026-08-06T00:00:00.000Z",
+  "source": {
+    "schemaVersion": 1,
+    "kind": "source",
+    "sourceId": "srd-2014",
+    "title": "D&D Basic Rules (2014)",
+    "category": "core_rules",
+    "edition": "5e",
+    "language": "en",
+    "accessTier": "open",
+    "shared": false,
+    "ownerUserId": null,
+    "publisher": "Wizards of the Coast",
+    "license": "Open reference example",
+    "files": [
+      {
+        "fileId": "basic-rules-excerpt",
+        "path": "sources/srd-2014/files/basic-rules-excerpt.txt",
+        "mediaType": "text/plain",
+        "contentHash": "sha256:712ae1033a657094dc2b554e7b7ec552e1760eb175fe245d301d61fb12504f31"
+      }
+    ]
+  },
+  "entry": {
+    "entryType": "action",
+    "name": "Dash",
+    "aliases": ["Dash action"],
+    "typedFields": [
+      { "key": "action-cost", "label": "Action cost", "type": "string", "value": "Action" },
+      { "key": "speed-multiplier", "label": "Speed multiplier", "type": "number", "value": 1 },
+      { "key": "ends-this-turn", "label": "Ends this turn", "type": "boolean", "value": true },
+      { "key": "tags", "label": "Tags", "type": "stringList", "value": ["movement", "combat"] }
+    ]
+  },
+  "text": {
+    "plain": "When you take the Dash action, you gain extra movement for the current turn. The increase equals your speed, after applying any modifiers.",
+    "sections": [
+      {
+        "sectionId": "dash-rule",
+        "heading": "Dash",
+        "text": "When you take the Dash action, you gain extra movement for the current turn. The increase equals your speed, after applying any modifiers.",
+        "startOffset": 0,
+        "endOffset": 138
+      }
+    ]
+  },
+  "citations": [
+    {
+      "citationId": "dash-basic-rules",
+      "sourceId": "srd-2014",
+      "fileId": "basic-rules-excerpt",
+      "page": 72,
+      "section": "Actions in Combat: Dash",
+      "quote": "When you take the Dash action, you gain extra movement for the current turn.",
+      "startOffset": 0,
+      "endOffset": 76
+    }
+  ]
+}
