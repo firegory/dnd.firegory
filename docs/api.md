@@ -114,7 +114,7 @@ Returns the caller-visible source attribution and publication fields. This non-a
 
 ## Admin: Compendium import review
 
-All review endpoints require the `admin` role. Mutations additionally require an exact same-origin `Origin` header and reject unknown, mistyped, duplicate, or action-inapplicable fields. Review mutations record the authenticated initiator; terminal publication outcomes use the worker identity while retaining that initiator separately. Application requests only persist intent and submit immutable commands to the #96 spool; they never write canonical repository files.
+All review endpoints require the `admin` role. Candidate responses include the type-qualified canonical `entryId` used for active-revision lookup. Mutations additionally require an exact same-origin `Origin` header and reject unknown, mistyped, duplicate, or action-inapplicable fields. Review mutations record the authenticated initiator; terminal publication outcomes use the worker identity while retaining that initiator separately. Application requests only persist intent and submit immutable commands to the #96 spool; they never write canonical repository files.
 
 ### GET `/api/admin/compendium/import-runs`
 
@@ -138,7 +138,7 @@ Applies an individual or bulk action (up to 200 candidates).
 }
 ```
 
-Actions are `approve`, `reject`, `merge`, `unpublish`, and `retry`. Every publishing action requires `activeRevisionTokens` with exactly one displayed token (`rev-…` or `null`) per selected candidate. `merge` additionally accepts `resolvedContent` for one candidate or `resolvedContents` keyed by candidate UUID for bulk use. Invalid or duplicate candidates require merge; only missing candidates can be unpublished. Submission exceptions report `pending` and retain the same key and attempt. Only a worker-recorded terminal failure permits retry with a new attempt and the newly displayed token.
+Actions are `approve`, `reject`, `merge`, `unpublish`, and `retry`. Every publishing action requires `activeRevisionTokens` with exactly one displayed token (`rev-…` or `null`) per selected candidate. `merge` additionally accepts a corrected #77 extraction payload as `resolvedContent` for one candidate or `resolvedContents` keyed by candidate UUID for bulk use; callers do not construct canonical revision JSON. Invalid or duplicate candidates require merge; only missing candidates can be unpublished. Submission exceptions report `pending` and retain the same key and attempt. Only a worker-recorded terminal failure permits retry with a new attempt and the newly displayed token.
 
 ---
 

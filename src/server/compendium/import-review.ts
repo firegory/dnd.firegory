@@ -6,15 +6,14 @@ import {
   submitUnpublicationCommand,
 } from "../content-storage/publication-command.ts";
 import {
-  createCanonicalRevision,
   getDataRoot,
   type CanonicalRevision,
-  type CanonicalRevisionInput,
   type ContentSource,
-  type JsonValue,
 } from "../content-storage/repository.ts";
-import { assertCanonicalRevision, loadResolvedRepositoryManifest } from "../content-storage/validation.ts";
+import { loadResolvedRepositoryManifest } from "../content-storage/validation.ts";
 import { withTransaction } from "../db/client.ts";
+import { canonicalCandidateEntryId, CandidateProjectionError, projectExtractedCandidate } from "./candidate-publication.ts";
+import type { CompendiumEntryType } from "./service.ts";
 
 type DbClient = Readonly<{
   query<T extends QueryResultRow = QueryResultRow>(sql: string, values?: readonly unknown[]): Promise<{ rows: T[]; rowCount?: number | null }>;
@@ -39,6 +38,7 @@ export type ImportRunSummary = Readonly<{
 export type ImportCandidateReview = Readonly<{
   id: string;
   candidateKey: string;
+  entryId: string | null;
   entryType: string | null;
   diffStatus: string;
   content: Record<string, unknown>;
@@ -69,6 +69,9 @@ export class ImportReviewError extends Error {
 type CandidateRow = QueryResultRow & Readonly<{
   id: string;
   import_run_id: string;
+  source_id: string;
+  file_id: string;
+  generation_id: string | null;
   candidate_key: string;
   entry_type: string | null;
   diff_status: string;
@@ -78,6 +81,9 @@ type CandidateRow = QueryResultRow & Readonly<{
   locator: string | null;
   chunk_id: string | null;
   page_number: number | null;
+  chunk_index: number | null;
+  section_heading: string | null;
+  quote_text: string | null;
   created_at: Date | string;
   run_status: string;
   decision: ReviewDecision | null;
@@ -174,7 +180,8 @@ export class CompendiumImportReviewService {
       const values: unknown[] = [runId];
       const filter = diffStatus ? `AND candidate.diff_status = $${values.push(diffStatus)}` : "";
       const candidates = await client.query<CandidateRow>(candidateSelect(`${filter} ORDER BY candidate.candidate_order, candidate.id`), values);
-      const activeRevisionTokens = await this.readActiveRevision(candidates.rows.map((candidate) => candidate.candidate_key));
+      const entryIds = new Map(candidates.rows.map((candidate) => [candidate.id, candidateEntryId(candidate)]));
+      const activeRevisionTokens = await this.readActiveRevision([...new Set([...entryIds.values()].filter((entryId): entryId is string => entryId !== null))]);
       const diagnostics = await client.query<QueryResultRow & Record<string, unknown>>(
         `SELECT diagnostic_key AS "diagnosticKey", level, code, message, details, created_at AS "createdAt"
          FROM compendium_import_diagnostics WHERE import_run_id = $1 ORDER BY created_at, id`, [runId],
@@ -186,10 +193,10 @@ export class CompendiumImportReviewService {
       );
       return {
         run,
-        candidates: candidates.rows.map((candidate) => ({
-          ...mapCandidate(candidate),
-          activeRevisionToken: activeRevisionTokens.get(candidate.candidate_key) ?? null,
-        })),
+        candidates: candidates.rows.map((candidate) => {
+          const entryId = entryIds.get(candidate.id) ?? null;
+          return { ...mapCandidate(candidate), entryId, activeRevisionToken: entryId ? activeRevisionTokens.get(entryId) ?? null : null };
+        }),
         diagnostics: diagnostics.rows,
         audit: audit.rows,
       };
@@ -234,7 +241,7 @@ export class CompendiumImportReviewService {
     const prepared = await this.transaction(async (client) => {
       const rows = await client.query<CandidateRow>(candidateSelect("AND candidate.id = ANY($2::uuid[]) ORDER BY candidate.id FOR UPDATE OF candidate"), [runId, ids]);
       if (rows.rows.length !== ids.length) throw new ImportReviewError("One or more candidates were not found in this run.", 404);
-      const actions: Array<{ row: CandidateRow; key: string | null; revision: CanonicalRevision | null; expectedActiveRevisionId: string | null }> = [];
+      const actions: Array<{ row: CandidateRow; entryId: string | null; key: string | null; revision: CanonicalRevision | null; expectedActiveRevisionId: string | null }> = [];
       for (const row of rows.rows) {
         const currentStatus = row.publication_status ?? "idle";
         const currentDecision = row.decision ?? "pending";
@@ -251,6 +258,7 @@ export class CompendiumImportReviewService {
         const resolved = input.action === "merge" ? input.resolvedContents?.[row.id] ?? input.resolvedContent : row.resolved_content;
         if (decision === "merged" && !isRecord(resolved)) throw new ImportReviewError("Merge requires a resolved content object.");
         const shouldPublish = ["approved", "merged", "unpublish"].includes(decision);
+        const entryId = shouldPublish ? requiredCandidateEntryId(row) : null;
         const reusePending = input.action === "retry" && currentStatus === "pending";
         const attempt = shouldPublish ? (reusePending ? row.publication_attempt ?? 1 : (row.publication_attempt ?? 0) + 1) : 0;
         const key = shouldPublish ? (reusePending ? row.idempotency_key ?? reviewIdempotencyKey(runId, row.id, attempt) : reviewIdempotencyKey(runId, row.id, attempt)) : null;
@@ -278,7 +286,7 @@ export class CompendiumImportReviewService {
             expectedActiveRevisionId, shouldPublish, admin.userId],
         );
         await audit(client, runId, row.id, input.action, admin.userId, admin.userId, { decision, publicationAttempt: attempt || undefined, expectedActiveRevisionId });
-        actions.push({ row, key, revision, expectedActiveRevisionId });
+        actions.push({ row, entryId, key, revision, expectedActiveRevisionId });
       }
       return actions;
     });
@@ -291,7 +299,7 @@ export class CompendiumImportReviewService {
       }
       try {
         if (item.revision) await this.submitters.publish({ idempotencyKey: item.key, expectedActiveRevisionId: item.expectedActiveRevisionId, revision: item.revision });
-        else await this.submitters.unpublish({ idempotencyKey: item.key, expectedActiveRevisionId: item.expectedActiveRevisionId, entryId: item.row.candidate_key });
+        else await this.submitters.unpublish({ idempotencyKey: item.key, expectedActiveRevisionId: item.expectedActiveRevisionId, entryId: item.entryId! });
         await this.markPublicationQueued(runId, item.row.id, item.key, admin.userId);
         results.push({ candidateId: item.row.id, publicationStatus: "queued" as const });
       } catch (error) {
@@ -329,10 +337,12 @@ export class CompendiumImportReviewService {
 }
 
 function candidateSelect(suffix: string): string {
-  return `SELECT candidate.id, candidate.import_run_id, candidate.candidate_key, candidate.entry_type,
+  return `SELECT candidate.id, candidate.import_run_id, candidate.source_id, candidate.file_id, candidate.generation_id,
+                 candidate.candidate_key, candidate.entry_type,
                  candidate.diff_status, candidate.content, previous.content AS previous_content,
                  candidate.invalid_reason, candidate.created_at, run.status AS run_status,
-                 occurrence.locator, occurrence.chunk_id, chunk.page_number,
+                  occurrence.locator, occurrence.chunk_id, chunk.page_number, chunk.chunk_index,
+                  chunk.section_heading, chunk.quote_text,
                  review.decision, review.resolved_content, review.publication_status,
                  review.publication_attempt, review.idempotency_key, review.last_error,
                  review.expected_active_revision_id, review.expected_active_revision_captured,
@@ -347,17 +357,14 @@ function candidateSelect(suffix: string): string {
 }
 
 async function buildRevision(client: DbClient, candidate: CandidateRow, content: Record<string, unknown>): Promise<CanonicalRevision> {
-  if (!isRecord(content.entry) || !isRecord(content.text) || !Array.isArray(content.citations)) {
-    throw new ImportReviewError("Publishable candidate content requires entry, text, and citations.");
-  }
   const sourceResult = await client.query<QueryResultRow & Record<string, unknown>>(
     `SELECT source.*, coalesce(jsonb_agg(jsonb_build_object(
               'fileId', file.id::text, 'path', 'sources/' || source.canonical_source_id || '/files/' || file.id || '.pdf',
               'mediaType', file.mime_type, 'contentHash', 'sha256:' || file.checksum_sha256
             ) ORDER BY file.id) FILTER (WHERE file.id IS NOT NULL), '[]'::jsonb) AS canonical_files
      FROM sources source LEFT JOIN files file ON file.source_id = source.id AND file.deleted_at IS NULL
-     WHERE source.id = (SELECT source_id FROM compendium_import_runs WHERE id = $1) AND source.deleted_at IS NULL
-     GROUP BY source.id`, [candidate.import_run_id],
+     WHERE source.id = $1 AND source.deleted_at IS NULL
+      GROUP BY source.id`, [candidate.source_id],
   );
   const row = sourceResult.rows[0];
   if (!row || !row.canonical_source_id || !row.publication_code || !row.publisher || !row.release_year || !row.canonical_book_id) {
@@ -377,23 +384,60 @@ async function buildRevision(client: DbClient, candidate: CandidateRow, content:
     },
     ...(row.license ? { license: String(row.license) } : {}), files: row.canonical_files as ContentSource["files"],
   };
-  const input: CanonicalRevisionInput = {
-    schemaVersion: 1, kind: "canonicalRevision", entryId: candidate.candidate_key,
-    createdAt: iso(candidate.created_at), source,
-    entry: content.entry as Record<string, JsonValue>, text: content.text as Record<string, JsonValue>,
-    citations: content.citations as readonly Record<string, JsonValue>[],
-  };
-  const revision = createCanonicalRevision(input);
-  assertCanonicalRevision(revision);
-  return revision;
+  if (!candidate.entry_type || !candidate.generation_id || !candidate.chunk_id || candidate.chunk_index === null || !candidate.quote_text) {
+    throw new ImportReviewError("Publishable extracted candidates require typed source, generation, and chunk provenance.");
+  }
+  try {
+    return projectExtractedCandidate(content, {
+      candidateKey: candidate.candidate_key,
+      entryType: candidate.entry_type as CompendiumEntryType,
+      createdAt: iso(candidate.created_at),
+      boundary: {
+        sourceId: candidate.source_id,
+        fileId: candidate.file_id,
+        generationId: candidate.generation_id,
+        edition: source.edition,
+        language: source.language,
+        accessTier: source.accessTier,
+        shared: source.shared,
+        ownerUserId: source.ownerUserId,
+      },
+      source,
+      chunk: {
+        id: candidate.chunk_id,
+        chunkIndex: candidate.chunk_index,
+        pageNumber: candidate.page_number,
+        sectionHeading: candidate.section_heading,
+        quoteText: candidate.quote_text,
+      },
+    });
+  } catch (error) {
+    if (error instanceof CandidateProjectionError) throw new ImportReviewError(error.message);
+    throw error;
+  }
 }
 
 function mapCandidate(row: CandidateRow): ImportCandidateReview {
-  return { id: row.id, candidateKey: row.candidate_key, entryType: row.entry_type, diffStatus: row.diff_status,
+  return { id: row.id, candidateKey: row.candidate_key, entryId: candidateEntryId(row), entryType: row.entry_type, diffStatus: row.diff_status,
     content: row.content, previousContent: row.previous_content, invalidReason: row.invalid_reason, locator: row.locator,
     chunkId: row.chunk_id, page: row.page_number, activeRevisionToken: null, decision: row.decision ?? "pending", resolvedContent: row.resolved_content,
     publicationStatus: row.publication_status ?? "idle", lastError: row.last_error, reviewedBy: row.reviewed_by,
     reviewedAt: row.reviewed_at == null ? null : iso(row.reviewed_at) };
+}
+
+function candidateEntryId(row: Pick<CandidateRow, "entry_type" | "candidate_key">): string | null {
+  if (!row.entry_type) return null;
+  try {
+    return canonicalCandidateEntryId(row.entry_type, row.candidate_key);
+  } catch {
+    return null;
+  }
+}
+
+function requiredCandidateEntryId(row: Pick<CandidateRow, "entry_type" | "candidate_key">): string {
+  const entryId = candidateEntryId(row);
+  if (!entryId) throw new ImportReviewError("Candidate has no supported type-qualified canonical identity.");
+  return entryId;
 }
 
 function decisionFor(action: ReviewAction, current: ReviewDecision): ReviewDecision {

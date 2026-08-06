@@ -15,15 +15,17 @@ The admin workspace at `/admin/compendium/imports` exposes successful and failed
 
 ## Publication boundary
 
-The application does not update `compendium_versions`, `compendium_revisions`, canonical manifests, or canonical NFS paths. Approval and merge create a validated canonical revision in memory and call `submitPublicationCommand`; unpublish calls `submitUnpublicationCommand`. Both write only to the #96 upload spool and enqueue worker work.
+The application does not update `compendium_versions`, `compendium_revisions`, canonical manifests, or canonical NFS paths. Approval and merge deterministically project and validate the immutable #77 extraction payload before creating a canonical revision in memory and calling `submitPublicationCommand`; unpublish calls `submitUnpublicationCommand`. Both write only to the #96 upload spool and enqueue worker work.
 
 Each candidate response includes the exact currently active revision token, including explicit absence. The UI displays and submits that token per candidate, including every member of a bulk action; the mutation service persists it without rereading canonical state. Under the canonical fence the worker rejects the command if the target changed, preventing a later run from being overwritten by a stale page's approval or unpublication. A submission exception leaves the pending attempt and idempotency key unchanged. Only a worker terminal failure enables a new attempt, which uses the token from the newly loaded review response.
+
+Canonical targets use the type-qualified stable identity `<entryType>-<candidateKey>` everywhere: review responses, active-token lookup, publication commands, merge, and unpublication. This keeps identities such as `spell-shield` and `equipment-shield` distinct.
 
 The worker serializes canonical changes and installs an immutable activation delta. Version 1 remains replacement-only and is folded by v1 and v2 repositories. Unpublication uses a version 2 delta whose `entry` is `null`; it is emitted and folded only when the bootstrap declares deletion-capable reader contract v2. Rolling a bootstrap back to v1 makes existing v2 deltas inert while retaining v1 replacements.
 
 ## Candidate payload
 
-Approved or merged candidate `content` must contain canonical `entry`, `text`, and `citations` objects accepted by `canonical-revision.schema.json`. Source and file provenance are projected from the run's database-owned source boundary. Complete canonical publication metadata is required before queueing.
+Approved or merged candidate `content` remains the immutable #77 shape: `title`, `body`, typed `attributes`, field citations, extraction metadata, review metadata, and source boundary. Before review state or queue submission is written, the service revalidates every derived field against the database-owned chunk and exact quote spans. It projects the title and attributes into canonical entry/typed fields, the complete source chunk into contiguous canonical text/sections, and every field citation into canonical source/file/chunk/page/section provenance. Unicode code-point extraction spans are converted to canonical JavaScript text offsets without changing their quoted evidence. Nullable or structured attribute values that the canonical typed-field contract cannot represent are rejected rather than coerced.
 
 ## Migration 0013
 

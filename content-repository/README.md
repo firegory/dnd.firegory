@@ -21,7 +21,7 @@ All path IDs are lowercase stable IDs containing letters, numbers, and hyphens. 
 
 ## Canonical revisions
 
-A canonical revision is self-describing: it embeds source provenance, complete plain text and sections, explicitly typed fields, and quote-safe citations. It can be rendered without PostgreSQL or another external catalog. Source file paths and hashes make the original evidence independently verifiable.
+A canonical revision is self-describing: it embeds source provenance, complete plain text and sections, explicitly typed fields, and quote-safe citations. Projected review citations map extraction field paths to stable semantic citation IDs and retain the validated chunk identity in section provenance; canonical offsets address `text.plain` after Unicode code-point spans are converted. It can be rendered without PostgreSQL or another external catalog. Source file paths and hashes make the original evidence independently verifiable.
 
 Source provenance carries the same authorization meaning as the application model. `open` sources are unowned and not shared, `premium` sources are unowned and shared, and `personal` sources are not shared and require a UUID `ownerUserId`. Portable rebuilds must preserve these fields and apply access filtering before indexing or retrieval.
 

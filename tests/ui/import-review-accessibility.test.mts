@@ -11,5 +11,6 @@ test("candidate controls and citation feedback include candidate-specific access
   assert.match(source, /role="alert"/);
   assert.match(source, /candidatePreviewFailed.*candidate: candidateKey/);
   assert.match(source, /activeRevisionToken/);
+  assert.match(source, /candidate\.entryId/);
   assert.match(source, /Object\.fromEntries\(candidateIds\.map/);
 });

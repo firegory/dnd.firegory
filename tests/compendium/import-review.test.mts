@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import { extractCandidates } from "../../src/server/compendium/candidate-extraction.ts";
 import { CompendiumImportReviewService } from "../../src/server/compendium/import-review.ts";
 
 const runId = "11111111-1111-4111-8111-111111111111";
@@ -9,16 +11,43 @@ const fileId = "33333333-3333-4333-8333-333333333333";
 const admin = { userId: "44444444-4444-4444-8444-444444444444", role: "admin" } as const;
 const activeRevision = `rev-${"b".repeat(64)}`;
 const secondCandidateId = "66666666-6666-4666-8666-666666666666";
-const plain = "Magic missile strikes its target.";
-const content = {
-  entry: { entryType: "spell", name: "Magic Missile", aliases: [], typedFields: [] },
-  text: { plain, sections: [{ sectionId: "description", heading: "Description", text: plain, startOffset: 0, endOffset: plain.length }] },
-  citations: [{ citationId: "primary", sourceId: "players-handbook", fileId, page: 257, section: "Magic Missile", quote: plain, startOffset: 0, endOffset: plain.length }],
-};
+const generationId = "77777777-7777-4777-8777-777777777777";
+const chunkId = "88888888-8888-4888-8888-888888888888";
+const secondChunkId = "99999999-9999-4999-8999-999999999999";
+const astralChunkId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const boundary = {
+  sourceId: firstSourceId(), fileId, generationId, edition: "5e", language: "en", accessTier: "open", shared: false, ownerUserId: null,
+} as const;
+const fixtureText = (await readFile("tests/fixtures/candidate-extraction/en-spell.txt", "utf8")).trim();
+const astralFixtureText = (await readFile("tests/fixtures/candidate-extraction/en-astral-spell.txt", "utf8")).trim();
+const spellShieldText = "Shield\n1st-level abjuration\nCasting Time: 1 reaction\nRange: Self\nComponents: V, S\nDuration: 1 round\nAn invisible barrier of magical force appears and protects you.";
+const equipmentShieldText = "Armor\n| Name | Cost | Weight |\n| --- | --- | --- |\n| Shield | 10 gp | 6 lb. |";
+const unsupportedEquipmentText = "Armor\n| Name | Cost | Weight |\n| --- | --- | --- |\n| Mystery Shield | — | — |";
+
+async function extracted(text: string, id = chunkId) {
+  const result = await extractCandidates({
+    boundary,
+    chunks: [{ id, chunkIndex: id === chunkId ? 0 : 1, pageNumber: 1, sectionHeading: null, quoteText: text }],
+    existingCandidates: [],
+  }, { modelVersion: "none" });
+  assert.equal(result.candidates.length, 1);
+  return result.candidates[0];
+}
+
+const content = await extracted(fixtureText);
+const spellShield = await extracted(spellShieldText);
+const equipmentShield = await extracted(equipmentShieldText, secondChunkId);
+const unsupportedEquipment = await extracted(unsupportedEquipmentText, secondChunkId);
+const astralSpell = await extracted(astralFixtureText, astralChunkId);
+
+function chunkFields(text = fixtureText, id = chunkId) {
+  return { chunk_id: id, chunk_index: id === chunkId ? 0 : 1, page_number: 1, section_heading: null, quote_text: text };
+}
 
 function candidate(overrides: Record<string, unknown> = {}) {
-  return { id: candidateId, import_run_id: runId, candidate_key: "magic-missile", entry_type: "spell", diff_status: "new", content,
-    previous_content: null, invalid_reason: null, locator: "page:257", chunk_id: null, page_number: 257,
+  return { id: candidateId, import_run_id: runId, source_id: firstSourceId(), file_id: fileId, generation_id: generationId,
+    candidate_key: content.candidateKey, entry_type: content.entryType, diff_status: "new", content,
+    previous_content: null, invalid_reason: null, locator: "page:1", ...chunkFields(),
     created_at: "2026-08-06T00:00:00.000Z", run_status: "succeeded", decision: null, resolved_content: null,
     publication_status: null, publication_attempt: null, idempotency_key: null, last_error: null, reviewed_by: null, reviewed_at: null,
     expected_active_revision_id: null, expected_active_revision_captured: false,
@@ -48,7 +77,12 @@ test("approval persists audit intent and submits only a worker publication comma
   }, async () => { throw new Error("mutation must not recapture canonical state"); });
   const result = await service.act(admin, runId, { candidateIds: [candidateId], action: "approve", activeRevisionTokens: { [candidateId]: null } });
   assert.equal(result[0].publicationStatus, "queued");
-  assert.equal((submitted as { revision: { entryId: string } }).revision.entryId, "magic-missile");
+  const revision = (submitted as { revision: { entryId: string; entry: { typedFields: unknown[] }; citations: Array<Record<string, unknown>> } }).revision;
+  assert.equal(revision.entryId, "spell-burning-hands");
+  assert.equal(revision.entry.typedFields.length, Object.keys(content.attributes).length);
+  assert.equal(revision.citations.length, content.citations.length);
+  assert.equal(revision.citations.every(({ fileId: citationFile, section }) => citationFile === fileId && String(section).includes(chunkId)), true);
+  assert.equal(revision.citations.some(({ citationId }) => citationId === "evidence-attribute-casting-time-1"), true);
   assert.equal((submitted as { expectedActiveRevisionId: string | null }).expectedActiveRevisionId, null, "explicit absence is captured");
   assert.ok(statements.some((sql) => sql.includes("INSERT INTO compendium_import_candidate_reviews")));
   assert.ok(statements.some((sql) => sql.includes("INSERT INTO compendium_import_review_audit")));
@@ -126,8 +160,13 @@ test("a stale page token is returned, persisted, and submitted without click-tim
   const service = new CompendiumImportReviewService(async (callback) => callback(db), {
     publish: async (input) => { submittedToken = input.expectedActiveRevisionId; return { commandPath: "/spool/command", existing: false }; },
     unpublish: async () => { throw new Error("unused"); },
-  }, async (entryIds) => { reads++; return new Map(entryIds.map((entryId) => [entryId, canonicalToken])); });
+  }, async (entryIds) => {
+    reads++;
+    assert.deepEqual(entryIds, ["spell-burning-hands"]);
+    return new Map(entryIds.map((entryId) => [entryId, canonicalToken]));
+  });
   const displayed = await service.getRun(admin, runId);
+  assert.equal(displayed.candidates[0].entryId, "spell-burning-hands");
   assert.equal(displayed.candidates[0].activeRevisionToken, activeRevision);
   canonicalToken = `rev-${"c".repeat(64)}`;
   await service.act(admin, runId, { candidateIds: [candidateId], action: "approve", activeRevisionTokens: { [candidateId]: displayed.candidates[0].activeRevisionToken } });
@@ -198,7 +237,10 @@ test("only a worker-terminal failure permits a new attempt with the newly displa
 test("bulk publication submits each candidate's displayed token", async () => {
   const secondToken = `rev-${"e".repeat(64)}`;
   const submitted = new Map<string, string | null>();
-  const candidates = [candidate(), candidate({ id: secondCandidateId, candidate_key: "shield" })];
+  const candidates = [
+    candidate({ content: spellShield, candidate_key: "shield", ...chunkFields(spellShieldText) }),
+    candidate({ id: secondCandidateId, content: equipmentShield, entry_type: "equipment", candidate_key: "shield", ...chunkFields(equipmentShieldText, secondChunkId) }),
+  ];
   const db = { async query(sql: string) {
     if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: candidates };
     if (sql.includes("FROM sources source LEFT JOIN files")) return { rows: [source()] };
@@ -215,5 +257,94 @@ test("bulk publication submits each candidate's displayed token", async () => {
     candidateIds: [candidateId, secondCandidateId], action: "approve",
     activeRevisionTokens: { [candidateId]: null, [secondCandidateId]: secondToken },
   });
-  assert.deepEqual(Object.fromEntries(submitted), { "magic-missile": null, shield: secondToken });
+  assert.deepEqual(Object.fromEntries(submitted), { "spell-shield": null, "equipment-shield": secondToken });
+});
+
+test("typed candidates receive independent canonical CAS lookups", async () => {
+  const candidates = [
+    candidate({ content: spellShield, candidate_key: "shield", ...chunkFields(spellShieldText) }),
+    candidate({ id: secondCandidateId, content: equipmentShield, entry_type: "equipment", candidate_key: "shield", ...chunkFields(equipmentShieldText, secondChunkId) }),
+  ];
+  const db = { async query(sql: string) {
+    if (sql.includes("FROM compendium_import_runs run JOIN sources")) return { rows: [{
+      id: runId, source_id: firstSourceId(), source_title: "Source", file_id: fileId, status: "succeeded",
+      created_at: "2026-08-06T00:00:00Z", finished_at: "2026-08-06T00:01:00Z", candidate_count: 2,
+      new_count: 2, unchanged_count: 0, changed_count: 0, missing_count: 0, duplicate_count: 0,
+      invalid_count: 0, diagnostic_count: 0, pending_review_count: 2, failed_publication_count: 0,
+    }] };
+    if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: candidates };
+    return { rows: [] };
+  } };
+  const service = new CompendiumImportReviewService(async (callback) => callback(db), {
+    publish: async () => { throw new Error("unused"); }, unpublish: async () => { throw new Error("unused"); },
+  }, async (entryIds) => {
+    assert.deepEqual(new Set(entryIds), new Set(["spell-shield", "equipment-shield"]));
+    return new Map([["spell-shield", activeRevision], ["equipment-shield", null]]);
+  });
+  const displayed = await service.getRun(admin, runId);
+  assert.deepEqual(displayed.candidates.map(({ entryId, activeRevisionToken }) => [entryId, activeRevisionToken]), [
+    ["spell-shield", activeRevision], ["equipment-shield", null],
+  ]);
+});
+
+test("unsupported extracted attribute projection is rejected before review or queue", async () => {
+  let submitted = false;
+  const row = candidate({
+    content: unsupportedEquipment, entry_type: "equipment", candidate_key: unsupportedEquipment.candidateKey,
+    ...chunkFields(unsupportedEquipmentText, secondChunkId),
+  });
+  const db = { async query(sql: string) {
+    if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: [row] };
+    if (sql.includes("FROM sources source LEFT JOIN files")) return { rows: [source()] };
+    return { rows: [], rowCount: 1 };
+  } };
+  const service = new CompendiumImportReviewService(async (callback) => callback(db), {
+    publish: async () => { submitted = true; throw new Error("must not submit"); },
+    unpublish: async () => { throw new Error("unused"); },
+  }, async () => new Map());
+  await assert.rejects(
+    service.act(admin, runId, { candidateIds: [candidateId], action: "approve", activeRevisionTokens: { [candidateId]: null } }),
+    /cannot be represented without changing its evidence semantics/,
+  );
+  assert.equal(submitted, false);
+});
+
+test("projection converts #77 code-point evidence into exact canonical citation offsets", async () => {
+  let revision: { text: { plain: string }; citations: Array<{ quote: string; startOffset: number; endOffset: number }> } | null = null;
+  const row = candidate({
+    content: astralSpell, candidate_key: astralSpell.candidateKey,
+    ...chunkFields(astralFixtureText, astralChunkId),
+  });
+  const db = { async query(sql: string) {
+    if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: [row] };
+    if (sql.includes("FROM sources source LEFT JOIN files")) return { rows: [source()] };
+    return { rows: [], rowCount: 1 };
+  } };
+  const service = new CompendiumImportReviewService(async (callback) => callback(db), {
+    publish: async (input) => { revision = input.revision; return { commandPath: "/spool/astral", existing: false }; },
+    unpublish: async () => { throw new Error("unused"); },
+  }, async () => new Map());
+  await service.act(admin, runId, { candidateIds: [candidateId], action: "approve", activeRevisionTokens: { [candidateId]: null } });
+  assert.ok(revision);
+  for (const citation of revision.citations) {
+    assert.equal(revision.text.plain.slice(citation.startOffset, citation.endOffset), citation.quote);
+  }
+});
+
+test("unpublication uses the same type-qualified identity as projection and CAS lookup", async () => {
+  let target: string | null = null;
+  const row = candidate({
+    content: equipmentShield, entry_type: "equipment", candidate_key: "shield", diff_status: "missing",
+    occurrence_id: null, ...chunkFields(equipmentShieldText, secondChunkId),
+  });
+  const db = { async query(sql: string) {
+    if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: [row] };
+    return { rows: [], rowCount: 1 };
+  } };
+  const service = new CompendiumImportReviewService(async (callback) => callback(db), {
+    publish: async () => { throw new Error("unused"); },
+    unpublish: async (input) => { target = input.entryId; return { commandPath: "/spool/unpublish", existing: false }; },
+  }, async () => { throw new Error("mutation must not read canonical state"); });
+  await service.act(admin, runId, { candidateIds: [candidateId], action: "unpublish", activeRevisionTokens: { [candidateId]: activeRevision } });
+  assert.equal(target, "equipment-shield");
 });
