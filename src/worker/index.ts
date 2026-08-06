@@ -20,6 +20,7 @@ import {
 import { reconcilePublicationOutbox } from "../server/content-storage/publication-command.ts";
 import { getDataRoot } from "../server/content-storage/repository.ts";
 import { processPublicationReservation } from "./publication/processor.ts";
+import { CandidateExtractionService } from "../server/compendium/candidate-extraction.ts";
 
 const POLL_INTERVAL_SECONDS = 5;
 const MAX_CONSECUTIVE_ERRORS = 10;
@@ -111,6 +112,21 @@ async function runWorker(): Promise<void> {
           `Chunks: ${result.chunksPersisted}, Pages: ${result.pagesPersisted}, ` +
           `Quality: ${result.qualityReport.overall.status} (${result.qualityReport.overall.score}/100)`,
         );
+        try {
+          const extraction = await new CandidateExtractionService().run({
+            generationId: result.generationId,
+            actor: `worker:${job.id}`,
+          });
+          console.log(
+            `[worker] Candidate extraction ${extraction.runId} completed. ` +
+            `Candidates: ${extraction.candidates.length}, rejected model outputs: ${extraction.rejections.length}.`,
+          );
+        } catch (error) {
+          console.error(
+            `[worker] Candidate extraction for generation ${result.generationId} failed without changing ingestion or publication state:`,
+            error instanceof Error ? error.message : error,
+          );
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`[worker] Job ${job.id} failed:`, message);

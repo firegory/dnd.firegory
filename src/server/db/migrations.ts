@@ -9,7 +9,8 @@ export const MIGRATION_FILENAMES = [
   "0008_resumable_compendium_imports.sql",
   // 0009 remains intentionally unused after issue #81.
   "0010_nfs_content_index_sync.sql",
-  // 0011-0012 are reserved by parallel compendium work.
+  "0011_compendium_candidate_identity.sql",
+  // 0012 remains reserved by parallel compendium work.
   "0013_compendium_import_review.sql",
 ] as const;
 
