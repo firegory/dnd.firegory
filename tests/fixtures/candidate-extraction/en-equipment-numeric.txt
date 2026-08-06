@@ -1,0 +1,5 @@
+Adventuring Gear
+| Name | Cost | Weight |
+| --- | --- | --- |
+| Spyglass | 1,000 gp | 1/2 lb. |
+| Chalk | 1/2 gp | 1 1/2 lb. |

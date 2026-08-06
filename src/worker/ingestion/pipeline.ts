@@ -48,6 +48,7 @@ export type PipelineResult = Readonly<{
   jobId: string;
   sourceId: string;
   fileId: string;
+  generationId: string;
   artifactsRoot: string;
   qualityReport: QualityReport;
   chunksPersisted: number;
@@ -397,6 +398,7 @@ export async function runPipeline(input: {
       jobId,
       sourceId,
       fileId,
+      generationId: stagedGenerationId,
       artifactsRoot,
       qualityReport,
       chunksPersisted,
