@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS nfs_index_sync_runs (
   repository_id text NOT NULL,
   mode nfs_index_sync_mode NOT NULL,
   manifest_hash text NOT NULL,
+  projection_hash text NOT NULL,
+  projector_version integer NOT NULL,
   repository_generation text,
   status nfs_index_sync_status NOT NULL DEFAULT 'staging',
   planned_additions integer NOT NULL,
@@ -25,26 +27,51 @@ CREATE TABLE IF NOT EXISTS nfs_index_sync_runs (
   finished_at timestamptz,
   CHECK (btrim(repository_id) <> ''),
   CHECK (manifest_hash ~ '^sha256:[0-9a-f]{64}$'),
+  CHECK (projection_hash ~ '^sha256:[0-9a-f]{64}$'),
+  CHECK (projector_version > 0),
   CHECK (repository_generation IS NULL OR repository_generation ~ '^[0-9]{32}$'),
   CHECK (planned_additions >= 0 AND planned_updates >= 0 AND planned_removals >= 0),
   CHECK (staged_entries >= 0),
   CHECK ((status IN ('succeeded', 'failed')) = (finished_at IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS nfs_index_sync_runs_resume_idx
-  ON nfs_index_sync_runs(repository_id, manifest_hash, mode, created_at DESC)
-  WHERE status IN ('staging', 'failed');
+  ON nfs_index_sync_runs(repository_id, projection_hash, mode, created_at DESC)
+  WHERE status = 'staging';
+CREATE UNIQUE INDEX IF NOT EXISTS nfs_index_sync_runs_one_inflight_repository_idx
+  ON nfs_index_sync_runs(repository_id)
+  WHERE status IN ('staging', 'applying');
+
+CREATE OR REPLACE FUNCTION nfs_index_guard_sync_status() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.status IN ('succeeded', 'failed') AND NEW.status <> OLD.status THEN
+    RAISE EXCEPTION 'terminal NFS index sync status is immutable';
+  END IF;
+  IF OLD.status = 'applying' AND NEW.status NOT IN ('applying', 'succeeded', 'failed') THEN
+    RAISE EXCEPTION 'NFS index sync status cannot move backwards from applying';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS nfs_index_sync_status_monotonic ON nfs_index_sync_runs;
+CREATE TRIGGER nfs_index_sync_status_monotonic
+BEFORE UPDATE OF status ON nfs_index_sync_runs
+FOR EACH ROW EXECUTE FUNCTION nfs_index_guard_sync_status();
 
 CREATE TABLE IF NOT EXISTS nfs_index_sync_staging (
   run_id uuid NOT NULL REFERENCES nfs_index_sync_runs(id) ON DELETE CASCADE,
   entry_id text NOT NULL,
   ordinal integer NOT NULL,
   revision_id text NOT NULL,
+  projector_version integer NOT NULL,
+  payload_hash text NOT NULL,
   payload jsonb NOT NULL,
   PRIMARY KEY (run_id, entry_id),
   UNIQUE (run_id, ordinal),
   CHECK (btrim(entry_id) <> ''),
   CHECK (ordinal >= 0),
   CHECK (revision_id ~ '^rev-[0-9a-f]{64}$'),
+  CHECK (projector_version > 0),
+  CHECK (payload_hash ~ '^sha256:[0-9a-f]{64}$'),
   CHECK (jsonb_typeof(payload) = 'object')
 );
 

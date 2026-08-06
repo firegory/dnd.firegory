@@ -16,5 +16,11 @@ test("NFS index sync uses reserved migration 0010 and explicit managed ownership
     "nfs_index_managed_files",
     "nfs_index_entries",
   ]) assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`));
+  assert.match(sql, /projection_hash text NOT NULL/);
+  assert.match(sql, /projector_version integer NOT NULL/);
+  assert.match(sql, /payload_hash text NOT NULL/);
+  assert.match(sql, /nfs_index_sync_runs_one_inflight_repository_idx[\s\S]*WHERE status IN \('staging', 'applying'\)/);
+  assert.match(sql, /terminal NFS index sync status is immutable/);
+  assert.match(sql, /cannot move backwards from applying/);
   assert.doesNotMatch(sql, /\b(?:users|sessions|search_events|rag_events)\b/);
 });

@@ -3,12 +3,26 @@ import { basename } from "node:path";
 
 import type { CanonicalRevision, ContentSource, JsonValue } from "../content-storage/repository.ts";
 import { canonicalJson } from "../content-storage/repository.ts";
+import type { ValidatedSourceFile } from "../content-storage/validation.ts";
 import { chunkPage } from "../../worker/ingestion/chunking.ts";
 
+export const CONTENT_INDEX_PROJECTOR_VERSION = 2 as const;
+
 type Citation = Readonly<{
+  citationId: string;
   fileId: string;
   page: number;
   section: string;
+  quote: string;
+  startOffset: number;
+  endOffset: number;
+}>;
+
+export type IndexedCitation = Readonly<{
+  citationId: string;
+  page: number;
+  section: string;
+  quote: string;
   startOffset: number;
   endOffset: number;
 }>;
@@ -45,12 +59,12 @@ export type IndexedEntryProjection = Readonly<{
   plainText: string;
   canonicalPayload: CanonicalRevision;
   source: ContentSource;
-  file: ContentSource["files"][number];
+  file: ContentSource["files"][number] & Readonly<{ byteSize: number }>;
   sourceUuid: string;
   fileUuid: string;
   generationId: string;
   documentId: string;
-  pages: readonly Readonly<{ pageNumber: number; text: string }>[];
+  pages: readonly Readonly<{ pageNumber: number; text: string; citations: readonly IndexedCitation[] }>[];
   chunks: readonly IndexedChunk[];
 }>;
 
@@ -65,11 +79,17 @@ export function deterministicUuid(namespace: string, ...parts: readonly string[]
 export function projectCanonicalRevisions(
   repositoryId: string,
   revisions: readonly CanonicalRevision[],
+  sourceFiles: readonly ValidatedSourceFile[],
 ): readonly IndexedEntryProjection[] {
   const sorted = [...revisions].sort((left, right) => left.entryId.localeCompare(right.entryId));
   const fileRevisionIds = new Map<string, string[]>();
   for (const revision of sorted) {
-    const citation = (revision.citations as readonly unknown[])[0] as Citation;
+    const citations = revision.citations as unknown as readonly Citation[];
+    const citedFileIds = new Set(citations.map((citation) => citation.fileId));
+    if (citedFileIds.size !== 1) {
+      throw new Error(`Revision ${revision.revisionId} cites multiple source files; projector version ${CONTENT_INDEX_PROJECTOR_VERSION} requires one cited file`);
+    }
+    const citation = citations[0];
     const key = `${revision.source.sourceId}/${citation.fileId}`;
     fileRevisionIds.set(key, [...(fileRevisionIds.get(key) ?? []), revision.revisionId]);
   }
@@ -79,11 +99,16 @@ export function projectCanonicalRevisions(
     const citations = revision.citations as unknown as readonly Citation[];
     const sections = revision.text.sections as unknown as readonly Section[];
     const primaryCitation = citations[0];
-    const file = revision.source.files.find((candidate) => candidate.fileId === primaryCitation.fileId);
-    if (!file) throw new Error(`Revision ${revision.revisionId} has no primary source file`);
+    const declaredFile = revision.source.files.find((candidate) => candidate.fileId === primaryCitation.fileId);
+    const capturedFile = sourceFiles.find((candidate) =>
+      candidate.sourceId === revision.source.sourceId && candidate.fileId === primaryCitation.fileId
+    );
+    if (!declaredFile || !capturedFile) throw new Error(`Revision ${revision.revisionId} has no captured cited source file`);
+    const file = { ...declaredFile, byteSize: capturedFile.byteSize };
     const fileKey = `${revision.source.sourceId}/${file.fileId}`;
     const generationId = deterministicUuid(
       "nfs-index-generation",
+      String(CONTENT_INDEX_PROJECTOR_VERSION),
       repositoryId,
       fileKey,
       ...(fileRevisionIds.get(fileKey) ?? []).sort(),
@@ -129,6 +154,9 @@ export function projectCanonicalRevisions(
             entryId: revision.entryId,
             revisionId: revision.revisionId,
             sectionId: section.sectionId,
+            citations: citations.filter((candidate) =>
+              candidate.startOffset < textSpanEnd && candidate.endOffset > textSpanStart
+            ).map(indexedCitation),
           },
         });
       }
@@ -159,19 +187,43 @@ export function projectCanonicalRevisions(
         text: [...new Set(pageCitations.map((citation) =>
           String(revision.text.plain).slice(citation.startOffset, citation.endOffset)
         ))].join("\n"),
+        citations: pageCitations.map(indexedCitation),
       })),
       chunks,
     };
   });
 }
 
-export function projectionHash(repositoryId: string, revisions: readonly CanonicalRevision[]): string {
-  const identity = revisions
-    .map((revision) => ({ entryId: revision.entryId, revisionId: revision.revisionId, contentHash: revision.contentHash }))
-    .sort((left, right) => left.entryId.localeCompare(right.entryId));
-  return `sha256:${createHash("sha256").update(canonicalJson({ repositoryId, entries: identity } as JsonValue)).digest("hex")}`;
+export function projectionHash(repositoryId: string, projections: readonly IndexedEntryProjection[]): string {
+  return contentProjectionHash({
+    projectorVersion: CONTENT_INDEX_PROJECTOR_VERSION,
+    repositoryId,
+    entries: projections,
+  });
+}
+
+export function entryProjectionHash(projection: IndexedEntryProjection): string {
+  return contentProjectionHash({
+    projectorVersion: CONTENT_INDEX_PROJECTOR_VERSION,
+    projection,
+  });
 }
 
 export function sourceFilename(path: string): string {
   return basename(path);
+}
+
+function indexedCitation(citation: Citation): IndexedCitation {
+  return {
+    citationId: citation.citationId,
+    page: citation.page,
+    section: citation.section,
+    quote: citation.quote,
+    startOffset: citation.startOffset,
+    endOffset: citation.endOffset,
+  };
+}
+
+function contentProjectionHash(value: JsonValue): string {
+  return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
 }

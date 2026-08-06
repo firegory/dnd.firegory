@@ -1,5 +1,3 @@
-import { stat } from "node:fs/promises";
-import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { PoolClient, QueryResult, QueryResultRow } from "pg";
@@ -9,6 +7,8 @@ import { getDataRoot } from "../content-storage/repository.ts";
 import { loadResolvedCanonicalRevisions } from "../content-storage/validation.ts";
 import {
   deterministicUuid,
+  CONTENT_INDEX_PROJECTOR_VERSION,
+  entryProjectionHash,
   projectCanonicalRevisions,
   projectionHash,
   sourceFilename,
@@ -36,7 +36,13 @@ export type SyncResult = Readonly<{
   runId: string | null;
 }>;
 
-type ActiveRow = { entry_id: string; revision_id: string; content_hash: string; file_id: string };
+type ActiveRow = {
+  entry_id: string;
+  revision_id: string;
+  content_hash: string;
+  file_id: string;
+  generation_id?: string;
+};
 
 export type SyncDependencies = Readonly<{
   execute?: typeof query;
@@ -54,8 +60,8 @@ export async function synchronizeContentIndex(input: Readonly<{
   // and source-file hash before the first database query or mutation.
   const resolved = await loadResolvedCanonicalRevisions(dataRoot);
   const repositoryId = resolved.manifest.repositoryId;
-  const projections = projectCanonicalRevisions(repositoryId, resolved.revisions);
-  const manifestHash = projectionHash(repositoryId, resolved.revisions);
+  const projections = projectCanonicalRevisions(repositoryId, resolved.revisions, resolved.sourceFiles);
+  const manifestHash = projectionHash(repositoryId, projections);
   const emptyPlan: SyncPlan = { additions: [], updates: [], removals: [] };
 
   if (input.mode === "validate") {
@@ -64,7 +70,7 @@ export async function synchronizeContentIndex(input: Readonly<{
 
   const execute = dependencies.execute ?? query;
   const activeResult = await execute<ActiveRow>(
-    `SELECT entry_id, revision_id, content_hash, file_id
+    `SELECT entry_id, revision_id, content_hash, file_id, generation_id
      FROM nfs_index_entries
      WHERE repository_id = $1 AND lifecycle = 'active'
      ORDER BY entry_id`,
@@ -76,30 +82,46 @@ export async function synchronizeContentIndex(input: Readonly<{
     return { mode: input.mode, repositoryId, manifestHash, generation: resolved.generation, plan, dryRun: Boolean(input.dryRun), resumed: false, runId: null };
   }
 
-  const run = await findOrCreateRun(execute, {
+  const run = await claimContentIndexRun(execute, {
     repositoryId,
     manifestHash,
     generation: resolved.generation,
     mode: input.mode,
     plan,
   });
-  const staged = await execute<{ entry_id: string }>(
-    "SELECT entry_id FROM nfs_index_sync_staging WHERE run_id = $1",
+  const staged = await execute<{ entry_id: string; payload_hash: string; projector_version: number }>(
+    "SELECT entry_id, payload_hash, projector_version FROM nfs_index_sync_staging WHERE run_id = $1",
     [run.id],
   );
+  const projectionByEntry = new Map(projections.map((projection) => [projection.entryId, projection]));
+  for (const checkpoint of staged.rows) {
+    const projection = projectionByEntry.get(checkpoint.entry_id);
+    if (
+      !projection
+      || checkpoint.projector_version !== CONTENT_INDEX_PROJECTOR_VERSION
+      || checkpoint.payload_hash !== entryProjectionHash(projection)
+    ) {
+      await execute(
+        `UPDATE nfs_index_sync_runs SET status = 'failed',
+           error_summary = 'Persisted projection checkpoint failed integrity validation',
+           finished_at = now(), updated_at = now()
+         WHERE id = $1 AND status = 'staging'`,
+        [run.id],
+      );
+      throw new Error(`Persisted checkpoint for ${checkpoint.entry_id} does not match the freshly validated projection`);
+    }
+  }
   const alreadyStaged = new Set(staged.rows.map((row) => row.entry_id));
   let stagedEntries = alreadyStaged.size;
-  await execute(
-    "UPDATE nfs_index_sync_runs SET status = 'staging', error_summary = NULL, finished_at = NULL, updated_at = now() WHERE id = $1",
-    [run.id],
-  );
   for (const [ordinal, projection] of projections.entries()) {
     if (alreadyStaged.has(projection.entryId)) continue;
     await execute(
-      `INSERT INTO nfs_index_sync_staging (run_id, entry_id, ordinal, revision_id, payload)
-       VALUES ($1, $2, $3, $4, $5::jsonb)
+      `INSERT INTO nfs_index_sync_staging
+         (run_id, entry_id, ordinal, revision_id, projector_version, payload_hash, payload)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
        ON CONFLICT (run_id, entry_id) DO NOTHING`,
-      [run.id, projection.entryId, ordinal, projection.revisionId, JSON.stringify(projection)],
+      [run.id, projection.entryId, ordinal, projection.revisionId, CONTENT_INDEX_PROJECTOR_VERSION,
+        entryProjectionHash(projection), JSON.stringify(projection)],
     );
     const checkpoint = await execute<{ count: string }>(
       "SELECT count(*)::text AS count FROM nfs_index_sync_staging WHERE run_id = $1",
@@ -107,7 +129,7 @@ export async function synchronizeContentIndex(input: Readonly<{
     );
     stagedEntries = Number(checkpoint.rows[0]?.count ?? stagedEntries);
     await execute(
-      "UPDATE nfs_index_sync_runs SET staged_entries = $2, status = 'staging', error_summary = NULL, finished_at = NULL, updated_at = now() WHERE id = $1",
+      "UPDATE nfs_index_sync_runs SET staged_entries = $2, updated_at = now() WHERE id = $1 AND status = 'staging'",
       [run.id, stagedEntries],
     );
     await dependencies.afterCheckpoint?.(projection.entryId, stagedEntries);
@@ -115,11 +137,12 @@ export async function synchronizeContentIndex(input: Readonly<{
 
   try {
     await (dependencies.transaction ?? withTransaction)(async (client) => {
-      await applySnapshot(client, dataRoot, repositoryId, run.id, projections, plan, activeResult.rows);
+      await applySnapshot(client, repositoryId, run.id, projections, plan, activeResult.rows);
     });
   } catch (error) {
     await execute(
-      "UPDATE nfs_index_sync_runs SET status = 'failed', error_summary = $2, finished_at = now(), updated_at = now() WHERE id = $1",
+      `UPDATE nfs_index_sync_runs SET status = 'failed', error_summary = $2, finished_at = now(), updated_at = now()
+       WHERE id = $1 AND status IN ('staging', 'applying')`,
       [run.id, error instanceof Error ? error.message : String(error)],
     );
     throw error;
@@ -130,8 +153,9 @@ export async function synchronizeContentIndex(input: Readonly<{
 
 export function buildSyncPlan(
   mode: SyncMode,
-  desired: readonly Pick<IndexedEntryProjection, "entryId" | "revisionId" | "contentHash">[],
-  active: readonly Pick<ActiveRow, "entry_id" | "revision_id" | "content_hash">[],
+  desired: readonly (Pick<IndexedEntryProjection, "entryId" | "revisionId" | "contentHash">
+    & Partial<Pick<IndexedEntryProjection, "generationId">>)[],
+  active: readonly Pick<ActiveRow, "entry_id" | "revision_id" | "content_hash" | "generation_id">[],
 ): SyncPlan {
   const current = new Map(active.map((entry) => [entry.entry_id, entry]));
   const wanted = new Set(desired.map((entry) => entry.entryId));
@@ -140,41 +164,58 @@ export function buildSyncPlan(
   for (const entry of desired) {
     const existing = current.get(entry.entryId);
     if (!existing) additions.push(entry.entryId);
-    else if (mode === "clean" || existing.revision_id !== entry.revisionId || existing.content_hash !== entry.contentHash) updates.push(entry.entryId);
+    else if (
+      mode === "clean"
+      || existing.revision_id !== entry.revisionId
+      || existing.content_hash !== entry.contentHash
+      || (entry.generationId !== undefined && existing.generation_id !== entry.generationId)
+    ) updates.push(entry.entryId);
   }
   const removals = active.filter((entry) => !wanted.has(entry.entry_id)).map((entry) => entry.entry_id);
   return { additions, updates, removals };
 }
 
-async function findOrCreateRun(execute: typeof query, input: Readonly<{
+export async function claimContentIndexRun(execute: typeof query, input: Readonly<{
   repositoryId: string;
   manifestHash: string;
   generation: string | null;
   mode: SyncMode;
   plan: SyncPlan;
 }>): Promise<{ id: string; resumed: boolean }> {
-  const existing = await execute<{ id: string }>(
-    `SELECT id FROM nfs_index_sync_runs
-     WHERE repository_id = $1 AND manifest_hash = $2 AND mode = $3 AND status IN ('staging', 'failed')
-     ORDER BY created_at DESC LIMIT 1`,
-    [input.repositoryId, input.manifestHash, input.mode],
-  );
-  if (existing.rows[0]) return { id: existing.rows[0].id, resumed: true };
   const id = randomUUID();
-  await execute(
-    `INSERT INTO nfs_index_sync_runs
-       (id, repository_id, mode, manifest_hash, repository_generation, status,
-        planned_additions, planned_updates, planned_removals)
-     VALUES ($1, $2, $3, $4, $5, 'staging', $6, $7, $8)`,
-    [id, input.repositoryId, input.mode, input.manifestHash, input.generation,
-      input.plan.additions.length, input.plan.updates.length, input.plan.removals.length],
+  const claimed = await execute<{ id: string; projection_hash: string; mode: SyncMode; resumed: boolean }>(
+    `WITH inserted AS (
+       INSERT INTO nfs_index_sync_runs
+         (id, repository_id, mode, manifest_hash, projection_hash, projector_version,
+          repository_generation, status, planned_additions, planned_updates, planned_removals)
+       VALUES ($1, $2, $3, $4, $4, $5, $6, 'staging', $7, $8, $9)
+       ON CONFLICT DO NOTHING
+       RETURNING id, projection_hash, mode
+     )
+     SELECT id, projection_hash, mode, false AS resumed FROM inserted
+     UNION ALL
+     SELECT id, projection_hash, mode, true AS resumed
+     FROM nfs_index_sync_runs
+     WHERE repository_id = $2 AND status = 'staging'
+     ORDER BY resumed
+     LIMIT 1`,
+    [id, input.repositoryId, input.mode, input.manifestHash, CONTENT_INDEX_PROJECTOR_VERSION,
+      input.generation, input.plan.additions.length, input.plan.updates.length, input.plan.removals.length],
   );
-  return { id, resumed: false };
+  const row = claimed.rows[0] ?? (await execute<{ id: string; projection_hash: string; mode: SyncMode }>(
+    `SELECT id, projection_hash, mode FROM nfs_index_sync_runs
+     WHERE repository_id = $1 AND status = 'staging'`,
+    [input.repositoryId],
+  )).rows[0];
+  if (!row) throw new Error(`Could not atomically claim NFS index synchronization for ${input.repositoryId}`);
+  if (row.projection_hash !== input.manifestHash || row.mode !== input.mode) {
+    throw new Error(`Another NFS index synchronization is already in flight for ${input.repositoryId}`);
+  }
+  return { id: row.id, resumed: "resumed" in row ? row.resumed : true };
 }
 
 async function applySnapshot(
   client: PoolClient,
-  dataRoot: string,
   repositoryId: string,
   runId: string,
   projections: readonly IndexedEntryProjection[],
@@ -182,8 +223,14 @@ async function applySnapshot(
   active: readonly ActiveRow[],
 ): Promise<void> {
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`nfs-index:${repositoryId}`]);
+  const run = await client.query<{ status: "staging" | "applying" | "succeeded" | "failed" }>(
+    "SELECT status FROM nfs_index_sync_runs WHERE id = $1 FOR UPDATE",
+    [runId],
+  );
+  if (run.rows[0]?.status === "succeeded") return;
+  if (run.rows[0]?.status !== "staging") throw new Error(`NFS index sync run ${runId} is not claimable`);
   const lockedActive = await client.query<ActiveRow>(
-    `SELECT entry_id, revision_id, content_hash, file_id
+    `SELECT entry_id, revision_id, content_hash, file_id, generation_id
      FROM nfs_index_entries
      WHERE repository_id = $1 AND lifecycle = 'active'
      ORDER BY entry_id FOR UPDATE`,
@@ -192,31 +239,34 @@ async function applySnapshot(
   if (JSON.stringify(lockedActive.rows) !== JSON.stringify(active)) {
     throw new Error("Active NFS index changed while this snapshot was staged; restart synchronization");
   }
-  const staged = await client.query<{ payload: IndexedEntryProjection }>(
-    "SELECT payload FROM nfs_index_sync_staging WHERE run_id = $1 ORDER BY ordinal FOR UPDATE",
+  const staged = await client.query<{ entry_id: string; payload_hash: string; projector_version: number }>(
+    `SELECT entry_id, payload_hash, projector_version
+     FROM nfs_index_sync_staging WHERE run_id = $1 ORDER BY ordinal FOR UPDATE`,
     [runId],
   );
   if (
     staged.rows.length !== projections.length
     || staged.rows.some((row, index) =>
-      row.payload.entryId !== projections[index].entryId
-      || row.payload.revisionId !== projections[index].revisionId
-      || row.payload.contentHash !== projections[index].contentHash
+      row.entry_id !== projections[index].entryId
+      || row.projector_version !== CONTENT_INDEX_PROJECTOR_VERSION
+      || row.payload_hash !== entryProjectionHash(projections[index])
     )
   ) {
     throw new Error("Persisted NFS index staging checkpoint does not match the validated canonical snapshot");
   }
-  const stagedProjections = staged.rows.map((row) => row.payload);
-  await client.query("UPDATE nfs_index_sync_runs SET status = 'applying', updated_at = now() WHERE id = $1", [runId]);
+  await client.query(
+    "UPDATE nfs_index_sync_runs SET status = 'applying', updated_at = now() WHERE id = $1 AND status = 'staging'",
+    [runId],
+  );
 
-  const desiredByFile = Map.groupBy(stagedProjections, (entry) => entry.fileUuid);
+  const desiredByFile = Map.groupBy(projections, (entry) => entry.fileUuid);
   const changedEntries = new Set([...plan.additions, ...plan.updates, ...plan.removals]);
   const affectedFiles = new Set(active.filter((entry) => changedEntries.has(entry.entry_id)).map((entry) => entry.file_id));
-  for (const entry of stagedProjections) if (changedEntries.has(entry.entryId)) affectedFiles.add(entry.fileUuid);
+  for (const entry of projections) if (changedEntries.has(entry.entryId)) affectedFiles.add(entry.fileUuid);
 
   for (const entries of desiredByFile.values()) {
     if (!affectedFiles.has(entries[0].fileUuid)) continue;
-    await upsertManagedSourceAndFile(client, dataRoot, repositoryId, entries[0]);
+    await upsertManagedSourceAndFile(client, repositoryId, entries[0]);
     await activateManagedGeneration(client, entries[0]);
     await upsertFileIndexRows(client, repositoryId, entries);
   }
@@ -244,14 +294,14 @@ async function applySnapshot(
     [repositoryId],
   );
   await client.query(
-    "UPDATE nfs_index_sync_runs SET status = 'succeeded', error_summary = NULL, finished_at = now(), updated_at = now() WHERE id = $1",
+    `UPDATE nfs_index_sync_runs SET status = 'succeeded', error_summary = NULL, finished_at = now(), updated_at = now()
+     WHERE id = $1 AND status = 'applying'`,
     [runId],
   );
 }
 
 async function upsertManagedSourceAndFile(
   client: Queryable,
-  dataRoot: string,
   repositoryId: string,
   entry: IndexedEntryProjection,
 ): Promise<void> {
@@ -300,8 +350,6 @@ async function upsertManagedSourceAndFile(
      VALUES ($1,$2,$3) ON CONFLICT (source_id) DO NOTHING`,
     [entry.sourceUuid, repositoryId, source.sourceId],
   );
-  const filePath = resolve(dataRoot, entry.file.path);
-  const size = (await stat(filePath)).size;
   await client.query(
     `INSERT INTO files
        (id, source_id, original_filename, mime_type, checksum_sha256, byte_size, storage_path, deleted_at)
@@ -310,7 +358,7 @@ async function upsertManagedSourceAndFile(
        mime_type=EXCLUDED.mime_type, checksum_sha256=EXCLUDED.checksum_sha256,
        byte_size=EXCLUDED.byte_size, storage_path=EXCLUDED.storage_path, deleted_at=NULL`,
     [entry.fileUuid, entry.sourceUuid, sourceFilename(entry.file.path), entry.file.mediaType,
-      entry.file.contentHash.slice("sha256:".length), size, entry.file.path],
+      entry.file.contentHash.slice("sha256:".length), entry.file.byteSize, entry.file.path],
   );
   await client.query(
     `INSERT INTO nfs_index_managed_files (file_id, source_id, repository_id, canonical_file_id)
@@ -340,7 +388,9 @@ async function upsertFileIndexRows(
   entries: readonly IndexedEntryProjection[],
 ): Promise<void> {
   const first = entries[0];
+  await reconcileManagedProjectionRows(client, repositoryId, entries);
   const pages = new Map<number, string[]>();
+  const pageCitations = new Map<number, IndexedEntryProjection["pages"][number]["citations"]>();
   for (const entry of entries) {
     await client.query(
       `INSERT INTO documents (id, source_id, file_id, generation_id, title, document_type, text, metadata)
@@ -349,7 +399,10 @@ async function upsertFileIndexRows(
       [entry.documentId, entry.sourceUuid, entry.fileUuid, entry.generationId, entry.name, entry.plainText,
         JSON.stringify({ managedBy: "nfs-content-index", repositoryId, entryId: entry.entryId, revisionId: entry.revisionId })],
     );
-    for (const page of entry.pages) pages.set(page.pageNumber, [...(pages.get(page.pageNumber) ?? []), page.text]);
+    for (const page of entry.pages) {
+      pages.set(page.pageNumber, [...(pages.get(page.pageNumber) ?? []), page.text]);
+      pageCitations.set(page.pageNumber, [...(pageCitations.get(page.pageNumber) ?? []), ...page.citations]);
+    }
   }
   const pageIds = new Map<number, string>();
   for (const [pageNumber, texts] of [...pages].sort(([left], [right]) => left - right)) {
@@ -360,7 +413,11 @@ async function upsertFileIndexRows(
        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
        ON CONFLICT (id) DO UPDATE SET text=EXCLUDED.text, metadata=EXCLUDED.metadata`,
       [pageId, first.sourceUuid, first.fileUuid, first.generationId, pageNumber,
-        [...new Set(texts)].join("\n\n"), JSON.stringify({ managedBy: "nfs-content-index", repositoryId })],
+        [...new Set(texts)].join("\n\n"), JSON.stringify({
+          managedBy: "nfs-content-index",
+          repositoryId,
+          citations: pageCitations.get(pageNumber) ?? [],
+        })],
     );
   }
   for (const entry of entries) {
@@ -397,4 +454,46 @@ async function upsertFileIndexRows(
         JSON.stringify(entry.canonicalPayload), entry.sourceUuid, entry.fileUuid, entry.generationId, entry.documentId],
     );
   }
+}
+
+export async function reconcileManagedProjectionRows(
+  client: Queryable,
+  repositoryId: string,
+  entries: readonly IndexedEntryProjection[],
+): Promise<void> {
+  const first = entries[0];
+  const desiredDocumentIds = entries.map((entry) => entry.documentId);
+  const desiredPageIds = [...new Set(entries.flatMap((entry) => entry.pages.map((page) =>
+    deterministicUuid("nfs-index-page", repositoryId, first.generationId, String(page.pageNumber))
+  )))];
+  const desiredChunkIds = entries.flatMap((entry) => entry.chunks.map((chunk) => chunk.id));
+  const collision = await client.query<{ unmanaged_collision: boolean }>(
+    `SELECT
+       EXISTS (SELECT 1 FROM documents WHERE id = ANY($1::uuid[]) AND metadata->>'managedBy' IS DISTINCT FROM 'nfs-content-index')
+       OR EXISTS (SELECT 1 FROM pages WHERE id = ANY($2::uuid[]) AND metadata->>'managedBy' IS DISTINCT FROM 'nfs-content-index')
+       OR EXISTS (SELECT 1 FROM chunks WHERE id = ANY($3::uuid[]) AND metadata->>'managedBy' IS DISTINCT FROM 'nfs-content-index')
+       AS unmanaged_collision`,
+    [desiredDocumentIds, desiredPageIds, desiredChunkIds],
+  );
+  if (collision.rows[0]?.unmanaged_collision) {
+    throw new Error(`Projection generation ${first.generationId} conflicts with unmanaged index rows`);
+  }
+  await client.query(
+    `DELETE FROM chunks
+     WHERE generation_id = $1 AND metadata->>'managedBy' = 'nfs-content-index'
+       AND NOT (id = ANY($2::uuid[]))`,
+    [first.generationId, desiredChunkIds],
+  );
+  await client.query(
+    `DELETE FROM pages
+     WHERE generation_id = $1 AND metadata->>'managedBy' = 'nfs-content-index'
+       AND NOT (id = ANY($2::uuid[]))`,
+    [first.generationId, desiredPageIds],
+  );
+  await client.query(
+    `DELETE FROM documents
+     WHERE generation_id = $1 AND metadata->>'managedBy' = 'nfs-content-index'
+       AND NOT (id = ANY($2::uuid[]))`,
+    [first.generationId, desiredDocumentIds],
+  );
 }
