@@ -15,6 +15,9 @@ import {
 } from "../access/retrieval-filter";
 import { buildSourceAccessSql } from "../access/access-sql";
 import { captureRetrievalSnapshot } from "../retrieval/snapshot";
+import { mapSearchChunk, type ChunkCitation, type SearchChunkRow } from "./map-chunk";
+
+export type { ChunkCitation } from "./map-chunk";
 
 export type SearchDependencies = Readonly<{
   captureSnapshot?: typeof captureRetrievalSnapshot;
@@ -27,21 +30,6 @@ export type SearchInput = Readonly<{
   selection?: RetrievalSelection;
   limit?: number;
   offset?: number;
-}>;
-
-export type ChunkCitation = Readonly<{
-  chunkId: string;
-  sourceId: string;
-  fileId: string;
-  text: string;
-  quoteText: string;
-  sectionHeading: string | null;
-  pageNumber: number | null;
-  edition: string;
-  language: string;
-  sourceTitle: string;
-  sourceCategory: string;
-  accessTier: string;
 }>;
 
 export type SearchResult = Readonly<{
@@ -59,16 +47,6 @@ type SourceRow = Readonly<{
   access_tier: string;
   shared: boolean;
   owner_user_id: string | null;
-}>;
-
-type ChunkRow = Readonly<{
-  id: string;
-  source_id: string;
-  file_id: string;
-  text: string;
-  quote_text: string;
-  section_heading: string | null;
-  page_number: number | null;
 }>;
 
 /**
@@ -117,7 +95,7 @@ export async function searchChunks(
   const total = parseInt(countResult.rows[0]?.count ?? "0", 10);
 
   // Data query — fetch chunks with source metadata in a single query
-  const chunkResult = await execute<ChunkRow & SourceRow>(
+  const chunkResult = await execute<SearchChunkRow & SourceRow>(
     `SELECT c.id, c.source_id, c.file_id, c.text, c.quote_text, c.section_heading, c.page_number,
             s.title, s.category, s.edition, s.language, s.access_tier
      FROM chunks c
@@ -132,20 +110,7 @@ export async function searchChunks(
     allParams,
   );
 
-  const chunks: ChunkCitation[] = chunkResult.rows.map((row) => ({
-    chunkId: row.id,
-    sourceId: row.source_id,
-    fileId: row.file_id,
-    text: row.text,
-    quoteText: row.quote_text,
-    sectionHeading: row.section_heading,
-    pageNumber: row.page_number,
-    edition: row.edition,
-    language: row.language,
-    sourceTitle: row.title,
-    sourceCategory: row.category,
-    accessTier: row.access_tier,
-  }));
+  const chunks: ChunkCitation[] = chunkResult.rows.map(mapSearchChunk);
 
   return {
     chunks,

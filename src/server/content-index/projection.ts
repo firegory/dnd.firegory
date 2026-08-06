@@ -6,7 +6,7 @@ import { canonicalJson } from "../content-storage/repository.ts";
 import type { ValidatedSourceFile } from "../content-storage/validation.ts";
 import { chunkPage } from "../../worker/ingestion/chunking.ts";
 
-export const CONTENT_INDEX_PROJECTOR_VERSION = 2 as const;
+export const CONTENT_INDEX_PROJECTOR_VERSION = 3 as const;
 
 type Citation = Readonly<{
   citationId: string;
@@ -89,6 +89,7 @@ export function projectCanonicalRevisions(
     if (citedFileIds.size !== 1) {
       throw new Error(`Revision ${revision.revisionId} cites multiple source files; projector version ${CONTENT_INDEX_PROJECTOR_VERSION} requires one cited file`);
     }
+    assertUnambiguousCitations(revision.revisionId, citations);
     const citation = citations[0];
     const key = `${revision.source.sourceId}/${citation.fileId}`;
     fileRevisionIds.set(key, [...(fileRevisionIds.get(key) ?? []), revision.revisionId]);
@@ -119,46 +120,51 @@ export function projectCanonicalRevisions(
     const chunks: IndexedChunk[] = [];
 
     for (const section of sections) {
-      const citation = citations.find((candidate) =>
-        candidate.fileId === file.fileId
-        && candidate.startOffset < section.endOffset
-        && candidate.endOffset > section.startOffset
-      ) ?? primaryCitation;
-      const startIndex = fileChunkIndexes.get(fileKey) ?? 0;
-      const projected = chunkPage({
-        pageNumber: citation.page,
-        text: section.text,
-        sectionHeading: section.heading,
-      }, startIndex);
-      fileChunkIndexes.set(fileKey, startIndex + projected.length);
-      for (const chunk of projected) {
-        const textSpanStart = section.startOffset + chunk.textSpanStart;
-        const textSpanEnd = section.startOffset + chunk.textSpanEnd;
-        const chunkCitation = citations.find((candidate) =>
-          candidate.fileId === file.fileId
-          && candidate.startOffset <= textSpanStart
-          && candidate.endOffset >= textSpanEnd
+      const boundaries = new Set([section.startOffset, section.endOffset]);
+      for (const citation of citations) {
+        if (citation.startOffset < section.endOffset && citation.endOffset > section.startOffset) {
+          boundaries.add(Math.max(section.startOffset, citation.startOffset));
+          boundaries.add(Math.min(section.endOffset, citation.endOffset));
+        }
+      }
+      const orderedBoundaries = [...boundaries].sort((left, right) => left - right);
+      for (let segmentIndex = 0; segmentIndex < orderedBoundaries.length - 1; segmentIndex++) {
+        const segmentStart = orderedBoundaries[segmentIndex];
+        const segmentEnd = orderedBoundaries[segmentIndex + 1];
+        const segmentText = String(revision.text.plain).slice(segmentStart, segmentEnd);
+        const segmentCitations = citations.filter((candidate) =>
+          candidate.startOffset <= segmentStart && candidate.endOffset >= segmentEnd
         );
-        chunks.push({
-          id: deterministicUuid("nfs-index-chunk", repositoryId, generationId, revision.revisionId, section.sectionId, String(chunk.chunkIndex)),
-          chunkIndex: chunk.chunkIndex,
-          text: chunk.text,
-          quoteText: chunk.quoteText,
-          pageNumber: chunkCitation?.page ?? null,
-          sectionHeading: section.heading,
-          textSpanStart,
-          textSpanEnd,
-          metadata: {
-            managedBy: "nfs-content-index",
-            repositoryId,
-            entryId: revision.entryId,
-            revisionId: revision.revisionId,
-            sectionId: section.sectionId,
-            citations: citations.filter((candidate) =>
-              candidate.startOffset < textSpanEnd && candidate.endOffset > textSpanStart
-            ).map(indexedCitation),
-          },
-        });
+        const citation = segmentCitations[0];
+        const startIndex = fileChunkIndexes.get(fileKey) ?? 0;
+        const projected = chunkPage({
+          pageNumber: citation?.page ?? primaryCitation.page,
+          text: segmentText,
+          sectionHeading: citation?.section ?? section.heading,
+        }, startIndex);
+        fileChunkIndexes.set(fileKey, startIndex + projected.length);
+        for (const chunk of projected) {
+          const textSpanStart = segmentStart + chunk.textSpanStart;
+          const textSpanEnd = segmentStart + chunk.textSpanEnd;
+          chunks.push({
+            id: deterministicUuid("nfs-index-chunk", repositoryId, generationId, revision.revisionId, section.sectionId, String(chunk.chunkIndex)),
+            chunkIndex: chunk.chunkIndex,
+            text: chunk.text,
+            quoteText: chunk.quoteText,
+            pageNumber: citation?.page ?? null,
+            sectionHeading: citation?.section ?? section.heading,
+            textSpanStart,
+            textSpanEnd,
+            metadata: {
+              managedBy: "nfs-content-index",
+              repositoryId,
+              entryId: revision.entryId,
+              revisionId: revision.revisionId,
+              sectionId: section.sectionId,
+              citations: segmentCitations.map(indexedCitation),
+            },
+          });
+        }
       }
     }
 
@@ -226,4 +232,15 @@ function indexedCitation(citation: Citation): IndexedCitation {
 
 function contentProjectionHash(value: JsonValue): string {
   return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
+}
+
+function assertUnambiguousCitations(revisionId: string, citations: readonly Citation[]): void {
+  for (const [index, left] of citations.entries()) {
+    for (const right of citations.slice(index + 1)) {
+      const overlaps = left.startOffset < right.endOffset && right.startOffset < left.endOffset;
+      if (overlaps && (left.page !== right.page || left.section !== right.section)) {
+        throw new Error(`Revision ${revisionId} has overlapping citations with ambiguous page or section provenance`);
+      }
+    }
+  }
 }

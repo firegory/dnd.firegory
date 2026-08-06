@@ -19,6 +19,8 @@ type Queryable = Readonly<{
   query<T extends QueryResultRow = QueryResultRow>(text: string, params?: readonly unknown[]): Promise<QueryResult<T>>;
 }>;
 
+const DEFAULT_SYNC_LEASE_SECONDS = 60;
+
 export type SyncMode = "clean" | "incremental";
 export type SyncPlan = Readonly<{
   additions: readonly string[];
@@ -48,6 +50,8 @@ export type SyncDependencies = Readonly<{
   execute?: typeof query;
   transaction?: typeof withTransaction;
   afterCheckpoint?: (entryId: string, stagedEntries: number) => void | Promise<void>;
+  ownerToken?: string;
+  leaseSeconds?: number;
 }>;
 
 export async function synchronizeContentIndex(input: Readonly<{
@@ -69,6 +73,8 @@ export async function synchronizeContentIndex(input: Readonly<{
   }
 
   const execute = dependencies.execute ?? query;
+  const ownerToken = dependencies.ownerToken ?? randomUUID();
+  const leaseSeconds = dependencies.leaseSeconds ?? DEFAULT_SYNC_LEASE_SECONDS;
   const activeResult = await execute<ActiveRow>(
     `SELECT entry_id, revision_id, content_hash, file_id, generation_id
      FROM nfs_index_entries
@@ -88,6 +94,8 @@ export async function synchronizeContentIndex(input: Readonly<{
     generation: resolved.generation,
     mode: input.mode,
     plan,
+    ownerToken,
+    leaseSeconds,
   });
   const staged = await execute<{ entry_id: string; payload_hash: string; projector_version: number }>(
     "SELECT entry_id, payload_hash, projector_version FROM nfs_index_sync_staging WHERE run_id = $1",
@@ -105,8 +113,8 @@ export async function synchronizeContentIndex(input: Readonly<{
         `UPDATE nfs_index_sync_runs SET status = 'failed',
            error_summary = 'Persisted projection checkpoint failed integrity validation',
            finished_at = now(), updated_at = now()
-         WHERE id = $1 AND status = 'staging'`,
-        [run.id],
+         WHERE id = $1 AND owner_token = $2 AND status = 'staging'`,
+        [run.id, ownerToken],
       );
       throw new Error(`Persisted checkpoint for ${checkpoint.entry_id} does not match the freshly validated projection`);
     }
@@ -115,13 +123,19 @@ export async function synchronizeContentIndex(input: Readonly<{
   let stagedEntries = alreadyStaged.size;
   for (const [ordinal, projection] of projections.entries()) {
     if (alreadyStaged.has(projection.entryId)) continue;
+    await heartbeatContentIndexRun(execute, run.id, ownerToken, leaseSeconds);
     await execute(
       `INSERT INTO nfs_index_sync_staging
          (run_id, entry_id, ordinal, revision_id, projector_version, payload_hash, payload)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+       SELECT $1, $2, $3, $4, $5, $6, $7::jsonb
+       WHERE EXISTS (
+         SELECT 1 FROM nfs_index_sync_runs
+         WHERE id = $1 AND owner_token = $8 AND status = 'staging'
+           AND lease_expires_at > clock_timestamp()
+       )
        ON CONFLICT (run_id, entry_id) DO NOTHING`,
       [run.id, projection.entryId, ordinal, projection.revisionId, CONTENT_INDEX_PROJECTOR_VERSION,
-        entryProjectionHash(projection), JSON.stringify(projection)],
+        entryProjectionHash(projection), JSON.stringify(projection), ownerToken],
     );
     const checkpoint = await execute<{ count: string }>(
       "SELECT count(*)::text AS count FROM nfs_index_sync_staging WHERE run_id = $1",
@@ -129,21 +143,23 @@ export async function synchronizeContentIndex(input: Readonly<{
     );
     stagedEntries = Number(checkpoint.rows[0]?.count ?? stagedEntries);
     await execute(
-      "UPDATE nfs_index_sync_runs SET staged_entries = $2, updated_at = now() WHERE id = $1 AND status = 'staging'",
-      [run.id, stagedEntries],
+      `UPDATE nfs_index_sync_runs SET staged_entries = $2, updated_at = now()
+       WHERE id = $1 AND owner_token = $3 AND status = 'staging'`,
+      [run.id, stagedEntries, ownerToken],
     );
     await dependencies.afterCheckpoint?.(projection.entryId, stagedEntries);
   }
 
   try {
+    await heartbeatContentIndexRun(execute, run.id, ownerToken, leaseSeconds);
     await (dependencies.transaction ?? withTransaction)(async (client) => {
-      await applySnapshot(client, repositoryId, run.id, projections, plan, activeResult.rows);
+      await applySnapshot(client, repositoryId, run.id, ownerToken, leaseSeconds, projections, plan, activeResult.rows);
     });
   } catch (error) {
     await execute(
       `UPDATE nfs_index_sync_runs SET status = 'failed', error_summary = $2, finished_at = now(), updated_at = now()
-       WHERE id = $1 AND status IN ('staging', 'applying')`,
-      [run.id, error instanceof Error ? error.message : String(error)],
+       WHERE id = $1 AND owner_token = $3 AND status IN ('staging', 'applying')`,
+      [run.id, error instanceof Error ? error.message : String(error), ownerToken],
     );
     throw error;
   }
@@ -181,54 +197,74 @@ export async function claimContentIndexRun(execute: typeof query, input: Readonl
   generation: string | null;
   mode: SyncMode;
   plan: SyncPlan;
+  ownerToken: string;
+  leaseSeconds: number;
 }>): Promise<{ id: string; resumed: boolean }> {
   const id = randomUUID();
-  const claimed = await execute<{ id: string; projection_hash: string; mode: SyncMode; resumed: boolean }>(
-    `WITH inserted AS (
-       INSERT INTO nfs_index_sync_runs
-         (id, repository_id, mode, manifest_hash, projection_hash, projector_version,
-          repository_generation, status, planned_additions, planned_updates, planned_removals)
-       VALUES ($1, $2, $3, $4, $4, $5, $6, 'staging', $7, $8, $9)
-       ON CONFLICT DO NOTHING
-       RETURNING id, projection_hash, mode
-     )
-     SELECT id, projection_hash, mode, false AS resumed FROM inserted
-     UNION ALL
-     SELECT id, projection_hash, mode, true AS resumed
-     FROM nfs_index_sync_runs
-     WHERE repository_id = $2 AND status = 'staging'
-     ORDER BY resumed
-     LIMIT 1`,
+  const claimed = await execute<{ run_id: string; resumed: boolean }>(
+    `SELECT run_id, resumed FROM claim_nfs_index_sync_run(
+       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+     )`,
     [id, input.repositoryId, input.mode, input.manifestHash, CONTENT_INDEX_PROJECTOR_VERSION,
-      input.generation, input.plan.additions.length, input.plan.updates.length, input.plan.removals.length],
+      input.generation, input.plan.additions.length, input.plan.updates.length, input.plan.removals.length,
+      input.ownerToken, input.leaseSeconds],
   );
-  const row = claimed.rows[0] ?? (await execute<{ id: string; projection_hash: string; mode: SyncMode }>(
-    `SELECT id, projection_hash, mode FROM nfs_index_sync_runs
-     WHERE repository_id = $1 AND status = 'staging'`,
-    [input.repositoryId],
-  )).rows[0];
+  const row = claimed.rows[0];
   if (!row) throw new Error(`Could not atomically claim NFS index synchronization for ${input.repositoryId}`);
-  if (row.projection_hash !== input.manifestHash || row.mode !== input.mode) {
-    throw new Error(`Another NFS index synchronization is already in flight for ${input.repositoryId}`);
-  }
-  return { id: row.id, resumed: "resumed" in row ? row.resumed : true };
+  return { id: row.run_id, resumed: row.resumed };
+}
+
+export async function heartbeatContentIndexRun(
+  execute: typeof query,
+  runId: string,
+  ownerToken: string,
+  leaseSeconds = DEFAULT_SYNC_LEASE_SECONDS,
+): Promise<void> {
+  const renewed = await execute<{ id: string }>(
+    `UPDATE nfs_index_sync_runs
+     SET heartbeat_at = clock_timestamp(),
+         lease_expires_at = clock_timestamp() + make_interval(secs => $3),
+         updated_at = clock_timestamp()
+     WHERE id = $1 AND owner_token = $2 AND status IN ('staging', 'applying')
+       AND lease_expires_at > clock_timestamp()
+     RETURNING id`,
+    [runId, ownerToken, leaseSeconds],
+  );
+  if (!renewed.rows[0]) throw new Error(`NFS index sync lease for run ${runId} is not owned or has expired`);
 }
 
 async function applySnapshot(
   client: PoolClient,
   repositoryId: string,
   runId: string,
+  ownerToken: string,
+  leaseSeconds: number,
   projections: readonly IndexedEntryProjection[],
   plan: SyncPlan,
   active: readonly ActiveRow[],
 ): Promise<void> {
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`nfs-index:${repositoryId}`]);
-  const run = await client.query<{ status: "staging" | "applying" | "succeeded" | "failed" }>(
-    "SELECT status FROM nfs_index_sync_runs WHERE id = $1 FOR UPDATE",
+  const run = await client.query<{
+    status: "staging" | "applying" | "succeeded" | "failed";
+    owner_token: string | null;
+    lease_live: boolean;
+  }>(
+    `SELECT status, owner_token, lease_expires_at > clock_timestamp() AS lease_live
+     FROM nfs_index_sync_runs WHERE id = $1 FOR UPDATE`,
     [runId],
   );
   if (run.rows[0]?.status === "succeeded") return;
-  if (run.rows[0]?.status !== "staging") throw new Error(`NFS index sync run ${runId} is not claimable`);
+  if (run.rows[0]?.status !== "staging" || run.rows[0].owner_token !== ownerToken || !run.rows[0].lease_live) {
+    throw new Error(`NFS index sync run ${runId} is not owned by a live claimant`);
+  }
+  await client.query(
+    `UPDATE nfs_index_sync_runs
+     SET heartbeat_at = clock_timestamp(),
+         lease_expires_at = clock_timestamp() + make_interval(secs => $3),
+         updated_at = clock_timestamp()
+     WHERE id = $1 AND owner_token = $2 AND status = 'staging'`,
+    [runId, ownerToken, leaseSeconds],
+  );
   const lockedActive = await client.query<ActiveRow>(
     `SELECT entry_id, revision_id, content_hash, file_id, generation_id
      FROM nfs_index_entries
@@ -255,8 +291,9 @@ async function applySnapshot(
     throw new Error("Persisted NFS index staging checkpoint does not match the validated canonical snapshot");
   }
   await client.query(
-    "UPDATE nfs_index_sync_runs SET status = 'applying', updated_at = now() WHERE id = $1 AND status = 'staging'",
-    [runId],
+    `UPDATE nfs_index_sync_runs SET status = 'applying', updated_at = now()
+     WHERE id = $1 AND owner_token = $2 AND status = 'staging'`,
+    [runId, ownerToken],
   );
 
   const desiredByFile = Map.groupBy(projections, (entry) => entry.fileUuid);
@@ -295,8 +332,8 @@ async function applySnapshot(
   );
   await client.query(
     `UPDATE nfs_index_sync_runs SET status = 'succeeded', error_summary = NULL, finished_at = now(), updated_at = now()
-     WHERE id = $1 AND status = 'applying'`,
-    [runId],
+     WHERE id = $1 AND owner_token = $2 AND status = 'applying'`,
+    [runId, ownerToken],
   );
 }
 
