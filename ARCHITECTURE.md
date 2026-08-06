@@ -46,6 +46,8 @@ Worker
   -> Postgres + pgvector
 ```
 
+Canonical content publication is a separate worker-owned write path. The app writes validated commands to a durable upload spool and Redis queue while its canonical repository mount remains read-only. A worker lease serializes repository writers, immutable revisions are staged on the canonical filesystem, and one atomic active-manifest rename exposes a completed revision.
+
 ### Next.js app
 
 Responsibilities:

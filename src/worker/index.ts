@@ -13,6 +13,14 @@ import {
 import { runPipeline } from "./ingestion/pipeline.ts";
 import { query } from "../server/db/client.ts";
 import { checkPdfToolDependencies, formatPdfDependencyReport } from "./ingestion/dependencies.ts";
+import {
+  acknowledgePublication,
+  dequeuePublication,
+  recoverPublicationCommands,
+  retryPublication,
+} from "../server/content-storage/publication-queue.ts";
+import { getDataRoot } from "../server/content-storage/repository.ts";
+import { publishSpooledCommand } from "./publication/publisher.ts";
 
 const POLL_INTERVAL_SECONDS = 5;
 const MAX_CONSECUTIVE_ERRORS = 10;
@@ -29,11 +37,34 @@ async function runWorker(): Promise<void> {
 
   await ensureRedisConnection();
   console.log("[worker] Connected to Redis.");
+  const recoveredPublications = await recoverPublicationCommands();
+  if (recoveredPublications > 0) {
+    console.log(`[worker] Recovered ${recoveredPublications} interrupted publication command(s).`);
+  }
 
   let consecutiveErrors = 0;
 
   while (consecutiveErrors < MAX_CONSECUTIVE_ERRORS) {
     try {
+      const publication = await dequeuePublication();
+      if (publication) {
+        try {
+          const result = await publishSpooledCommand({
+            dataRoot: getDataRoot(),
+            idempotencyKey: publication.idempotencyKey,
+          });
+          await acknowledgePublication(publication);
+          console.log(
+            `[worker] Published ${result.entryId}@${result.revisionId}` +
+            (result.alreadyActive ? " (already active)." : "."),
+          );
+        } catch (error) {
+          await retryPublication(publication);
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`[worker] Publication ${publication.idempotencyKey} failed and was requeued:`, message);
+        }
+      }
+
       const message = await dequeueJob(POLL_INTERVAL_SECONDS);
       if (!message) continue;
 

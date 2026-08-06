@@ -16,20 +16,8 @@ import {
   type CanonicalRevision,
   type ContentSource,
   type JsonValue,
+  type RepositoryManifest,
 } from "./repository.ts";
-
-type RepositoryManifest = Readonly<{
-  schemaVersion: 1;
-  kind: "repositoryManifest";
-  repositoryId: string;
-  schemas: readonly Readonly<{ schemaId: string; path: string }>[];
-  entries: readonly Readonly<{
-    entryId: string;
-    revisionId: string;
-    path: string;
-    contentHash: string;
-  }>[];
-}>;
 
 type Section = Readonly<{
   sectionId: string;
@@ -188,6 +176,30 @@ export async function validateContentRepository(dataRoot: string): Promise<void>
       if (actualHash !== file.contentHash) {
         throw new ContentIntegrityError(`Source file ${file.fileId} does not match its contentHash.`);
       }
+    }
+  }
+}
+
+export async function validateCanonicalRevisionDependencies(
+  dataRoot: string,
+  revision: CanonicalRevision,
+): Promise<void> {
+  assertCanonicalRevision(revision);
+  const root = await realpath(dataRoot);
+  const source = await loadSource(root, revision.source.sourceId);
+  if (canonicalJson(source as JsonValue) !== canonicalJson(revision.source as unknown as JsonValue)) {
+    throw new ContentIntegrityError(`Revision ${revision.revisionId} source provenance does not match its source record.`);
+  }
+
+  for (const file of source.files) {
+    const expectedPrefix = `sources/${source.sourceId}/files/`;
+    if (!file.path.startsWith(expectedPrefix)) {
+      throw new ContentIntegrityError(`Source file ${file.fileId} does not use its deterministic source directory.`);
+    }
+    const bytes = await readFile(await resolveRepositoryFile(root, file.path));
+    const actualHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    if (actualHash !== file.contentHash) {
+      throw new ContentIntegrityError(`Source file ${file.fileId} does not match its contentHash.`);
     }
   }
 }

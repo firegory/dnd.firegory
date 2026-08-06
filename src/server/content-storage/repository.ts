@@ -44,6 +44,21 @@ export type CanonicalRevision = Readonly<{
 
 export type CanonicalRevisionInput = Omit<CanonicalRevision, "revisionId" | "contentHash">;
 
+export type RepositoryManifestEntry = Readonly<{
+  entryId: string;
+  revisionId: string;
+  path: string;
+  contentHash: string;
+}>;
+
+export type RepositoryManifest = Readonly<{
+  schemaVersion: typeof CONTENT_SCHEMA_VERSION;
+  kind: "repositoryManifest";
+  repositoryId: string;
+  schemas: readonly Readonly<{ schemaId: string; path: string }>[];
+  entries: readonly RepositoryManifestEntry[];
+}>;
+
 export function getDataRoot(environment: NodeJS.ProcessEnv = process.env): string {
   const root = environment.DND_DATA_ROOT?.trim();
   if (!root) throw new Error("DND_DATA_ROOT must name the content repository root.");
@@ -75,6 +90,22 @@ export function canonicalRevisionPath(root: string, entryId: string, revisionId:
   assertStableId(entryId, "entryId");
   assertRevisionId(revisionId);
   return resolve(root, "compendium", entryId, "revisions", `${revisionId}.json`);
+}
+
+export function publicationStagingPath(root: string, entryId: string, revisionId: string): string {
+  assertStableId(entryId, "entryId");
+  assertRevisionId(revisionId);
+  return resolve(root, ".publication-staging", entryId, `${revisionId}.json`);
+}
+
+export function publicationManifestTemporaryPath(root: string, ownerId: string): string {
+  assertStableId(ownerId, "ownerId");
+  return resolve(root, "manifests", `.repository-${ownerId}.tmp`);
+}
+
+export function publicationSpoolPath(root: string, idempotencyKey: string): string {
+  assertStableId(idempotencyKey, "idempotencyKey");
+  return resolve(root, `${idempotencyKey}.json`);
 }
 
 export function generationPath(root: string, generationId: string): string {
@@ -126,7 +157,7 @@ export function hasValidRevisionIdentity(revision: CanonicalRevision): boolean {
   return revisionId === expected.revisionId && hash === expected.contentHash;
 }
 
-function assertStableId(value: string, name: string): void {
+export function assertStableId(value: string, name: string): void {
   if (!STABLE_ID.test(value)) {
     throw new TypeError(`${name} must be a lowercase stable ID containing only letters, numbers, and hyphens.`);
   }
