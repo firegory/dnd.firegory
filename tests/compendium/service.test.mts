@@ -175,8 +175,9 @@ test("publishing locks ownership and transitions revision before active pointer"
   await service.publishRevision(ids.version, ids.revision);
   assert.match(statements[0], /FOR UPDATE OF v, r/);
   assert.match(statements[1], /FOR SHARE OF g/);
-  assert.match(statements[2], /UPDATE compendium_revisions SET lifecycle = 'published'/);
-  assert.match(statements[3], /active_revision_id = \$2/);
+  assert.match(statements[2], /compendium_import_links[\s\S]*FOR SHARE OF link, occurrence, run/);
+  assert.match(statements[3], /UPDATE compendium_revisions SET lifecycle = 'published'/);
+  assert.match(statements[4], /active_revision_id = \$2/);
 });
 
 test("publishing rejects and transactionally locks staged citation generations", async () => {
@@ -188,6 +189,18 @@ test("publishing rejects and transactionally locks staged citation generations",
     },
   }));
   await assert.rejects(service.publishRevision(ids.version, ids.revision), /active or archived generations/);
+});
+
+test("publishing rejects revisions backed by failed or partial imports", async () => {
+  const service = new CompendiumService(async (callback) => callback({
+    async query(sql: string) {
+      if (sql.includes("SELECT v.lifecycle")) return { rows: [{ version_lifecycle: "draft", revision_lifecycle: "draft" }] } as never;
+      if (sql.includes("SELECT g.status")) return { rows: [{ status: "active" }] } as never;
+      if (sql.includes("SELECT run.status")) return { rows: [{ status: "running" }] } as never;
+      return { rows: [] } as never;
+    },
+  }));
+  await assert.rejects(service.publishRevision(ids.version, ids.revision), /Failed or partial import runs/);
 });
 
 test("new revisions replace draft active content instead of mutating children", async () => {

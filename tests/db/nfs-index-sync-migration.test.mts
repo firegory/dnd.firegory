@@ -7,7 +7,12 @@ import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 
 test("NFS index sync uses reserved migration 0010 and explicit managed ownership", async () => {
   assert.equal(MIGRATION_FILENAMES.at(-1), "0010_nfs_content_index_sync.sql");
-  assert.equal(MIGRATION_FILENAMES.some((name) => name.startsWith("0008_") || name.startsWith("0009_")), false);
+  assert.ok(MIGRATION_FILENAMES.includes("0008_resumable_compendium_imports.sql"));
+  assert.equal(MIGRATION_FILENAMES.some((name) => name.startsWith("0009_")), false);
+  assert.ok(
+    MIGRATION_FILENAMES.indexOf("0008_resumable_compendium_imports.sql")
+      < MIGRATION_FILENAMES.indexOf("0010_nfs_content_index_sync.sql"),
+  );
   const sql = await readFile(resolve("migrations/0010_nfs_content_index_sync.sql"), "utf8");
   for (const table of [
     "nfs_index_sync_runs",

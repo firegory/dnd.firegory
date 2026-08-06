@@ -161,6 +161,16 @@ export class CompendiumService {
       if (generationStates.rows.some(({ status }) => status !== "active" && status !== "archived")) {
         throw new CompendiumValidationError("Revision citations must remain in active or archived generations.");
       }
+      const importStates = await client.query<{ status: string }>(
+        `SELECT run.status FROM compendium_import_links link
+         JOIN compendium_import_occurrences occurrence ON occurrence.id = link.occurrence_id
+         JOIN compendium_import_runs run ON run.id = occurrence.import_run_id
+         WHERE link.revision_id = $1 FOR SHARE OF link, occurrence, run`,
+        [revisionId],
+      );
+      if (importStates.rows.some(({ status }) => status !== "succeeded")) {
+        throw new CompendiumValidationError("Failed or partial import runs cannot publish revisions.");
+      }
       if (state.revision_lifecycle === "draft") {
         await client.query(
           `UPDATE compendium_revisions SET lifecycle = 'published', published_at = now()
@@ -228,6 +238,8 @@ export class CompendiumService {
     targetEntryId: string;
     relationType: "related" | "requires" | "grants" | "replaces" | "member_of" | "prerequisite";
   }>): Promise<string> {
+    // Relations are not visible to readers until an import occurrence links
+    // source-bound evidence through compendium_import_links.
     requireUuid(input.sourceEntryId, "sourceEntryId");
     requireUuid(input.targetEntryId, "targetEntryId");
     enumValue(input.relationType, ["related", "requires", "grants", "replaces", "member_of", "prerequisite"], "relationType");
