@@ -37,7 +37,8 @@ x-common-env: &common-env
   LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-}
   LLM_TEMPERATURE: ${LLM_TEMPERATURE:-}
   STORAGE_ROOT: ${STORAGE_ROOT:-/app/storage}
-  DND_DATA_ROOT: ${DND_DATA_ROOT:-}
+  DND_DATA_ROOT: ${DND_DATA_ROOT:-/app/content-repository}
+  PUBLICATION_SPOOL_ROOT: ${PUBLICATION_SPOOL_ROOT:-/app/storage/publication-spool}
 
 services:
   app:
@@ -56,6 +57,7 @@ services:
       - .:/app
       - node_modules:/app/node_modules
       - app_storage:/app/storage
+      - ./content-repository:/app/content-repository:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -74,6 +76,7 @@ services:
       - .:/app
       - node_modules:/app/node_modules
       - app_storage:/app/storage
+      - ./content-repository:/app/content-repository
     depends_on:
       postgres:
         condition: service_healthy

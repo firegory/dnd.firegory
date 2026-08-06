@@ -2,9 +2,11 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 export const CONTENT_SCHEMA_VERSION = 1 as const;
+export const REPOSITORY_READER_CONTRACT_VERSION = 1 as const;
 
 const STABLE_ID = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
 const REVISION_ID = /^rev-[0-9a-f]{64}$/;
+const PUBLICATION_GENERATION = /^[0-9]{32}$/;
 
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 
@@ -57,14 +59,73 @@ export type CanonicalRevision = Readonly<{
 
 export type CanonicalRevisionInput = Omit<CanonicalRevision, "revisionId" | "contentHash">;
 
+export type RepositoryManifestEntry = Readonly<{
+  entryId: string;
+  revisionId: string;
+  path: string;
+  contentHash: string;
+}>;
+
+export type RepositoryManifest = Readonly<{
+  schemaVersion: typeof CONTENT_SCHEMA_VERSION;
+  kind: "repositoryManifest";
+  readerContractVersion: typeof REPOSITORY_READER_CONTRACT_VERSION;
+  repositoryId: string;
+  schemas: readonly Readonly<{ schemaId: string; path: string }>[];
+  entries: readonly RepositoryManifestEntry[];
+}>;
+
+export type RepositoryActivationDelta = Readonly<{
+  schemaVersion: typeof CONTENT_SCHEMA_VERSION;
+  kind: "repositoryActivationDelta";
+  readerContractVersion: typeof REPOSITORY_READER_CONTRACT_VERSION;
+  generation: string;
+  idempotencyKey: string;
+  targetEntryId: string;
+  entry: RepositoryManifestEntry;
+}>;
+
 export function getDataRoot(environment: NodeJS.ProcessEnv = process.env): string {
   const root = environment.DND_DATA_ROOT?.trim();
   if (!root) throw new Error("DND_DATA_ROOT must name the content repository root.");
   return resolve(root);
 }
 
-export function manifestPath(root: string): string {
+export function repositoryBootstrapPath(root: string): string {
   return resolve(root, "manifests", "repository.json");
+}
+
+export function activationDirectoryPath(root: string): string {
+  return resolve(root, "manifests", "activations");
+}
+
+export function activationDeltaPath(root: string, generation: string): string {
+  assertPublicationGeneration(generation);
+  return resolve(activationDirectoryPath(root), `${generation}.json`);
+}
+
+export function activationTemporaryPath(
+  root: string,
+  generation: string,
+  createdAt: number,
+  ownerId: string,
+): string {
+  assertPublicationGeneration(generation);
+  if (!Number.isSafeInteger(createdAt) || createdAt < 0) throw new TypeError("createdAt must be a nonnegative integer.");
+  assertStableId(ownerId, "ownerId");
+  return resolve(activationDirectoryPath(root), `.${generation}.${createdAt}.${ownerId}.tmp`);
+}
+
+export function formatPublicationGeneration(generation: bigint): string {
+  if (generation < BigInt(0) || generation > BigInt("99999999999999999999999999999999")) {
+    throw new TypeError("Publication generation is outside the fixed-width decimal range.");
+  }
+  return generation.toString().padStart(32, "0");
+}
+
+export function parsePublicationGeneration(generation: string): bigint {
+  assertPublicationGeneration(generation);
+  return BigInt(generation);
 }
 
 export function schemaPath(root: string, schemaName: string, schemaVersion = CONTENT_SCHEMA_VERSION): string {
@@ -88,6 +149,59 @@ export function canonicalRevisionPath(root: string, entryId: string, revisionId:
   assertStableId(entryId, "entryId");
   assertRevisionId(revisionId);
   return resolve(root, "compendium", entryId, "revisions", `${revisionId}.json`);
+}
+
+export function publicationStagingPath(root: string, entryId: string, revisionId: string): string {
+  assertStableId(entryId, "entryId");
+  assertRevisionId(revisionId);
+  return resolve(root, ".publication-staging", entryId, `${revisionId}.json`);
+}
+
+export function publicationStagingTemporaryPath(
+  root: string,
+  entryId: string,
+  revisionId: string,
+  createdAt: number,
+  temporaryId: string,
+): string {
+  assertStableId(entryId, "entryId");
+  assertRevisionId(revisionId);
+  if (!Number.isSafeInteger(createdAt) || createdAt < 0) throw new TypeError("createdAt must be a nonnegative integer.");
+  assertStableId(temporaryId, "temporaryId");
+  return resolve(root, ".publication-staging", entryId, `.${revisionId}.${createdAt}.${temporaryId}.tmp`);
+}
+
+export function publicationSpoolPath(root: string, idempotencyKey: string): string {
+  assertStableId(idempotencyKey, "idempotencyKey");
+  return resolve(root, "commands", `${idempotencyKey}.json`);
+}
+
+export function publicationOutboxStatePath(root: string, idempotencyKey: string): string {
+  assertStableId(idempotencyKey, "idempotencyKey");
+  return resolve(root, "state", idempotencyKey);
+}
+
+export function publicationOutboxEventPath(
+  root: string,
+  idempotencyKey: string,
+  generation: string,
+  status: "pending" | "queued" | "completed" | "failed",
+  eventId: string,
+): string {
+  assertStableId(idempotencyKey, "idempotencyKey");
+  assertPublicationGeneration(generation);
+  assertStableId(eventId, "eventId");
+  return resolve(publicationOutboxStatePath(root, idempotencyKey), `${generation}-${status}-${eventId}.json`);
+}
+
+export function publicationGenerationReservationPath(root: string, generation: string): string {
+  assertPublicationGeneration(generation);
+  return resolve(root, "generation-reservations", `${generation}.json`);
+}
+
+export function publicationQuarantinePath(root: string, deliveryId: string): string {
+  assertStableId(deliveryId, "deliveryId");
+  return resolve(root, "quarantine", `${deliveryId}.json`);
 }
 
 export function generationPath(root: string, generationId: string): string {
@@ -139,7 +253,7 @@ export function hasValidRevisionIdentity(revision: CanonicalRevision): boolean {
   return revisionId === expected.revisionId && hash === expected.contentHash;
 }
 
-function assertStableId(value: string, name: string): void {
+export function assertStableId(value: string, name: string): void {
   if (!STABLE_ID.test(value)) {
     throw new TypeError(`${name} must be a lowercase stable ID containing only letters, numbers, and hyphens.`);
   }
@@ -147,6 +261,12 @@ function assertStableId(value: string, name: string): void {
 
 function assertRevisionId(value: string): void {
   if (!REVISION_ID.test(value)) throw new TypeError("revisionId must be a SHA-256-derived revision ID.");
+}
+
+function assertPublicationGeneration(value: string): void {
+  if (!PUBLICATION_GENERATION.test(value)) {
+    throw new TypeError("generation must be a fixed-width decimal publication generation.");
+  }
 }
 
 function assertPositiveInteger(value: number, name: string): void {

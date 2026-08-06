@@ -46,6 +46,8 @@ Worker
   -> Postgres + pgvector
 ```
 
+Canonical content publication is a separate worker-owned write path. Before persisting a command, the app chooses the first unreserved generation above the greatest semantically valid reservation/command/activation floor, fsyncs a checksummed reservation under a unique temporary name, and exclusively links the complete record into the shared spool. Every recognized reservation filename remains an in-place consumed tombstone, collisions rescan, and ownership is revalidated before immutable command installation. The app then fsyncs the generation-bearing command and immutable outbox events while its canonical repository mount remains read-only, and sends a generation-bearing delivery through Redis. Ownership-checked visibility renewal coordinates queue work, while advisory locks reduce normal contention. Correctness comes from the explicit `readerContractVersion: 1` delta-fold contract and one shared no-follow activation enumerator: readers validate descriptor schemas, fold independently valid per-target deltas over bootstrap entries, and validate the final composition. The greatest generation wins independently for each target, every successful command owns its generation delta, stale same-target writers are inert, and different-target writers compose. `repository.json` is never exposed as resolved active state. Immutable revisions and deltas are installed through fsynced temporary files and atomic same-filesystem renames.
+
 ### Next.js app
 
 Responsibilities:

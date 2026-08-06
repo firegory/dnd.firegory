@@ -10,15 +10,18 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
 import {
+  activationDeltaPath,
   canonicalJson,
   canonicalRevisionPath,
   contentHash,
   createCanonicalRevision,
   exportPath,
+  formatPublicationGeneration,
   generationPath,
   getDataRoot,
   hasValidRevisionIdentity,
-  manifestPath,
+  repositoryBootstrapPath,
+  parsePublicationGeneration,
   revisionIdentity,
   schemaPath,
   snapshotPath,
@@ -30,9 +33,11 @@ import {
 import {
   assertCanonicalRevision,
   assertContentSource,
+  assertRepositoryActivationDelta,
   assertRepositoryManifest,
   ContentIntegrityError,
   ContentSchemaValidationError,
+  loadRepositoryBootstrapDescriptor,
   validateContentRepository,
 } from "../../src/server/content-storage/validation.ts";
 import {
@@ -54,17 +59,20 @@ const ownerUserId = "11111111-1111-4111-8111-111111111111";
 test("repository paths are deterministic for stable IDs", () => {
   const revisionId = `rev-${"a".repeat(64)}`;
   const paths = () => [
-    manifestPath(dataRoot),
+    repositoryBootstrapPath(dataRoot),
     schemaPath(dataRoot, "canonical-revision"),
     sourcePdfPath(dataRoot, "srd-2014", "basic-rules"),
     canonicalRevisionPath(dataRoot, "dash", revisionId),
     generationPath(dataRoot, "search-index-1"),
     snapshotPath(dataRoot, "release-1"),
     exportPath(dataRoot, "website-1"),
+    activationDeltaPath(dataRoot, formatPublicationGeneration(BigInt(42))),
   ];
 
   assert.deepEqual(paths(), paths());
   assert.equal(paths()[3], resolve(dataRoot, "compendium/dash/revisions", `${revisionId}.json`));
+  assert.equal(paths()[7], resolve(dataRoot, "manifests/activations/00000000000000000000000000000042.json"));
+  assert.equal(parsePublicationGeneration("00000000000000000000000000000042"), BigInt(42));
 });
 
 test("repository paths reject traversal and ambiguous IDs", () => {
@@ -73,6 +81,7 @@ test("repository paths reject traversal and ambiguous IDs", () => {
   assert.throws(() => canonicalRevisionPath(dataRoot, "dash/other", revisionId), /stable ID/);
   assert.throws(() => canonicalRevisionPath(dataRoot, "dash", "latest"), /SHA-256/);
   assert.throws(() => schemaPath(dataRoot, "entry", 0), /positive integer/);
+  assert.throws(() => activationDeltaPath(dataRoot, "42"), /fixed-width/);
 });
 
 test("DND_DATA_ROOT is explicit and independent of a storage server", () => {
@@ -134,6 +143,36 @@ test("unknown and malformed schema versions are rejected for every document type
         assert.throws(() => validate({ ...(document as object), schemaVersion }), ContentSchemaValidationError);
       });
     }
+  }
+});
+
+test("delta-fold reader contract requires explicit version one", async (t) => {
+  const manifest = await loadRepositoryBootstrapDescriptor(dataRoot);
+  assert.equal(manifest.readerContractVersion, 1);
+  const delta = {
+    schemaVersion: 1,
+    kind: "repositoryActivationDelta",
+    readerContractVersion: 1,
+    generation: formatPublicationGeneration(BigInt(1)),
+    idempotencyKey: "contract-test",
+    targetEntryId: manifest.entries[0].entryId,
+    entry: manifest.entries[0],
+  } as const;
+  assert.doesNotThrow(() => assertRepositoryActivationDelta(delta));
+  assert.throws(() => assertRepositoryActivationDelta({ ...delta, readerContractVersion: 2 }), ContentSchemaValidationError);
+  const unversioned = { ...delta } as Record<string, unknown>;
+  delete unversioned.readerContractVersion;
+  assert.throws(() => assertRepositoryActivationDelta(unversioned), ContentSchemaValidationError);
+
+  for (const contractVersion of [2, "1", null, undefined]) {
+    await t.test(`bootstrap rejects reader contract ${String(contractVersion)}`, async (st) => {
+      const root = await temporaryRepository(st);
+      const bootstrap = await readJson(repositoryBootstrapPath(root)) as Record<string, unknown>;
+      if (contractVersion === undefined) delete bootstrap.readerContractVersion;
+      else bootstrap.readerContractVersion = contractVersion;
+      await writeJson(repositoryBootstrapPath(root), bootstrap);
+      await assert.rejects(() => loadRepositoryBootstrapDescriptor(root), ContentSchemaValidationError);
+    });
   }
 });
 
@@ -386,13 +425,13 @@ test("repository validation rejects nondeterministic paths and manifest mismatch
   const nondeterministicRoot = await temporaryRepository(t);
   const nondeterministicManifest = await loadManifestFrom(nondeterministicRoot);
   nondeterministicManifest.entries[0].path = "compendium/dash/revisions/alias.json";
-  await writeJson(manifestPath(nondeterministicRoot), nondeterministicManifest);
+  await writeJson(repositoryBootstrapPath(nondeterministicRoot), nondeterministicManifest);
   await assert.rejects(() => validateContentRepository(nondeterministicRoot), /deterministic canonical path/);
 
   const mismatchRoot = await temporaryRepository(t);
   const mismatchManifest = await loadManifestFrom(mismatchRoot);
   mismatchManifest.entries[0].contentHash = `sha256:${"0".repeat(64)}`;
-  await writeJson(manifestPath(mismatchRoot), mismatchManifest);
+  await writeJson(repositoryBootstrapPath(mismatchRoot), mismatchManifest);
   await assert.rejects(() => validateContentRepository(mismatchRoot), /Manifest metadata/);
 });
 
@@ -485,7 +524,7 @@ test("portable contract contains no server endpoint or credential configuration"
 async function loadManifest(): Promise<{
   entries: Array<{ entryId: string; revisionId: string; path: string; contentHash: string }>;
 }> {
-  return (await readJson(manifestPath(dataRoot))) as Awaited<ReturnType<typeof loadManifest>>;
+  return (await readJson(repositoryBootstrapPath(dataRoot))) as Awaited<ReturnType<typeof loadManifest>>;
 }
 
 type MutableManifest = {
@@ -493,7 +532,7 @@ type MutableManifest = {
 };
 
 async function loadManifestFrom(root: string): Promise<MutableManifest> {
-  return await readJson(manifestPath(root)) as MutableManifest;
+  return await readJson(repositoryBootstrapPath(root)) as MutableManifest;
 }
 
 function resolveDataRootPath(relativePath: string): string {

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dnd-firegory:schema:content-repository:activation-delta:1",
+  "title": "Content repository activation delta",
+  "description": "A readerContractVersion 1 immutable single-target replacement folded over the bootstrap descriptor.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "readerContractVersion", "generation", "idempotencyKey", "targetEntryId", "entry"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "repositoryActivationDelta" },
+    "readerContractVersion": { "const": 1 },
+    "generation": { "type": "string", "pattern": "^[0-9]{32}$" },
+    "idempotencyKey": { "$ref": "#/$defs/stableId" },
+    "targetEntryId": { "$ref": "#/$defs/stableId" },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entryId", "revisionId", "path", "contentHash"],
+      "properties": {
+        "entryId": { "$ref": "#/$defs/stableId" },
+        "revisionId": { "type": "string", "pattern": "^rev-[0-9a-f]{64}$" },
+        "path": { "$ref": "#/$defs/relativePath" },
+        "contentHash": { "$ref": "#/$defs/contentHash" }
+      }
+    }
+  },
+  "$defs": {
+    "stableId": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$" },
+    "relativePath": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[a-zA-Z0-9._/-]+$" },
+    "contentHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

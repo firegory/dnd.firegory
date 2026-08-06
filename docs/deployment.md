@@ -42,6 +42,8 @@ NEXT_PUBLIC_APP_URL=https://dnd.firegory.site
 
 # Storage
 STORAGE_ROOT=/app/storage
+DND_DATA_ROOT=/app/content-repository
+PUBLICATION_SPOOL_ROOT=/app/storage/publication-spool
 
 # PostgreSQL (Compose internal)
 POSTGRES_DB=dnd_firegory
@@ -113,12 +115,14 @@ Run through this checklist:
 - Bind-mounts the project directory for live code updates.
 - Uses a named volume for `node_modules` to avoid host/container conflicts.
 - Uses a named volume `app_storage` for file storage.
+- Mounts canonical `DND_DATA_ROOT` read-only. Publication requests write only to the shared publication spool and Redis queue.
 
 **worker** (Ingestion worker):
 
 - Same Docker image as the app.
 - Runs `npm run worker` which polls the Redis queue for ingestion jobs.
 - Shares the `app_storage` volume with the app for file access.
+- Is the sole read-write owner of canonical `DND_DATA_ROOT`; do not run any app container with that mount writable.
 - Requires the same environment variables as the app.
 - The image includes PDF processing packages (`poppler-utils`, `qpdf`, `ghostscript`, `ocrmypdf`, `tesseract-ocr`, `tesseract-ocr-eng`, `tesseract-ocr-rus`) needed by the ingestion pipeline.
 
@@ -199,6 +203,8 @@ sudo apt-get update && sudo apt-get install -y \
 `poppler-utils` provides `pdfinfo` and `pdftotext`; without those, ingestion jobs fail before PDF text extraction. Missing `qpdf`, `ghostscript`, `ocrmypdf`, or Tesseract keeps the worker running but degrades normalization/OCR quality. The worker logs a startup preflight warning listing missing tools before it processes jobs.
 
 **Redis connection errors**: Ensure the worker and app can reach `redis:6379` on the internal Docker network. Check `docker compose logs redis`.
+
+**Publication storage**: The example Compose bind mount demonstrates app read-only and worker read-write ownership. For NFS deployment, configure the mount on the host or in deployment infrastructure rather than adding server credentials to the application. Mount the same export at `DND_DATA_ROOT` in both containers with `ro` for the app and `rw` for workers. Keep `PUBLICATION_SPOOL_ROOT` on durable storage shared by every app and worker instance, outside the canonical mount. Checksummed generation reservations use fsynced unique temporary files plus exclusive hard-link installation and directory fsync, so the shared filesystem must provide those semantics consistently to all submitters. Reservation filenames are permanent consumed tombstones and must not be manually removed; valid complete reservations participate in the ordering floor. All canonical repository directories must be on one filesystem because revision and activation-delta installation rely on same-filesystem atomic rename. Canonical directories must not be symlinks and must not be renameable by untrusted processes. PostgreSQL advisory locks are a contention optimization only; publication ordering survives PostgreSQL rebuild because reservations, semantically valid commands, and no-follow canonical activation deltas are rescanned before allocation. Consumers must support `readerContractVersion: 1` and fold activation deltas; direct reads of bootstrap `manifests/repository.json` are not active-state reads. See `content-repository/README.md` for the resolver contract, cache consistency, outbox recovery, and durability assumptions.
 
 ## Reverse proxy setup
 

@@ -222,6 +222,7 @@ cp .env.example .env.local
 | `LLM_MODEL` | no | LLM model name (default: `gpt-4o-mini`) |
 | `STORAGE_ROOT` | no | Root directory for file storage (default: `./storage`) |
 | `DND_DATA_ROOT` | for portable content | Root of the versioned canonical content repository; see `content-repository/README.md` |
+| `PUBLICATION_SPOOL_ROOT` | no | Durable app-to-worker publication command spool (default: `<STORAGE_ROOT>/publication-spool`) |
 | `APP_PORT` | no | Host port for the app in Docker Compose (default: `3000`) |
 | `POSTGRES_DB` | no | PostgreSQL database name (default: `dnd_firegory`) |
 | `POSTGRES_USER` | no | PostgreSQL user (default: `dnd`) |
