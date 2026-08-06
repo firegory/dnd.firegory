@@ -6,7 +6,8 @@ import {
   type RetrievalSelection,
   type RetrievalUser,
 } from "../access/retrieval-filter.ts";
-import { query } from "../db/client.ts";
+import { CursorCodec } from "./cursor.ts";
+import { agentQuery } from "./database.ts";
 import { invalidRequest, notFound } from "./errors.ts";
 
 type Queryable = Readonly<{
@@ -53,15 +54,17 @@ type EntryRow = QueryResultRow & Readonly<{
   language: string;
 }>;
 
-const database: Queryable = { query };
+const database: Queryable = { query: agentQuery };
 const MAX_LIMIT = 200;
 
 /** Agent-facing reads over the indexed canonical model. Every operation applies application RBAC in SQL. */
 export class AgentReadService {
   private readonly db: Queryable;
+  private readonly cursors: CursorCodec;
 
-  constructor(db: Queryable = database) {
+  constructor(db: Queryable = database, cursors = CursorCodec.fromEnvironment()) {
     this.db = db;
+    this.cursors = cursors;
   }
 
   async health(): Promise<void> {
@@ -79,12 +82,14 @@ export class AgentReadService {
 
   async listEntries(user: RetrievalUser, input: PageInput & AgentSelection = {}): Promise<Page<AgentEntrySummary>> {
     const limit = pageLimit(input.limit);
-    const cursor = decodeCursor(input.cursor, "entries");
+    const entryType = input.entryType ? normalizedText(input.entryType, "entryType") : undefined;
+    const binding = cursorBinding("entries", user, input, { entryType: entryType ?? null });
+    const cursor = this.cursors.decode("entries", binding, input.cursor);
     const boundary = accessibleEntries(user, input);
     const params = [...boundary.params];
     const filters = ["1=1"];
-    if (input.entryType) {
-      params.push(normalizedText(input.entryType, "entryType"));
+    if (entryType) {
+      params.push(entryType);
       filters.push(`entry_type = $${params.length}`);
     }
     if (cursor) {
@@ -97,7 +102,7 @@ export class AgentReadService {
        WHERE ${filters.join(" AND ")} ORDER BY entry_id, id LIMIT $${params.length}`,
       params,
     );
-    return makePage(result.rows, limit);
+    return makePage(result.rows, limit, this.cursors, binding);
   }
 
   async getEntry(user: RetrievalUser, identifier: string, selection: RetrievalSelection = {}): Promise<AgentEntry> {
@@ -118,13 +123,15 @@ export class AgentReadService {
   }>> {
     const search = normalizedText(input.query, "query", 500);
     const limit = pageLimit(input.limit);
-    const cursor = decodeCursor(input.cursor, "search");
+    const entryType = input.entryType ? normalizedText(input.entryType, "entryType") : undefined;
+    const binding = cursorBinding("search", user, input, { query: search, entryType: entryType ?? null });
+    const cursor = this.cursors.decode("search", binding, input.cursor);
     const boundary = accessibleEntries(user, input);
     const params = [...boundary.params, search];
     const searchParam = params.length;
     const filters = [`document @@ plainto_tsquery('simple', $${searchParam})`];
-    if (input.entryType) {
-      params.push(normalizedText(input.entryType, "entryType"));
+    if (entryType) {
+      params.push(entryType);
       filters.push(`entry_type = $${params.length}`);
     }
     if (cursor) {
@@ -156,7 +163,7 @@ export class AgentReadService {
     const last = items.at(-1);
     return {
       items,
-      nextCursor: rows.length > limit && last ? encodeCursor({ kind: "search", key: last.entryId, id: last.id, rank: last.rank }) : null,
+      nextCursor: rows.length > limit && last ? this.cursors.encode("search", binding, { key: last.entryId, id: last.id, rank: last.rank }) : null,
     };
   }
 
@@ -219,7 +226,8 @@ export class AgentReadService {
   async listChangedEntries(user: RetrievalUser, input: PageInput & RetrievalSelection & { since: string }): Promise<Page<Record<string, unknown>>> {
     const since = parseTimestamp(input.since);
     const limit = pageLimit(input.limit);
-    const cursor = decodeCursor(input.cursor, "changes");
+    const binding = cursorBinding("changes", user, input, { since });
+    const cursor = this.cursors.decode("changes", binding, input.cursor);
     const access = buildSourceAccessSql(buildRetrievalAuthorizationFilter(user, input));
     const params = [...access.params, since];
     const sinceParam = params.length;
@@ -233,8 +241,10 @@ export class AgentReadService {
       id: string; entry_id: string; revision_id: string; lifecycle: string; indexed_at: Date | string; retired_at: Date | string | null;
     }>(
       `SELECT nie.id, nie.entry_id, nie.revision_id, nie.lifecycle, nie.indexed_at, nie.retired_at
-       FROM nfs_index_entries nie JOIN sources s ON s.id = nie.source_id JOIN files f ON f.id = nie.file_id
-       WHERE ${access.sql} AND ${filters.join(" AND ")} ORDER BY greatest(indexed_at, coalesce(retired_at, '-infinity')), entry_id, nie.id
+       FROM nfs_index_entries nie JOIN sources s ON s.id = nie.source_id
+       JOIN files f ON f.id = nie.file_id AND f.source_id = s.id
+       WHERE ${access.sql} AND s.deleted_at IS NULL AND f.deleted_at IS NULL AND ${filters.join(" AND ")}
+       ORDER BY greatest(indexed_at, coalesce(retired_at, '-infinity')), entry_id, nie.id
        LIMIT $${params.length}`,
       params,
     );
@@ -248,7 +258,7 @@ export class AgentReadService {
     return {
       items,
       nextCursor: result.rows.length > limit && last
-        ? encodeCursor({ kind: "changes", key: String(last.entryId), id: String(last.id), changedAt: String(last.changedAt) }) : null,
+        ? this.cursors.encode("changes", binding, { key: String(last.entryId), id: String(last.id), changedAt: String(last.changedAt) }) : null,
     };
   }
 
@@ -269,9 +279,6 @@ export class AgentReadService {
 }
 
 type Page<T> = Readonly<{ items: readonly T[]; nextCursor: string | null }>;
-type Cursor = { kind: "entries"; key: string; id: string } | { kind: "search"; key: string; id: string; rank: number }
-  | { kind: "changes"; key: string; id: string; changedAt: string };
-
 function accessibleEntries(user: RetrievalUser, selection: RetrievalSelection): { sql: string; params: unknown[] } {
   const access = buildSourceAccessSql(buildRetrievalAuthorizationFilter(user, selection));
   return {
@@ -302,10 +309,11 @@ function mapEntry(row: EntryRow): AgentEntry {
     source: isRecord(payload.source) ? payload.source : {} };
 }
 
-function makePage(rows: readonly EntryRow[], limit: number): Page<AgentEntrySummary> {
+function makePage(rows: readonly EntryRow[], limit: number, cursors: CursorCodec,
+  binding: Readonly<Record<string, unknown>>): Page<AgentEntrySummary> {
   const selected = rows.slice(0, limit);
   return { items: selected.map(mapSummary), nextCursor: rows.length > limit && selected.length
-    ? encodeCursor({ kind: "entries", key: selected[selected.length - 1].entry_id, id: selected[selected.length - 1].id }) : null };
+    ? cursors.encode("entries", binding, { key: selected[selected.length - 1].entry_id, id: selected[selected.length - 1].id }) : null };
 }
 
 function pageLimit(value: number | undefined): number {
@@ -326,21 +334,17 @@ function parseTimestamp(value: string): string {
   return date.toISOString();
 }
 
-function encodeCursor(cursor: Cursor): string {
-  return Buffer.from(JSON.stringify({ v: 1, ...cursor }), "utf8").toString("base64url");
-}
-
-function decodeCursor<K extends Cursor["kind"]>(value: string | undefined, kind: K): Extract<Cursor, { kind: K }> | null {
-  if (!value) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Record<string, unknown>;
-    if (parsed.v !== 1 || parsed.kind !== kind || typeof parsed.key !== "string" || typeof parsed.id !== "string") throw new Error();
-    if (kind === "search" && typeof parsed.rank !== "number") throw new Error();
-    if (kind === "changes" && typeof parsed.changedAt !== "string") throw new Error();
-    return parsed as Extract<Cursor, { kind: K }>;
-  } catch {
-    throw invalidRequest("cursor is invalid or belongs to another operation.");
-  }
+function cursorBinding(kind: string, user: RetrievalUser, selection: RetrievalSelection,
+  operationFilters: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+  return {
+    kind,
+    role: user.role,
+    userId: user.userId ?? null,
+    edition: selection.edition ?? null,
+    language: selection.language ?? null,
+    category: selection.category ?? null,
+    ...operationFilters,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

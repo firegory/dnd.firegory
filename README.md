@@ -222,6 +222,8 @@ cp .env.example .env.local
 | `AGENT_GATEWAY_HOST` | no | Agent gateway bind address (default: `127.0.0.1`) |
 | `AGENT_GATEWAY_PORT` | no | Agent gateway port (default: `8787`) |
 | `AGENT_GATEWAY_TOKENS` | for API-token access | JSON array of SHA-256 token policies and read scopes |
+| `AGENT_GATEWAY_TOKENS_FILE` | recommended for gateway | File containing token-policy JSON |
+| `AGENT_GATEWAY_CURSOR_SECRET_FILE` | for gateway pagination | File containing at least 32 bytes of HMAC key material |
 | `AGENT_GATEWAY_ALLOW_SESSIONS` | no | Accept existing session tokens as read-only bearer credentials (default: `false`) |
 | `ZAI_API_KEY` | yes* | z.ai API key for z.ai embeddings (*required when using z.ai as embedding provider) |
 | `LLM_API_KEY` | yes* | API key for the LLM chat provider (*required for answer generation unless using a local endpoint) |

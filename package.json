@@ -15,7 +15,8 @@
     "ingest": "node --experimental-strip-types scripts/ingest.mts",
     "content-index": "node --experimental-strip-types scripts/content-index.mts",
     "agent-gateway": "node --experimental-strip-types scripts/agent-gateway.mts",
-    "agent-healthcheck": "node --experimental-strip-types scripts/agent-healthcheck.mts"
+    "agent-healthcheck": "node --experimental-strip-types scripts/agent-healthcheck.mts",
+    "agent-secret-hash": "node --experimental-strip-types scripts/agent-secret-hash.mts"
   },
   "dependencies": {
     "ajv": "^8.20.0",

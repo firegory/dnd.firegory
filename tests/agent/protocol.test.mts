@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { AgentAuthenticator, AGENT_TOOLS, parseTokenPolicies } from "../../src/server/agent/auth.ts";
 import { AgentProtocol, AGENT_VERSION_HEADER, MCP_PROTOCOL_VERSIONS } from "../../src/server/agent/protocol.ts";
+import { FixedWindowRateLimiter } from "../../src/server/agent/rate-limit.ts";
 
 const secret = "test-agent-secret";
 const tokenPolicies = JSON.stringify([{
@@ -45,7 +46,9 @@ test("MCP negotiates versions, lists scoped tools, and calls every named tool", 
   const service = fakeService();
   const protocol = new AgentProtocol(service, authenticator());
   const initialized = await protocol.handle(mcp({
-    jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: MCP_PROTOCOL_VERSIONS[0] },
+    jsonrpc: "2.0", id: 1, method: "initialize", params: {
+      protocolVersion: MCP_PROTOCOL_VERSIONS[0], capabilities: {}, clientInfo: { name: "test", version: "1" },
+    },
   }));
   assert.equal(initialized.status, 200);
   assert.equal((await initialized.json() as { result: { protocolVersion: string } }).result.protocolVersion, MCP_PROTOCOL_VERSIONS[0]);
@@ -86,7 +89,9 @@ test("HTTP and MCP return stable machine-readable authentication, scope, input, 
   assert.deepEqual(unsupportedBody.error.details.supported, ["1"]);
 
   const badMcpVersion = await protocol.handle(mcp({
-    jsonrpc: "2.0", id: 3, method: "initialize", params: { protocolVersion: "1900-01-01" },
+    jsonrpc: "2.0", id: 3, method: "initialize", params: {
+      protocolVersion: "1900-01-01", capabilities: {}, clientInfo: { name: "test", version: "1" },
+    },
   }));
   const mcpVersionError = await badMcpVersion.json() as { error: { data: { code: string } } };
   assert.equal(mcpVersionError.error.data.code, "unsupported_version");
@@ -115,6 +120,62 @@ test("healthcheck is unauthenticated and reports database degradation", async ()
   assert.deepEqual(await response.json(), { status: "unavailable", version: "1" });
 });
 
+test("healthcheck caches and coalesces database probes", async () => {
+  const service = fakeService();
+  let probes = 0;
+  service.health = async () => { probes++; };
+  let now = 1_000;
+  const protocol = new AgentProtocol(service, authenticator(), { healthCacheMs: 100, now: () => now });
+  await Promise.all([
+    protocol.handle(new Request("http://gateway/healthz")),
+    protocol.handle(new Request("http://gateway/healthz")),
+  ]);
+  await protocol.handle(new Request("http://gateway/healthz"));
+  assert.equal(probes, 1);
+  now += 101;
+  await protocol.handle(new Request("http://gateway/healthz"));
+  assert.equal(probes, 2);
+});
+
+test("MCP rejects malformed envelopes, versions, content types, nulls, batches, and unknown arguments", async () => {
+  const protocol = new AgentProtocol(fakeService(), authenticator());
+  const cases: Array<{ request: Request; rpcCode?: number; status?: number }> = [
+    { request: mcp(null), rpcCode: -32600 },
+    { request: mcp([]), rpcCode: -32600 },
+    { request: mcp({ jsonrpc: "2.0", id: null, method: "tools/list" }), rpcCode: -32600 },
+    { request: mcp({ jsonrpc: "2.0", id: 1, method: "tools/list", params: null }), rpcCode: -32602 },
+    { request: mcp({ jsonrpc: "2.0", id: 1, method: "tools/list", extra: true }), rpcCode: -32600 },
+    { request: mcp({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_entry", arguments: { identifier: "dash", surprise: true } } }), rpcCode: -32602 },
+    { request: mcp({ jsonrpc: "2.0", id: 1, method: "unknown" }), rpcCode: -32601 },
+    { request: new Request("http://gateway/mcp", { method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "text/plain" }, body: "{}" }), status: 415 },
+  ];
+  for (const testCase of cases) {
+    const response = await protocol.handle(testCase.request);
+    if (testCase.status) assert.equal(response.status, testCase.status);
+    else assert.equal((await response.json() as { error: { code: number } }).error.code, testCase.rpcCode);
+  }
+
+  const missingVersion = await protocol.handle(mcp(
+    { jsonrpc: "2.0", id: 1, method: "tools/list" },
+    { "mcp-protocol-version": "" },
+  ));
+  assert.equal((await missingVersion.json() as { error: { data: { code: string } } }).error.data.code, "unsupported_version");
+
+  const notification = await protocol.handle(mcp({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }));
+  assert.equal(notification.status, 202);
+  assert.equal(await notification.text(), "");
+
+  const malformed = await protocol.handle(new Request("http://gateway/mcp", {
+    method: "POST",
+    headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+    body: "{",
+  }));
+  assert.equal((await malformed.json() as { error: { code: number } }).error.code, -32700);
+
+  const duplicateQuery = await protocol.handle(request("/v1/entries?limit=1&limit=2"));
+  assert.equal(duplicateQuery.status, 400);
+});
+
 test("session bearer policy resolves RBAC identity without writing session state", async () => {
   const sql: string[] = [];
   const auth = new AgentAuthenticator([], true, {
@@ -131,6 +192,16 @@ test("session bearer policy resolves RBAC identity without writing session state
   assert.doesNotMatch(sql[0], /UPDATE|INSERT|DELETE/);
 });
 
+test("authenticated principals have an independent request rate limit", async () => {
+  const protocol = new AgentProtocol(fakeService(), authenticator(), {
+    principalLimiter: new FixedWindowRateLimiter(1, 60_000),
+  });
+  assert.equal((await protocol.handle(request("/v1/entries"))).status, 200);
+  const limited = await protocol.handle(request("/v1/entries"));
+  assert.equal(limited.status, 429);
+  assert.equal((await limited.json() as { error: { code: string } }).error.code, "rate_limited");
+});
+
 function authenticator(): AgentAuthenticator {
   return new AgentAuthenticator(parseTokenPolicies(tokenPolicies));
 }
@@ -139,10 +210,10 @@ function request(path: string, extraHeaders: HeadersInit = {}, token = secret): 
   return new Request(`http://gateway${path}`, { headers: { authorization: `Bearer ${token}`, ...extraHeaders } });
 }
 
-function mcp(body: unknown): Request {
+function mcp(body: unknown, extraHeaders: HeadersInit = {}): Request {
   return new Request("http://gateway/mcp", {
     method: "POST",
-    headers: { authorization: `Bearer ${secret}`, "content-type": "application/json", "mcp-protocol-version": MCP_PROTOCOL_VERSIONS[0] },
+    headers: { authorization: `Bearer ${secret}`, "content-type": "application/json", "mcp-protocol-version": MCP_PROTOCOL_VERSIONS[0], ...extraHeaders },
     body: JSON.stringify(body),
   });
 }

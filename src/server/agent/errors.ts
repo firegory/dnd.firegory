@@ -3,6 +3,7 @@ export type AgentErrorCode =
   | "forbidden"
   | "invalid_request"
   | "not_found"
+  | "rate_limited"
   | "unsupported_version"
   | "internal_error";
 

@@ -27,9 +27,24 @@ COPY . .
 EXPOSE 3000
 CMD ["npm", "run", "dev", "--", "--hostname", "0.0.0.0"]
 
-FROM dev AS agent-gateway
+FROM node:22-bookworm-slim AS agent-dependencies
 
-ENV AGENT_GATEWAY_HOST=0.0.0.0
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+FROM node:22-bookworm-slim AS agent-gateway
+
+WORKDIR /app
+ENV NODE_ENV=production \
+    AGENT_GATEWAY_HOST=127.0.0.1
+COPY --from=agent-dependencies /app/node_modules ./node_modules
+COPY package.json ./
+COPY scripts/agent-gateway.mts scripts/agent-healthcheck.mts ./scripts/
+COPY src/server/agent ./src/server/agent
+COPY src/server/access ./src/server/access
+COPY src/server/auth/types.ts src/server/auth/session-token.ts ./src/server/auth/
+USER node
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD ["npm", "run", "agent-healthcheck"]
 CMD ["npm", "run", "agent-gateway"]

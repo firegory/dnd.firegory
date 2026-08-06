@@ -8,29 +8,39 @@ The agent gateway is a separate, read-only process over the PostgreSQL content i
 npm run agent-gateway
 ```
 
-The secure default is `127.0.0.1:8787`. Set `AGENT_GATEWAY_HOST=0.0.0.0` only behind an authenticated network boundary. `AGENT_GATEWAY_PORT` changes the port.
+The default is `127.0.0.1:8787`, including the container target. Keep this loopback bind when a same-host reverse proxy terminates TLS. A non-loopback bind is permitted only on a private network behind TLS termination and network access controls; never expose the gateway's plain HTTP listener directly to the internet. `AGENT_GATEWAY_PORT` changes the port.
 
 A standalone image target is available without adding a production Compose service:
 
 ```bash
 docker build --target agent-gateway -t dnd-firegory-agent .
-docker run --rm -p 8787:8787 \
-  -e DATABASE_URL=postgres://... \
-  -e AGENT_GATEWAY_TOKENS='[...]' \
+docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --mount type=bind,src=/secure/database-url,dst=/run/secrets/database-url,readonly \
+  --mount type=bind,src=/secure/agent-cursor-key,dst=/run/secrets/agent-cursor-key,readonly \
+  --mount type=bind,src=/secure/agent-token-policies.json,dst=/run/secrets/agent-token-policies.json,readonly \
+  -e DATABASE_URL_FILE=/run/secrets/database-url \
+  -e AGENT_GATEWAY_CURSOR_SECRET_FILE=/run/secrets/agent-cursor-key \
+  -e AGENT_GATEWAY_TOKENS_FILE=/run/secrets/agent-token-policies.json \
   dnd-firegory-agent
 ```
 
-The target includes a healthcheck that calls `npm run agent-healthcheck`. No production Compose wiring is included; that remains deployment issue #85.
+The image runs as the unprivileged `node` user, contains production Node dependencies and gateway sources only, and supports a read-only root filesystem. The target includes a healthcheck that calls `npm run agent-healthcheck`. No production Compose wiring is included; that remains deployment issue #85. To serve another container on a private network, explicitly set `AGENT_GATEWAY_HOST=0.0.0.0`; put a TLS reverse proxy in front and do not publish port 8787 publicly.
 
 ## Authentication
 
 All data operations require `Authorization: Bearer <token>`. `/healthz` is intentionally unauthenticated and reveals only availability and protocol version.
 
-Configure API tokens with `AGENT_GATEWAY_TOKENS`, a JSON array. Store only lowercase SHA-256 token digests:
+Generate secrets into owner-readable files. Do not put raw tokens in shell arguments, image layers, environment files, or token-policy JSON:
 
 ```bash
-node -e 'console.log(require("node:crypto").createHash("sha256").update(process.argv[1]).digest("hex"))' 'replace-with-random-token'
+umask 077
+openssl rand -base64 48 > /secure/agent-token
+openssl rand -base64 48 > /secure/agent-cursor-key
+npm run agent-secret-hash < /secure/agent-token
 ```
+
+Put only the resulting lowercase SHA-256 digest in `/secure/agent-token-policies.json` and configure `AGENT_GATEWAY_TOKENS_FILE`. `AGENT_GATEWAY_TOKENS` and `AGENT_GATEWAY_CURSOR_SECRET` exist for local development, but production should use the corresponding `_FILE` settings. Cursor-key rotation invalidates all outstanding cursors.
 
 ```json
 [
@@ -82,9 +92,9 @@ Endpoints are read-only `GET` operations:
 | `GET /v1/changes?since=2026-01-01T00:00:00Z` | `list_changed_entries` |
 | `GET /healthz` | Database-backed healthcheck |
 
-Common narrowing parameters are `edition`, `language`, and `category`. Lists and searches also accept `entryType`, `limit` (1-200), and opaque `cursor`. Follow only the returned `nextCursor`; cursors are operation-specific and versioned. Ordering uses stable canonical IDs plus deterministic UUID tie-breakers. Search additionally preserves rank, and change pagination preserves change timestamp.
+Common narrowing parameters are `edition`, `language`, and `category`. Lists and searches also accept `entryType`, `limit` (1-200), and opaque `cursor`. Follow only the returned `nextCursor`; cursors are size-bounded and HMAC-authenticated against the operation, RBAC principal, query, timestamp, and effective filters. They cannot be moved between callers or filter sets. Ordering uses stable canonical IDs plus deterministic UUID tie-breakers. Search additionally preserves a finite nonnegative rank, and change pagination preserves a canonical timestamp. Malformed, tampered, or mismatched cursors return a clean `400 invalid_request`.
 
-`list_changed_entries` reports the latest indexed state after `since`: `upserted` for active entries and `deleted` for retired entries. It is an index synchronization feed, not an immutable audit log. Consumers should store a successful polling watermark and reconcile returned stable IDs.
+`list_changed_entries` reports the latest indexed state after `since`: `upserted` for active entries and `deleted` for retired entries only while their source and file remain non-deleted and accessible. It is an index synchronization feed, not an immutable audit log. Consumers should store a successful polling watermark and reconcile returned stable IDs.
 
 Machine errors have a stable code and request ID:
 
@@ -98,11 +108,11 @@ Machine errors have a stable code and request ID:
 }
 ```
 
-Codes are `authentication_required`, `forbidden`, `invalid_request`, `not_found`, `unsupported_version`, and `internal_error`. Missing and inaccessible entries, sources, aliases, sections, and citations are deliberately indistinguishable where applicable.
+Codes are `authentication_required`, `forbidden`, `invalid_request`, `not_found`, `rate_limited`, `unsupported_version`, and `internal_error`. Missing and inaccessible entries, sources, aliases, sections, and citations are deliberately indistinguishable where applicable.
 
 ## MCP
 
-MCP uses Streamable HTTP-style JSON-RPC requests at `POST /mcp`. The server is stateless and supports protocol versions `2025-03-26` and `2024-11-05`. Send the negotiated value in `MCP-Protocol-Version` after `initialize`. Unsupported initialize versions return JSON-RPC error data with `code=unsupported_version`.
+MCP uses Streamable HTTP-style JSON-RPC requests at `POST /mcp` with `Content-Type: application/json`. The server is stateless and supports protocol versions `2025-03-26` and `2024-11-05`. Send the negotiated value in `MCP-Protocol-Version` after `initialize`. Batches and null requests are rejected. Envelopes, IDs, params, notification shape, tool names, and tool arguments are strictly validated; unknown fields are not ignored. JSON-RPC protocol failures use standard parse/request/method/params errors, while executed tool failures use `isError` results.
 
 Available tools are:
 
@@ -117,6 +127,12 @@ Available tools are:
 - `list_changed_entries`
 
 `tools/list` returns only tools allowed by the bearer token scopes. Tool failures set `isError: true` and include the same machine error object in `structuredContent.error`. There are no mutation, SQL, file-reading, resource-writing, or prompt-writing capabilities.
+
+## Resource Limits
+
+The Node listener rejects GET/health bodies from framing headers before buffering and streams MCP bodies into a bounded buffer (64 KiB by default). It caps response bodies (2 MiB), concurrent requests (32), headers (64), requests per keep-alive socket (100), and applies header, request, and keep-alive timeouts. Fixed-window limits apply independently per source IP and authenticated principal. Configure these with the documented `AGENT_GATEWAY_*` environment variables; upstream proxies should enforce equal or tighter limits.
+
+Gateway PostgreSQL connections use a dedicated bounded pool with server-side `statement_timeout` and client query timeout. Client disconnects abort request-body handling; database statement timeout remains the final cancellation boundary once a query has been dispatched. Use a dedicated PostgreSQL login granted only `CONNECT`, `USAGE`, and `SELECT` on the required schema/tables, with no mutation or DDL privileges. Health results are cached briefly to avoid turning `/healthz` into an unbounded database probe.
 
 ## IDs And Provenance
 

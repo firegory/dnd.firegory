@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { CursorCodec } from "../../src/server/agent/cursor.ts";
 import { AgentReadService } from "../../src/server/agent/service.ts";
+
+const cursors = new CursorCodec("test-cursor-secret-that-is-at-least-32-bytes");
 
 const row = {
   id: "10000000-0000-4000-8000-000000000001",
@@ -38,7 +41,7 @@ test("all indexed reads reuse the centralized #81 SQL source predicate for each 
         calls.push({ sql, values });
         return { rows: [] } as never;
       },
-    });
+    }, cursors);
     assert.deepEqual(await service.listEntries(roleCase.user), { items: [], nextCursor: null });
     await service.listEntityTypes(roleCase.user);
     await service.listChangedEntries(roleCase.user, { since: "2026-01-01T00:00:00Z" });
@@ -52,7 +55,7 @@ test("all indexed reads reuse the centralized #81 SQL source predicate for each 
 });
 
 test("entry, citation, and section reads return stable IDs and source provenance", async () => {
-  const service = new AgentReadService({ async query() { return { rows: [row] } as never; } });
+  const service = new AgentReadService({ async query() { return { rows: [row] } as never; } }, cursors);
   const entry = await service.getEntry({ role: "user" }, "dash");
   assert.equal(entry.id, row.id);
   assert.equal(entry.entryId, "dash");
@@ -82,12 +85,16 @@ test("list pagination uses an opaque stable keyset cursor", async () => {
       queryNumber++;
       return { rows: queryNumber === 1 ? [row, { ...row, id: "10000000-0000-4000-8000-000000000002", entry_id: "dodge" }] : [] } as never;
     },
-  });
+  }, cursors);
   const first = await service.listEntries({ role: "user" }, { limit: 1 });
   assert.equal(first.items.length, 1);
   assert.ok(first.nextCursor);
   const second = await service.listEntries({ role: "user" }, { limit: 1, cursor: first.nextCursor! });
   assert.deepEqual(second, { items: [], nextCursor: null });
+  await assert.rejects(
+    () => service.listEntries({ role: "user" }, { edition: "5.5e", limit: 1, cursor: first.nextCursor! }),
+    /cursor is invalid/,
+  );
   assert.match(calls[0].sql, /ORDER BY entry_id, id/);
   assert.match(calls[1].sql, /\(entry_id, id\) >/);
   assert.ok(calls[1].values.includes("dash"));
@@ -104,7 +111,7 @@ test("search pagination preserves rank and stable ID while returning citation pr
       queryNumber++;
       return { rows: queryNumber === 1 ? [ranked, { ...ranked, id: "10000000-0000-4000-8000-000000000002" }] : [] } as never;
     },
-  });
+  }, cursors);
   const first = await service.searchEntries({ role: "user" }, { query: "dash", limit: 1 });
   assert.deepEqual(first.items[0].citations, row.canonical_payload.citations);
   assert.deepEqual(first.items[0].source, row.canonical_payload.source);
@@ -120,12 +127,14 @@ test("changed-entry reads expose upsert and deletion cursors without filesystem 
   const service = new AgentReadService({
     async query(sql: string) {
       assert.doesNotMatch(sql, /storage_path|canonical_payload/);
+      assert.match(sql, /s\.deleted_at IS NULL/);
+      assert.match(sql, /f\.deleted_at IS NULL/);
       return { rows: [
         { id: row.id, entry_id: "dash", revision_id: row.revision_id, lifecycle: "active", indexed_at: "2026-01-02T00:00:00Z", retired_at: null },
         { id: "other", entry_id: "dodge", revision_id: row.revision_id, lifecycle: "retired", indexed_at: "2026-01-01T00:00:00Z", retired_at: "2026-01-03T00:00:00Z" },
       ] } as never;
     },
-  });
+  }, cursors);
   const result = await service.listChangedEntries({ role: "admin" }, { since: "2026-01-01T00:00:00Z", limit: 1 });
   assert.equal(result.items[0].change, "upserted");
   assert.equal(result.items[0].changedAt, "2026-01-02T00:00:00.000Z");

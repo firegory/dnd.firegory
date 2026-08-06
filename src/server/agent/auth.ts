@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import type { QueryResultRow } from "pg";
 
@@ -6,7 +7,7 @@ import type { RetrievalUser } from "../access/retrieval-filter.ts";
 import type { UserRole } from "../auth/types.ts";
 import { isUserRole } from "../auth/types.ts";
 import { hashSessionToken } from "../auth/session-token.ts";
-import { query } from "../db/client.ts";
+import { agentQuery } from "./database.ts";
 import { AgentGatewayError } from "./errors.ts";
 
 export const AGENT_TOOLS = [
@@ -50,7 +51,7 @@ export class AgentAuthenticator {
   constructor(
     tokens: readonly TokenPolicy[],
     allowSessions = false,
-    db: Queryable = { query },
+    db: Queryable = { query: agentQuery },
   ) {
     this.tokens = tokens;
     this.allowSessions = allowSessions;
@@ -58,8 +59,11 @@ export class AgentAuthenticator {
   }
 
   static fromEnvironment(environment: NodeJS.ProcessEnv = process.env, db?: Queryable): AgentAuthenticator {
+    const inline = environment.AGENT_GATEWAY_TOKENS;
+    const file = environment.AGENT_GATEWAY_TOKENS_FILE;
+    if (inline && file) throw new Error("AGENT_GATEWAY_TOKENS and AGENT_GATEWAY_TOKENS_FILE are mutually exclusive.");
     return new AgentAuthenticator(
-      parseTokenPolicies(environment.AGENT_GATEWAY_TOKENS),
+      parseTokenPolicies(file ? readFileSync(file, "utf8") : inline),
       environment.AGENT_GATEWAY_ALLOW_SESSIONS === "true",
       db,
     );
