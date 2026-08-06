@@ -6,6 +6,9 @@
   "category": "core_rules",
   "edition": "5e",
   "language": "en",
+  "accessTier": "open",
+  "shared": false,
+  "ownerUserId": null,
   "publisher": "Wizards of the Coast",
   "license": "Open reference example",
   "files": [

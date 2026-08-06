@@ -4,7 +4,7 @@
   "title": "Content source provenance",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "kind", "sourceId", "title", "category", "edition", "language", "publisher", "files"],
+  "required": ["schemaVersion", "kind", "sourceId", "title", "category", "edition", "language", "accessTier", "shared", "ownerUserId", "publisher", "files"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "kind": { "const": "source" },
@@ -13,6 +13,9 @@
     "category": { "enum": ["core_rules", "official_supplement", "homebrew"] },
     "edition": { "enum": ["5e", "5.5e"] },
     "language": { "enum": ["en", "ru"] },
+    "accessTier": { "enum": ["open", "premium", "personal"] },
+    "shared": { "type": "boolean" },
+    "ownerUserId": { "anyOf": [{ "$ref": "#/$defs/stableId" }, { "type": "null" }] },
     "publisher": { "type": "string", "minLength": 1 },
     "license": { "type": "string", "minLength": 1 },
     "files": {
@@ -31,6 +34,20 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "accessTier": { "const": "open" } }, "required": ["accessTier"] },
+      "then": { "properties": { "shared": { "const": false }, "ownerUserId": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "accessTier": { "const": "premium" } }, "required": ["accessTier"] },
+      "then": { "properties": { "shared": { "const": true }, "ownerUserId": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "accessTier": { "const": "personal" } }, "required": ["accessTier"] },
+      "then": { "properties": { "shared": { "const": false }, "ownerUserId": { "$ref": "#/$defs/stableId" } } }
+    }
+  ],
   "$defs": {
     "stableId": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$" },
     "relativePath": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[a-zA-Z0-9._/-]+$" },

@@ -37,6 +37,7 @@ x-common-env: &common-env
   LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-}
   LLM_TEMPERATURE: ${LLM_TEMPERATURE:-}
   STORAGE_ROOT: ${STORAGE_ROOT:-/app/storage}
+  DND_DATA_ROOT: ${DND_DATA_ROOT:-}
 
 services:
   app:

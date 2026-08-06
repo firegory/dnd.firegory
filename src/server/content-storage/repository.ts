@@ -8,6 +8,27 @@ const REVISION_ID = /^rev-[0-9a-f]{64}$/;
 
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue };
 
+export type ContentSource = Readonly<{
+  schemaVersion: typeof CONTENT_SCHEMA_VERSION;
+  kind: "source";
+  sourceId: string;
+  title: string;
+  category: "core_rules" | "official_supplement" | "homebrew";
+  edition: "5e" | "5.5e";
+  language: "en" | "ru";
+  accessTier: "open" | "premium" | "personal";
+  shared: boolean;
+  ownerUserId: string | null;
+  publisher: string;
+  license?: string;
+  files: readonly Readonly<{
+    fileId: string;
+    path: string;
+    mediaType: string;
+    contentHash: string;
+  }>[];
+}>;
+
 export type CanonicalRevision = Readonly<{
   schemaVersion: typeof CONTENT_SCHEMA_VERSION;
   kind: "canonicalRevision";
@@ -15,7 +36,7 @@ export type CanonicalRevision = Readonly<{
   revisionId: string;
   contentHash: string;
   createdAt: string;
-  source: Readonly<Record<string, JsonValue>>;
+  source: ContentSource;
   entry: Readonly<Record<string, JsonValue>>;
   text: Readonly<Record<string, JsonValue>>;
   citations: readonly Readonly<Record<string, JsonValue>>[];
@@ -43,6 +64,11 @@ export function sourcePdfPath(root: string, sourceId: string, fileId: string): s
   assertStableId(sourceId, "sourceId");
   assertStableId(fileId, "fileId");
   return resolve(root, "sources", sourceId, "files", `${fileId}.pdf`);
+}
+
+export function sourceMetadataPath(root: string, sourceId: string): string {
+  assertStableId(sourceId, "sourceId");
+  return resolve(root, "sources", sourceId, "source.json");
 }
 
 export function canonicalRevisionPath(root: string, entryId: string, revisionId: string): string {
