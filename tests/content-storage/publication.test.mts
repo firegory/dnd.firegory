@@ -13,6 +13,7 @@ import {
   readOutboxState,
   reconcilePublicationOutbox,
   submitPublicationCommand,
+  submitUnpublicationCommand,
   type PublicationCommand,
 } from "../../src/server/content-storage/publication-command.ts";
 import { createPublicationGenerationReservation } from "../../src/server/content-storage/publication-generation.ts";
@@ -818,6 +819,45 @@ test("normal publication contention requeues without consuming retry budget", as
   }), "retried");
   assert.equal(actions.retried[0]?.options.consumeAttempt, false);
   assert.notEqual((await readOutboxState(spoolRoot, "contention"))?.status, "failed");
+});
+
+test("unpublication is worker-only, idempotent, and preserves the active entry before activation", async (t) => {
+  const root = await temporaryRepository(t);
+  const parent = dirname(root);
+  const spoolRoot = resolve(parent, "unpublish-spool");
+  const before = await readManifest(root);
+  const entry = before.entries[0];
+  const queued: string[] = [];
+  await submitUnpublicationCommand(
+    { idempotencyKey: "unpublish-dash-review", entryId: entry.entryId },
+    { spoolRoot, dataRoot: root, enqueue: async (key) => { queued.push(key); } },
+  );
+  const command = await loadPublicationCommand("unpublish-dash-review", spoolRoot);
+  assert.equal(command.kind, "unpublishCanonicalEntry");
+  assert.deepEqual(queued, ["unpublish-dash-review"]);
+  await submitUnpublicationCommand(
+    { idempotencyKey: "unpublish-dash-review", entryId: entry.entryId },
+    { spoolRoot, dataRoot: root, enqueue: async (key) => { queued.push(key); } },
+  );
+  assert.deepEqual(queued, ["unpublish-dash-review", "unpublish-dash-review"]);
+  await assert.rejects(
+    submitUnpublicationCommand(
+      { idempotencyKey: "unpublish-dash-review", entryId: "another-entry" },
+      { spoolRoot, dataRoot: root, enqueue: async () => undefined },
+    ),
+    /already bound to another publication/,
+  );
+
+  await assert.rejects(
+    publish(root, command, { afterActivationTemporarySynced: () => { throw new Error("simulated activation failure"); } }),
+    /simulated activation failure/,
+  );
+  assert.deepEqual((await readManifest(root)).entries, before.entries, "failed activation retains the active revision");
+
+  const result = await publish(root, command);
+  assert.equal(result.revisionId, null);
+  assert.equal((await readManifest(root)).entries.some((candidate) => candidate.entryId === entry.entryId), false);
+  assert.equal((await publish(root, command)).alreadyActive, true);
 });
 
 async function publish(

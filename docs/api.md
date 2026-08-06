@@ -112,6 +112,33 @@ Returns the caller-visible source attribution and publication fields. This non-a
 
 ---
 
+## Admin: Compendium import review
+
+All review endpoints require the `admin` role. Review mutations record the authenticated user and timestamp. Publication endpoints only persist review intent and submit immutable commands to the #96 publication spool; application requests never write canonical repository files.
+
+### GET `/api/admin/compendium/import-runs`
+
+Lists import runs newest first. Optional query parameters are `status`, `limit` (1-200), and `offset`. Each run includes candidate, diff, diagnostic, pending-review, and failed-publication counts.
+
+### GET `/api/admin/compendium/import-runs/[runId]`
+
+Returns one run with candidates, previous content for diffing, source locators, diagnostics, publication state, and the latest 200 immutable review audit events. Use `diffStatus=new|unchanged|changed|missing|duplicate|invalid` to filter candidates.
+
+### POST `/api/admin/compendium/import-runs/[runId]/actions`
+
+Applies an individual or bulk action (up to 200 candidates).
+
+```json
+{
+  "action": "approve",
+  "candidateIds": ["candidate-uuid"]
+}
+```
+
+Actions are `approve`, `reject`, `merge`, `unpublish`, and `retry`. `merge` additionally accepts `resolvedContent` for one candidate or `resolvedContents` keyed by candidate UUID for bulk use. Invalid or duplicate candidates require merge; only missing candidates can be unpublished; failed publications can be retried with a new key, while an interrupted pending submission reuses its key. A successful response reports `queued`, `failed`, or `idle` per candidate. Queue failure leaves the review retryable and cannot alter the active canonical revision.
+
+---
+
 ## Admin: Ingestion
 
 ### POST `/api/admin/ingestion/upload`

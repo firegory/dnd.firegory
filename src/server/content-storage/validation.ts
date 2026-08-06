@@ -134,7 +134,7 @@ export function assertRepositoryActivationDelta(document: unknown): asserts docu
   if (!validateActivationDelta(document)) {
     throw new ContentSchemaValidationError("Repository activation delta", validateActivationDelta.errors ?? []);
   }
-  if (document.targetEntryId !== document.entry.entryId) {
+  if (document.entry !== null && document.targetEntryId !== document.entry.entryId) {
     throw new ContentIntegrityError("Repository activation delta target does not match its entry.");
   }
 }
@@ -145,7 +145,7 @@ export async function validateRepositoryActivationDelta(
 ): Promise<RepositoryActivationDelta> {
   assertRepositoryActivationDelta(document);
   const root = await realpath(dataRoot);
-  await validateManifestEntries(root, [document.entry]);
+  if (document.entry !== null) await validateManifestEntries(root, [document.entry]);
   return document;
 }
 
@@ -233,7 +233,8 @@ async function composeResolvedRepositoryManifest(root: string): Promise<Readonly
   for (const delta of await loadValidRepositoryActivationDeltas(root)) {
     const previous = targetGenerations.get(delta.targetEntryId);
     if (!previous || delta.generation > previous) {
-      entries.set(delta.targetEntryId, delta.entry);
+      if (delta.entry === null) entries.delete(delta.targetEntryId);
+      else entries.set(delta.targetEntryId, delta.entry);
       targetGenerations.set(delta.targetEntryId, delta.generation);
     }
     if (!highestGeneration || delta.generation > highestGeneration) highestGeneration = delta.generation;

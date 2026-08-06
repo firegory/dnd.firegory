@@ -59,7 +59,7 @@ export class PublicationFenceUnavailableError extends Error {
 
 export type PublicationResult = Readonly<{
   entryId: string;
-  revisionId: string;
+  revisionId: string | null;
   alreadyActive: boolean;
 }>;
 
@@ -81,7 +81,7 @@ export async function publishCanonicalRevision(options: Readonly<{
   now?: () => number;
   hooks?: PublicationHooks;
 }>): Promise<PublicationResult> {
-  assertCanonicalRevision(options.command.revision);
+  if (options.command.kind === "publishCanonicalRevision") assertCanonicalRevision(options.command.revision);
   const root = await canonicalRoot(options.dataRoot);
   const initialBootstrap = await loadRepositoryBootstrapDescriptor(root);
   const leaseManager = options.leaseManager ?? new RedisPublicationLeaseManager();
@@ -107,6 +107,28 @@ export async function publishCanonicalRevision(options: Readonly<{
       const bootstrap = await loadRepositoryBootstrapDescriptor(root);
       if (bootstrap.repositoryId !== initialBootstrap.repositoryId) {
         throw new ContentIntegrityError("Repository identity changed while acquiring its publication fence.");
+      }
+
+      if (options.command.kind === "unpublishCanonicalEntry") {
+        await assertLease(lease, leaseLost);
+        await ensureCanonicalDirectory(root, activationDirectoryPath(root));
+        await options.hooks?.beforeActivationInstall?.(options.command.generation);
+        const alreadyActive = await installActivationDelta(
+          root,
+          {
+            schemaVersion: 1,
+            kind: "repositoryActivationDelta",
+            readerContractVersion: 1,
+            generation: options.command.generation,
+            idempotencyKey: options.command.idempotencyKey,
+            targetEntryId: options.command.entryId,
+            entry: null,
+          },
+          lease.ownerId.toLowerCase(),
+          options.now?.() ?? Date.now(),
+          options.hooks?.afterActivationTemporarySynced,
+        );
+        return { entryId: options.command.entryId, revisionId: null, alreadyActive };
       }
 
       const revision = options.command.revision;

@@ -82,7 +82,7 @@ export type RepositoryActivationDelta = Readonly<{
   generation: string;
   idempotencyKey: string;
   targetEntryId: string;
-  entry: RepositoryManifestEntry;
+  entry: RepositoryManifestEntry | null;
 }>;
 
 export function getDataRoot(environment: NodeJS.ProcessEnv = process.env): string {

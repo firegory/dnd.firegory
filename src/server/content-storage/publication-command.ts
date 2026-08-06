@@ -14,6 +14,7 @@ import {
   publicationOutboxStatePath,
   publicationQuarantinePath,
   publicationSpoolPath,
+  assertStableId,
   type CanonicalRevision,
   type JsonValue,
 } from "./repository.ts";
@@ -25,6 +26,12 @@ export type PublicationCommand = Readonly<{
   idempotencyKey: string;
   generation: string;
   revision: CanonicalRevision;
+}> | Readonly<{
+  schemaVersion: 1;
+  kind: "unpublishCanonicalEntry";
+  idempotencyKey: string;
+  generation: string;
+  entryId: string;
 }>;
 
 export type PublicationOutboxState = Readonly<{
@@ -69,11 +76,41 @@ export async function submitPublicationCommand(
   options: SubmitOptions = {},
 ): Promise<Readonly<{ commandPath: string; existing: boolean }>> {
   assertCanonicalRevision(input.revision);
+  return submitCanonicalCommand({
+    schemaVersion: 1,
+    kind: "publishCanonicalRevision",
+    idempotencyKey: input.idempotencyKey,
+    revision: input.revision,
+  }, options);
+}
+
+export async function submitUnpublicationCommand(
+  input: Readonly<{ idempotencyKey: string; entryId: string }>,
+  options: SubmitOptions = {},
+): Promise<Readonly<{ commandPath: string; existing: boolean }>> {
+  assertStableId(input.idempotencyKey, "idempotencyKey");
+  assertStableId(input.entryId, "entryId");
+  return submitCanonicalCommand({
+    schemaVersion: 1,
+    kind: "unpublishCanonicalEntry",
+    idempotencyKey: input.idempotencyKey,
+    entryId: input.entryId,
+  }, options);
+}
+
+type UnreservedPublicationCommand =
+  | Omit<Extract<PublicationCommand, { kind: "publishCanonicalRevision" }>, "generation">
+  | Omit<Extract<PublicationCommand, { kind: "unpublishCanonicalEntry" }>, "generation">;
+
+async function submitCanonicalCommand(
+  input: UnreservedPublicationCommand,
+  options: SubmitOptions,
+): Promise<Readonly<{ commandPath: string; existing: boolean }>> {
   const spoolRoot = resolve(options.spoolRoot ?? getPublicationSpoolRoot());
   const commandPath = publicationSpoolPath(spoolRoot, input.idempotencyKey);
   const existingCommand = await loadPublicationCommandIfPresent(input.idempotencyKey, spoolRoot);
   if (existingCommand) {
-    assertSameRevision(existingCommand, input.revision, input.idempotencyKey);
+    assertSameCommand(existingCommand, input, input.idempotencyKey);
     return enqueueExistingCommand(existingCommand, commandPath, options, spoolRoot);
   }
   const dataRoot = resolve(options.dataRoot ?? getDataRoot());
@@ -91,13 +128,7 @@ export async function submitPublicationCommand(
     await options.afterGenerationReserved?.(generation);
     if (await ownsPublicationGenerationReservation(spoolRoot, reservation)) break;
   }
-  const command: PublicationCommand = {
-    schemaVersion: 1,
-    kind: "publishCanonicalRevision",
-    idempotencyKey: input.idempotencyKey,
-    generation,
-    revision: input.revision,
-  };
+  const command = { ...input, generation } as PublicationCommand;
   const encoded = `${canonicalJson(command as unknown as JsonValue)}\n`;
   await mkdir(dirname(commandPath), { recursive: true, mode: 0o750 });
   await mkdir(publicationOutboxStatePath(spoolRoot, input.idempotencyKey), { recursive: true, mode: 0o750 });
@@ -107,7 +138,7 @@ export async function submitPublicationCommand(
   const installedCommand = existing
     ? await loadPublicationCommand(input.idempotencyKey, spoolRoot)
     : command;
-  assertSameRevision(installedCommand, input.revision, input.idempotencyKey);
+  assertSameCommand(installedCommand, input, input.idempotencyKey);
   await ensurePendingState(spoolRoot, input.idempotencyKey, installedCommand.generation, now);
   const currentState = await readOutboxState(spoolRoot, input.idempotencyKey);
   if (currentState?.status === "completed") return { commandPath, existing };
@@ -205,14 +236,21 @@ export async function loadPublicationCommand(
   if (
     !isRecord(value) ||
     value.schemaVersion !== 1 ||
-    value.kind !== "publishCanonicalRevision" ||
+    !["publishCanonicalRevision", "unpublishCanonicalEntry"].includes(String(value.kind)) ||
     value.idempotencyKey !== idempotencyKey ||
     typeof value.generation !== "string" ||
     !/^[0-9]{32}$/.test(value.generation)
   ) {
     throw new PublicationCommandError(`Publication command ${idempotencyKey} is invalid.`);
   }
-  assertCanonicalRevision(value.revision);
+  const keys = Object.keys(value).sort().join(",");
+  if (value.kind === "publishCanonicalRevision") {
+    if (keys !== "generation,idempotencyKey,kind,revision,schemaVersion") throw new PublicationCommandError(`Publication command ${idempotencyKey} is invalid.`);
+    assertCanonicalRevision(value.revision);
+  } else {
+    if (keys !== "entryId,generation,idempotencyKey,kind,schemaVersion") throw new PublicationCommandError(`Publication command ${idempotencyKey} is invalid.`);
+    assertStableId(String(value.entryId), "entryId");
+  }
   return value as PublicationCommand;
 }
 
@@ -537,8 +575,10 @@ async function enqueueExistingCommand(
   return { commandPath, existing: true };
 }
 
-function assertSameRevision(command: PublicationCommand, revision: CanonicalRevision, idempotencyKey: string): void {
-  if (canonicalJson(command.revision as unknown as JsonValue) !== canonicalJson(revision as unknown as JsonValue)) {
+function assertSameCommand(command: PublicationCommand, input: UnreservedPublicationCommand, idempotencyKey: string): void {
+  const persisted: Partial<PublicationCommand> & { generation?: string } = { ...command };
+  delete persisted.generation;
+  if (canonicalJson(persisted as unknown as JsonValue) !== canonicalJson(input as unknown as JsonValue)) {
     throw new Error(`Idempotency key ${idempotencyKey} is already bound to another publication.`);
   }
 }

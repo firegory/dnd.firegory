@@ -2,7 +2,7 @@ export type AppLayoutRole = "user" | "premium" | "admin";
 
 export type NavigationItem = {
   href: string;
-  labelKey: "search" | "settings" | "sources" | "upload" | "users";
+  labelKey: "search" | "settings" | "sources" | "upload" | "users" | "importReview";
 };
 
 const BASE_NAV_ITEMS: readonly NavigationItem[] = [
@@ -13,6 +13,7 @@ const BASE_NAV_ITEMS: readonly NavigationItem[] = [
 const ADMIN_NAV_ITEMS: readonly NavigationItem[] = [
   { href: "/admin/sources", labelKey: "sources" },
   { href: "/admin/ingestion", labelKey: "upload" },
+  { href: "/admin/compendium/imports", labelKey: "importReview" },
   { href: "/admin/users", labelKey: "users" },
 ];
 
