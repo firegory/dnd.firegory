@@ -10,7 +10,7 @@ export default async function AdminIngestionPage() {
   await requireAdmin();
 
   return (
-    <AppLayout userRole="admin">
+    <AppLayout userRole="admin" wide>
       <div className="space-y-8">
         <nav className="flex items-center gap-2 text-sm text-text-muted">
           <Link href="/search" className="hover:text-accent"><T k="search" /></Link>
@@ -30,7 +30,7 @@ export default async function AdminIngestionPage() {
 
         <section>
           <div className="mb-4 flex items-center justify-between gap-4">
-            <h2 className="text-xl font-bold text-text-primary"><T k="processingJobs" /></h2>
+            <h2 id="processing-jobs-title" className="text-xl font-bold text-text-primary"><T k="processingJobs" /></h2>
             <span className="text-sm text-text-muted"><T k="refreshesEvery10Sec" /></span>
           </div>
           <JobsTable />

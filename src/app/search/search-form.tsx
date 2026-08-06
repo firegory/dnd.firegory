@@ -274,7 +274,7 @@ function CitationCard({ citation, onPreview }: { citation: Citation; onPreview: 
         type="button"
         disabled={!canPreview}
         onClick={() => canPreview && onPreview(citation)}
-        className="mb-4 block w-full border-l-3 border-accent pl-4 text-left text-sm leading-relaxed text-text-secondary italic transition-colors enabled:hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-70"
+        className="print-content mb-4 block w-full border-l-3 border-accent pl-4 text-left text-sm leading-relaxed text-text-secondary italic transition-colors enabled:hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-70"
         title={canPreview ? t("openCitationPreview") : t("citationPreviewUnavailable")}
       >
         «{citation.quote}»
