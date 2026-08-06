@@ -14,6 +14,7 @@
     "worker": "node --experimental-strip-types src/worker/index.ts",
     "ingest": "node --experimental-strip-types scripts/ingest.mts",
     "content-index": "node --experimental-strip-types scripts/content-index.mts",
+    "collect:next-dnd": "node --experimental-strip-types scripts/collect-next-dnd-snapshots.mts",
     "corpus-export": "node --experimental-strip-types scripts/corpus-export.mts",
     "agent-gateway": "node --experimental-strip-types scripts/agent-gateway.mts",
     "agent-healthcheck": "node --experimental-strip-types scripts/agent-healthcheck.mts",
@@ -22,6 +23,7 @@
   "dependencies": {
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
+    "cheerio": "^1.1.2",
     "next": "^16.2.6",
     "pg": "^8.21.0",
     "react": "^19.2.6",
