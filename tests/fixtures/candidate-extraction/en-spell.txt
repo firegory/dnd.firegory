@@ -1,0 +1,7 @@
+Burning Hands
+1st-level evocation
+Casting Time: 1 action
+Range: Self (15-foot cone)
+Components: V, S
+Duration: Instantaneous
+A thin sheet of flames shoots forth from your outstretched fingertips.

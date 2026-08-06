@@ -10,11 +10,13 @@ Key features:
 
 - **Password authentication** with role-based access (`user`, `premium`, `admin`).
 - **PDF ingestion** with OCR support — upload via admin UI or CLI.
+- **Structured PDF candidates** — deterministic spell, stat-block, table, and section extraction with citation-validated LLM fallback and review-only deduplication.
 - **Hybrid search** — keyword full-text + pgvector semantic retrieval with query expansion and reranking.
 - **Citation-first RAG answers** — short answer, direct quote, source metadata.
 - **Bilingual** — English and Russian content support, language toggle.
 - **Edition-aware** — D&D 5e and 5.5e toggle.
 - **Docker Compose** self-hosted deployment.
+- **Read-only agent gateway** with versioned HTTP and MCP access.
 
 ## Quick start
 
@@ -203,6 +205,8 @@ All API endpoints require authentication via session cookie unless noted.
 
 See [docs/api.md](docs/api.md) for the full endpoint reference covering search, admin ingestion, and content metadata CRUD.
 
+The separate agent process exposes scoped, read-only HTTP v1 and MCP tools over the indexed canonical model. See [docs/agent-gateway.md](docs/agent-gateway.md) for authentication, protocols, healthchecks, and the direct-NFS trust boundary.
+
 ## Configuration
 
 Copy `.env.example` to `.env.local` (for `npm run dev`) or `.env` (for Docker Compose):
@@ -218,6 +222,12 @@ cp .env.example .env.local
 | `APP_URL` | no | Public app URL (default: `http://localhost:3000`) |
 | `NEXT_PUBLIC_APP_URL` | no | Public app URL exposed to the browser |
 | `AUTH_SECRET` | no | Reserved for future session secret hardening |
+| `AGENT_GATEWAY_HOST` | no | Agent gateway bind address (default: `127.0.0.1`) |
+| `AGENT_GATEWAY_PORT` | no | Agent gateway port (default: `8787`) |
+| `AGENT_GATEWAY_TOKENS` | for API-token access | JSON array of SHA-256 token policies and read scopes |
+| `AGENT_GATEWAY_TOKENS_FILE` | recommended for gateway | File containing token-policy JSON |
+| `AGENT_GATEWAY_CURSOR_SECRET_FILE` | for gateway pagination | File containing at least 32 bytes of HMAC key material |
+| `AGENT_GATEWAY_ALLOW_SESSIONS` | no | Accept existing session tokens as read-only bearer credentials (default: `false`) |
 | `ZAI_API_KEY` | yes* | z.ai API key for z.ai embeddings (*required when using z.ai as embedding provider) |
 | `LLM_API_KEY` | yes* | API key for the LLM chat provider (*required for answer generation unless using a local endpoint) |
 | `LLM_BASE_URL` | no | LLM API base URL (default: `https://api.openai.com/v1`) |

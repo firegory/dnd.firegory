@@ -120,6 +120,8 @@ Compendium relations are source-derived and fail closed. A relation is readable 
 
 Canonical content on NFS has a different trust boundary. Direct filesystem access is a trusted administrative bypass and does not apply application RBAC; only administrators and trusted local agents may receive that mount. Untrusted users and scoped integrations must use application APIs, which enforce source access in PostgreSQL. This bypass is intentional and must not be exposed as a multi-tenant share.
 
+The standalone agent gateway is the remote integration boundary. Its HTTP v1 and MCP adapters share one read service over the indexed canonical model, derive source authorization from scoped token or session principals, and never read canonical or uploaded files. Direct NFS remains outside this gateway and is not evidence of remote caller authorization.
+
 ## Retrieval Pipeline
 
 Target pipeline:
