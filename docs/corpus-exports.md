@@ -36,7 +36,7 @@ $DND_DATA_ROOT/exports/
 
 Each `entries.jsonl` record embeds the complete validated canonical revision, including typed entry data, plain text, sections, citations with exact quotes and offsets, and source provenance. `sources.json` adds verified byte sizes to each canonical source-file path and hash. A consumer therefore needs no database lookup to interpret an entry or resolve its citation to a source file in the repository.
 
-Removal records contain `entryId`, `previousRevisionId`, and `previousContentHash`; they intentionally contain no current entry. Additions and updates embed the exact corresponding full entry record.
+Removal records contain `entryId`, `previousRevisionId`, and `previousContentHash`; they intentionally contain no current entry. Additions and updates embed the exact corresponding full entry record. Updates also carry the predecessor revision ID and content hash.
 
 ## Determinism And Integrity
 
@@ -46,13 +46,16 @@ Removal records contain `entryId`, `previousRevisionId`, and `previousContentHas
 - Markdown uses a fixed rendering of the same complete revisions represented in JSONL.
 - `catalog.json` records each declared canonical schema's version and SHA-256 bytes.
 - `manifest.json` records SHA-256 and byte size for every export artifact.
-- The export ID is derived from the catalog hash and incremental comparison boundary.
+- Derived format version 2 rejects unknown fields and requires canonical bytes for every JSON and JSONL artifact.
+- The export ID is derived from the catalog hash plus the hashes of both change artifacts, binding the complete incremental contract into immutable identity.
 - Re-running unchanged resolved input revalidates and reuses the existing export byte-for-byte.
 
-Validation recomputes hashes and cross-checks the catalog, source records, complete canonical revision identities, citation spans, JSONL changes, tombstones, README, and exact Markdown rendering. An invalid artifact is never published as latest.
+Validation loads the declared predecessor export, recursively validates its chain, recomputes the actual catalog diff, and verifies every addition, update, removal, and previous hash. It also recomputes artifact hashes and cross-checks strict catalogs, source records, complete canonical revision identities, citation spans, JSONL changes, tombstones, README, and exact Markdown rendering. Display names and source titles are Markdown-escaped and HTML-encoded. An invalid artifact is never published as latest.
 
 ## Atomic Publication
 
-Generation writes and `fsync`s every artifact in a private staging directory, validates the complete staged export, atomically renames it to its immutable content-derived directory, and `fsync`s `exports/`. It then writes and `fsync`s a temporary latest pointer, atomically renames that file to `latest.json`, and `fsync`s the directory again. Readers opening `latest.json` therefore see either the previous complete validated export or the new complete validated export, never a partial directory.
+Generation writes and `fsync`s every artifact in a private staging directory, validates the complete staged export, atomically renames it to its immutable content-derived directory, and `fsync`s `exports/`. Export directories and artifacts must be physical no-follow children of `exports`; symbolic links and escaping paths are rejected.
+
+Latest publication acquires an exclusive filesystem fence, compares the current pointer with the pointer observed before generation, rejects lower canonical activation generations, and re-resolves the canonical NFS snapshot while holding the fence. Only then does it write and `fsync` a temporary pointer, atomically rename that file to `latest.json`, and `fsync` the directory again. A paused stale generator therefore cannot replace a newer pointer. Readers see either the previous complete validated export or the new complete validated export, never a partial or regressed publication.
 
 The canonical repository's worker-only write and NFS rename/durability assumptions also apply to exports. Agents should mount the repository read-only and must enforce source access metadata before exposing exported personal or premium content.

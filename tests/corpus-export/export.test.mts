@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -133,6 +133,150 @@ test("published validation rejects a latest pointer that does not match its immu
   await assert.rejects(() => validatePublishedCorpusExport(root), /pointer does not match/);
 });
 
+test("incremental validation recomputes predecessor diff and verifies previous hashes", async (t) => {
+  const root = await temporaryRepository(t);
+  await generateCorpusExport({ dataRoot: root });
+  const original = await activeRevision(root, "dash");
+  const updated = revised(original, "dash", "Updated once");
+  await installRevision(root, updated, [{ entryId: updated.entryId, revisionId: updated.revisionId, contentHash: updated.contentHash, path: revisionPath(updated) }]);
+  const generated = await generateCorpusExport({ dataRoot: root });
+
+  const changes = JSON.parse(await readFile(resolve(generated.path, "changes.json"), "utf8")) as Record<string, unknown>;
+  changes.updates = [];
+  const forgedDiffPath = await rewriteIdentityBoundArtifacts(generated.path, {
+    "changes.json": `${canonicalJson(changes as JsonValue)}\n`,
+    "changes.jsonl": "",
+  });
+  await assert.rejects(() => validateCorpusExport(forgedDiffPath), /actual predecessor catalog diff/);
+
+  const secondRoot = await temporaryRepository(t);
+  await generateCorpusExport({ dataRoot: secondRoot });
+  const secondOriginal = await activeRevision(secondRoot, "dash");
+  const secondUpdated = revised(secondOriginal, "dash", "Updated twice");
+  await installRevision(secondRoot, secondUpdated, [{ entryId: secondUpdated.entryId, revisionId: secondUpdated.revisionId, contentHash: secondUpdated.contentHash, path: revisionPath(secondUpdated) }]);
+  const regenerated = await generateCorpusExport({ dataRoot: secondRoot });
+  const record = JSON.parse((await readFile(resolve(regenerated.path, "changes.jsonl"), "utf8")).trim()) as Record<string, unknown>;
+  record.previousContentHash = `sha256:${"0".repeat(64)}`;
+  const forgedHashPath = await rewriteIdentityBoundArtifacts(regenerated.path, {
+    "changes.jsonl": `${canonicalJson(record as JsonValue)}\n`,
+  });
+  await assert.rejects(() => validateCorpusExport(forgedHashPath), /previous identity/);
+});
+
+test("validation requires canonical JSON bytes and rejects unknown fields", async (t) => {
+  await t.test("noncanonical JSON bytes", async (st) => {
+    const root = await temporaryRepository(st);
+    const generated = await generateCorpusExport({ dataRoot: root });
+    const sourcesPath = resolve(generated.path, "sources.json");
+    const sources = JSON.parse(await readFile(sourcesPath, "utf8"));
+    const noncanonical = `${JSON.stringify(sources, null, 2)}\n`;
+    await writeFile(sourcesPath, noncanonical);
+    await rehashArtifact(generated.path, "sources.json", noncanonical);
+    await assert.rejects(() => validateCorpusExport(generated.path), /not canonical JSON/);
+  });
+
+  await t.test("unknown output fields", async (st) => {
+    const root = await temporaryRepository(st);
+    const generated = await generateCorpusExport({ dataRoot: root });
+    const sourcesPath = resolve(generated.path, "sources.json");
+    const sources = JSON.parse(await readFile(sourcesPath, "utf8")) as Record<string, JsonValue>;
+    sources.unexpected = true;
+    const contents = `${canonicalJson(sources)}\n`;
+    await writeFile(sourcesPath, contents);
+    await rehashArtifact(generated.path, "sources.json", contents);
+    await assert.rejects(() => validateCorpusExport(generated.path), /missing or unknown fields/);
+  });
+
+  await t.test("noncanonical JSONL bytes", async (st) => {
+    const root = await temporaryRepository(st);
+    const generated = await generateCorpusExport({ dataRoot: root });
+    const entriesPath = resolve(generated.path, "entries.jsonl");
+    const entry = JSON.parse((await readFile(entriesPath, "utf8")).trim());
+    const noncanonical = `${JSON.stringify(entry).replace("{", "{ ")}\n`;
+    await writeFile(entriesPath, noncanonical);
+    await rehashArtifact(generated.path, "entries.jsonl", noncanonical);
+    await assert.rejects(() => validateCorpusExport(generated.path), /not canonical JSON/);
+  });
+});
+
+test("validation rejects symlinked export directories and artifacts", async (t) => {
+  const root = await temporaryRepository(t);
+  const generated = await generateCorpusExport({ dataRoot: root });
+  const alias = resolve(root, "exports", `corpus-${"a".repeat(64)}`);
+  await symlink(generated.path, alias, "dir");
+  await assert.rejects(() => validateCorpusExport(alias), /no-follow directory/);
+
+  const readmePath = resolve(generated.path, "README.md");
+  const external = resolve(root, "outside-readme.md");
+  await writeFile(external, await readFile(readmePath));
+  await rm(readmePath);
+  await symlink(external, readmePath);
+  await assert.rejects(() => validateCorpusExport(generated.path), /no-follow regular file/);
+});
+
+test("Markdown display metadata HTML-encodes raw HTML and escapes Markdown", async (t) => {
+  const root = await temporaryRepository(t);
+  const original = await activeRevision(root, "dash");
+  const hostile = `<script>*bold*</script> & "quoted" 'single'`;
+  const source = {
+    ...original.source,
+    title: hostile,
+    publication: { ...original.source.publication, title: hostile },
+  };
+  const revision = createCanonicalRevision({
+    schemaVersion: original.schemaVersion,
+    kind: original.kind,
+    entryId: original.entryId,
+    createdAt: original.createdAt,
+    source,
+    entry: { ...original.entry, name: hostile },
+    text: original.text,
+    citations: original.citations,
+  } as CanonicalRevisionInput);
+  await writeFile(resolve(root, `sources/${source.sourceId}/source.json`), `${JSON.stringify(source, null, 2)}\n`);
+  await installRevision(root, revision, [{ entryId: revision.entryId, revisionId: revision.revisionId, contentHash: revision.contentHash, path: revisionPath(revision) }]);
+  const generated = await generateCorpusExport({ dataRoot: root });
+  const markdown = await readFile(resolve(generated.path, "entries.md"), "utf8");
+  const heading = markdown.split("\n").find((line) => line.startsWith("## "))!;
+  const sourceLine = markdown.split("\n").find((line) => line.startsWith("Source: "))!;
+  for (const line of [heading, sourceLine]) {
+    assert.doesNotMatch(line, /<script>/);
+    assert.match(line, /&lt;script&gt;\\\*bold\\\*&lt;\/script&gt;/);
+    assert.match(line, /&amp; &quot;quoted&quot; &#39;single&#39;/);
+  }
+});
+
+test("a paused older generator cannot regress latest after a newer snapshot publishes", async (t) => {
+  const root = await temporaryRepository(t);
+  const initial = await generateCorpusExport({ dataRoot: root });
+  const original = await activeRevision(root, "dash");
+  const older = revised(original, "dash", "Older snapshot");
+  await installRevision(root, older, [{ entryId: older.entryId, revisionId: older.revisionId, contentHash: older.contentHash, path: revisionPath(older) }]);
+
+  let releaseOlder!: () => void;
+  let reportPaused!: () => void;
+  const paused = new Promise<void>((resolvePaused) => { reportPaused = resolvePaused; });
+  const release = new Promise<void>((resolveRelease) => { releaseOlder = resolveRelease; });
+  const olderGeneration = generateCorpusExport({
+    dataRoot: root,
+    beforeLatestPublication: async () => {
+      reportPaused();
+      await release;
+    },
+  });
+  await paused;
+
+  const newer = revised(original, "dash", "Newer snapshot");
+  await installRevision(root, newer, [{ entryId: newer.entryId, revisionId: newer.revisionId, contentHash: newer.contentHash, path: revisionPath(newer) }]);
+  const newerGeneration = await generateCorpusExport({ dataRoot: root });
+  releaseOlder();
+  await assert.rejects(olderGeneration, /compare-and-swap boundary|advanced before/);
+
+  const latest = await validatePublishedCorpusExport(root);
+  assert.equal(latest.manifest.exportId, newerGeneration.exportId);
+  assert.notEqual(latest.manifest.exportId, initial.exportId);
+});
+
 test("CLI generates and validates exports without database connectivity", async (t) => {
   const root = await temporaryRepository(t);
   const environment = { ...process.env, DND_DATA_ROOT: root, DATABASE_URL: "postgresql://unreachable.invalid/no-db" };
@@ -195,4 +339,45 @@ async function exportBytes(path: string): Promise<Record<string, string>> {
   const output: Record<string, string> = {};
   for (const name of (await readdir(path)).sort()) output[name] = (await readFile(resolve(path, name))).toString("base64");
   return output;
+}
+
+async function rehashArtifact(exportPath: string, artifactName: string, contents: string): Promise<void> {
+  const manifestPath = resolve(exportPath, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    artifacts: Array<{ path: string; contentHash: string; byteSize: number }>;
+  };
+  const artifact = manifest.artifacts.find((candidate) => candidate.path === artifactName)!;
+  artifact.contentHash = sha256(contents);
+  artifact.byteSize = Buffer.byteLength(contents);
+  await writeFile(manifestPath, `${canonicalJson(manifest as unknown as JsonValue)}\n`);
+}
+
+async function rewriteIdentityBoundArtifacts(exportPath: string, updates: Record<string, string>): Promise<string> {
+  for (const [name, contents] of Object.entries(updates)) await writeFile(resolve(exportPath, name), contents);
+  const manifestPath = resolve(exportPath, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, JsonValue> & {
+    artifacts: Array<{ path: string; contentHash: string; byteSize: number }>;
+  };
+  for (const [name, contents] of Object.entries(updates)) {
+    const artifact = manifest.artifacts.find((candidate) => candidate.path === name)!;
+    artifact.contentHash = sha256(contents);
+    artifact.byteSize = Buffer.byteLength(contents);
+    if (name === "changes.json") manifest.changesHash = artifact.contentHash;
+    if (name === "changes.jsonl") manifest.changeRecordsHash = artifact.contentHash;
+  }
+  const identity = canonicalJson({
+    catalogHash: manifest.catalogHash,
+    changeRecordsHash: manifest.changeRecordsHash,
+    changesHash: manifest.changesHash,
+  } as JsonValue);
+  const exportId = `corpus-${createHash("sha256").update(identity).digest("hex")}`;
+  manifest.exportId = exportId;
+  await writeFile(manifestPath, `${canonicalJson(manifest as JsonValue)}\n`);
+  const target = resolve(dirname(exportPath), exportId);
+  if (target !== exportPath) await rename(exportPath, target);
+  return target;
+}
+
+function sha256(contents: string): string {
+  return `sha256:${createHash("sha256").update(contents).digest("hex")}`;
 }
