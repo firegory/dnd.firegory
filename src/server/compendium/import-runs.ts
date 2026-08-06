@@ -126,7 +126,7 @@ export class CompendiumImportRunService {
       )).rows[0];
       if (!file) throw new CompendiumValidationError("The file is outside the requested source boundary.");
 
-      let generationJobId: string | null = null;
+      let normalizedJobId = input.ingestionJobId ?? null;
       if (input.generationId != null) {
         const generation = (await client.query<{ ingestion_job_id: string | null }>(
           `SELECT ingestion_job_id FROM ingestion_generations
@@ -135,23 +135,23 @@ export class CompendiumImportRunService {
           [input.generationId, input.fileId, input.sourceId],
         )).rows[0];
         if (!generation) throw new CompendiumValidationError("The generation is outside the requested source boundary.");
-        generationJobId = generation.ingestion_job_id;
+        if (input.ingestionJobId != null && generation.ingestion_job_id !== input.ingestionJobId) {
+          throw new CompendiumValidationError("The generation does not belong to the requested ingestion job.");
+        }
+        normalizedJobId = generation.ingestion_job_id;
       }
-      if (input.ingestionJobId != null) {
+      if (normalizedJobId != null) {
         const job = (await client.query<{ id: string }>(
           `SELECT id FROM ingestion_jobs
            WHERE id = $1 AND file_id = $2 AND source_id = $3
            FOR SHARE`,
-          [input.ingestionJobId, input.fileId, input.sourceId],
+          [normalizedJobId, input.fileId, input.sourceId],
         )).rows[0];
         if (!job) throw new CompendiumValidationError("The ingestion job is outside the requested source boundary.");
-        if (input.generationId != null && generationJobId !== input.ingestionJobId) {
-          throw new CompendiumValidationError("The generation does not belong to the requested ingestion job.");
-        }
       }
 
       const values = [
-        input.sourceId, input.fileId, input.generationId ?? null, input.ingestionJobId ?? null,
+        input.sourceId, input.fileId, input.generationId ?? null, normalizedJobId,
         input.importer.trim(), input.importerVersion.trim(), input.parserVersion.trim(),
         input.promptVersion.trim(), input.modelVersion.trim(), input.inputSha256, input.actor.trim(),
       ];
@@ -160,7 +160,7 @@ export class CompendiumImportRunService {
            (source_id, file_id, generation_id, ingestion_job_id, importer, importer_version,
             parser_version, prompt_version, model_version, input_sha256)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-         ON CONFLICT ON CONSTRAINT compendium_import_runs_identity_unique DO NOTHING
+         ON CONFLICT DO NOTHING
          RETURNING id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token`,
         values.slice(0, 10),
       );
@@ -170,7 +170,7 @@ export class CompendiumImportRunService {
           `SELECT id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token
            FROM compendium_import_runs
            WHERE source_id = $1 AND file_id = $2 AND generation_id IS NOT DISTINCT FROM $3
-             AND ingestion_job_id IS NOT DISTINCT FROM $4
+             AND ($3::uuid IS NOT NULL OR ingestion_job_id IS NOT DISTINCT FROM $4)
              AND importer = $5 AND importer_version = $6 AND parser_version = $7
              AND prompt_version = $8 AND model_version = $9 AND input_sha256 = $10`,
           values.slice(0, 10),

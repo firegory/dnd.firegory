@@ -17,10 +17,12 @@ test("run identity persists versions, input hash, leases, counters, and checkpoi
   for (const column of ["parser_version", "prompt_version", "model_version", "input_sha256", "checkpoint", "lease_token", "lease_expires_at", "occurrence_count", "candidate_count", "diagnostic_count"]) {
     assert.match(sql, new RegExp(`ADD COLUMN IF NOT EXISTS ${column}`));
   }
-  assert.match(sql, /compendium_import_runs_identity_unique UNIQUE NULLS NOT DISTINCT/);
-  assert.match(sql, /source_id, file_id, generation_id, importer, importer_version, parser_version/);
+  assert.match(sql, /compendium_import_runs_generation_identity_idx[\s\S]*generation_id[\s\S]*WHERE generation_id IS NOT NULL/);
+  assert.match(sql, /compendium_import_runs_job_identity_idx[\s\S]*ingestion_job_id[\s\S]*NULLS NOT DISTINCT WHERE generation_id IS NULL/);
+  assert.doesNotMatch(sql, /compendium_import_runs_identity_unique/);
+  assert.match(sql, /SET ingestion_job_id = generation\.ingestion_job_id[\s\S]*run\.generation_id = generation\.id/);
   assert.match(sql, /compendium_validate_import_run_ownership/);
-  assert.match(sql, /generation\.ingestion_job_id = NEW\.ingestion_job_id/);
+  assert.match(sql, /generation\.ingestion_job_id IS NOT DISTINCT FROM NEW\.ingestion_job_id/);
   assert.match(sql, /compendium_guard_import_run_lifecycle/);
   assert.match(sql, /UPDATE compendium_import_runs run[\s\S]*run\.status = 'succeeded' THEN 'completed'/);
   assert.match(sql, /run\.status = 'failed' AND EXISTS[\s\S]*THEN 'occurrences'[\s\S]*run\.status = 'failed' THEN 'created'/);

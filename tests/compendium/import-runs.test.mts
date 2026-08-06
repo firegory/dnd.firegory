@@ -10,8 +10,22 @@ const ids = {
   generation: "10000000-0000-4000-8000-000000000003",
   run: "10000000-0000-4000-8000-000000000004",
   lease: "10000000-0000-4000-8000-000000000005",
+  job: "10000000-0000-4000-8000-000000000006",
+  otherJob: "10000000-0000-4000-8000-000000000007",
+  otherRun: "10000000-0000-4000-8000-000000000008",
 };
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const runInput = {
+  sourceId: ids.source,
+  fileId: ids.file,
+  importer: "core",
+  importerVersion: "1",
+  parserVersion: "2",
+  promptVersion: "3",
+  modelVersion: "4",
+  inputSha256: hash("input"),
+  actor: "test",
+} as const;
 const runRow = {
   id: ids.run,
   source_id: ids.source,
@@ -55,8 +69,117 @@ test("identical run creation resolves the existing durable run", async () => {
   assert.equal(result.status, "succeeded");
   assert.match(statements[0], /FROM files[\s\S]*FOR SHARE/);
   assert.match(statements[1], /FROM ingestion_generations[\s\S]*FOR SHARE/);
-  assert.match(statements[2], /ON CONFLICT ON CONSTRAINT compendium_import_runs_identity_unique DO NOTHING/);
-  assert.match(statements[3], /ingestion_job_id IS NOT DISTINCT FROM \$4/);
+  assert.match(statements[2], /ON CONFLICT DO NOTHING/);
+  assert.match(statements[3], /\$3::uuid IS NOT NULL OR ingestion_job_id IS NOT DISTINCT FROM \$4/);
+});
+
+test("generation job omitted and matching-supplied requests resolve the same run", async () => {
+  const insertedJobs: unknown[] = [];
+  let insertCount = 0;
+  let fallbackCount = 0;
+  const service = new CompendiumImportRunService(async (callback) => callback({
+    async query(sql: string, values: unknown[] = []) {
+      if (sql.includes("SELECT id FROM files")) return { rows: [{ id: ids.file }] } as never;
+      if (sql.includes("FROM ingestion_generations")) return { rows: [{ ingestion_job_id: ids.job }] } as never;
+      if (sql.includes("FROM ingestion_jobs")) return { rows: [{ id: ids.job }] } as never;
+      if (sql.includes("INSERT INTO compendium_import_runs")) {
+        insertedJobs.push(values[3]);
+        insertCount++;
+        return { rows: insertCount === 1 ? [{ ...runRow, ingestion_job_id: ids.job }] : [] } as never;
+      }
+      if (sql.includes("FROM compendium_import_runs")) {
+        fallbackCount++;
+        return { rows: [{ ...runRow, ingestion_job_id: ids.job }] } as never;
+      }
+      return { rows: [], rowCount: 1 } as never;
+    },
+  }));
+  const omitted = await service.createRun({ ...runInput, generationId: ids.generation });
+  const supplied = await service.createRun({ ...runInput, generationId: ids.generation, ingestionJobId: ids.job });
+  assert.equal(omitted.id, supplied.id);
+  assert.deepEqual(insertedJobs, [ids.job, ids.job]);
+  assert.equal(fallbackCount, 1);
+});
+
+test("generation requests reject a supplied job that does not own the generation", async () => {
+  const statements: string[] = [];
+  const service = new CompendiumImportRunService(async (callback) => callback({
+    async query(sql: string) {
+      statements.push(sql);
+      if (sql.includes("SELECT id FROM files")) return { rows: [{ id: ids.file }] } as never;
+      if (sql.includes("FROM ingestion_generations")) return { rows: [{ ingestion_job_id: ids.job }] } as never;
+      throw new Error("job lookup and insert must not run");
+    },
+  }));
+  await assert.rejects(
+    service.createRun({ ...runInput, generationId: ids.generation, ingestionJobId: ids.otherJob }),
+    /generation does not belong to the requested ingestion job/,
+  );
+  assert.equal(statements.length, 2);
+});
+
+test("job-only identity is idempotent for the same job", async () => {
+  let insertCount = 0;
+  let fallbackSql = "";
+  const service = new CompendiumImportRunService(async (callback) => callback({
+    async query(sql: string) {
+      if (sql.includes("SELECT id FROM files")) return { rows: [{ id: ids.file }] } as never;
+      if (sql.includes("FROM ingestion_jobs")) return { rows: [{ id: ids.job }] } as never;
+      if (sql.includes("INSERT INTO compendium_import_runs")) {
+        insertCount++;
+        return { rows: insertCount === 1 ? [{ ...runRow, generation_id: null, ingestion_job_id: ids.job }] : [] } as never;
+      }
+      if (sql.includes("FROM compendium_import_runs")) {
+        fallbackSql = sql;
+        return { rows: [{ ...runRow, generation_id: null, ingestion_job_id: ids.job }] } as never;
+      }
+      return { rows: [], rowCount: 1 } as never;
+    },
+  }));
+  const first = await service.createRun({ ...runInput, ingestionJobId: ids.job });
+  const second = await service.createRun({ ...runInput, ingestionJobId: ids.job });
+  assert.equal(first.id, second.id);
+  assert.match(fallbackSql, /\$3::uuid IS NOT NULL OR ingestion_job_id IS NOT DISTINCT FROM \$4/);
+});
+
+test("job-only identity keeps different jobs distinct", async () => {
+  const service = new CompendiumImportRunService(async (callback) => callback({
+    async query(sql: string, values: unknown[] = []) {
+      if (sql.includes("SELECT id FROM files")) return { rows: [{ id: ids.file }] } as never;
+      if (sql.includes("FROM ingestion_jobs")) return { rows: [{ id: values[0] }] } as never;
+      if (sql.includes("INSERT INTO compendium_import_runs")) return {
+        rows: [{ ...runRow, id: values[3] === ids.job ? ids.run : ids.otherRun, generation_id: null, ingestion_job_id: values[3] }],
+      } as never;
+      return { rows: [], rowCount: 1 } as never;
+    },
+  }));
+  const first = await service.createRun({ ...runInput, ingestionJobId: ids.job });
+  const second = await service.createRun({ ...runInput, ingestionJobId: ids.otherJob });
+  assert.notEqual(first.id, second.id);
+});
+
+test("generation-less identity compares absent jobs null-safely", async () => {
+  let insertCount = 0;
+  let fallbackValues: unknown[] = [];
+  const service = new CompendiumImportRunService(async (callback) => callback({
+    async query(sql: string, values: unknown[] = []) {
+      if (sql.includes("SELECT id FROM files")) return { rows: [{ id: ids.file }] } as never;
+      if (sql.includes("INSERT INTO compendium_import_runs")) {
+        insertCount++;
+        return { rows: insertCount === 1 ? [{ ...runRow, generation_id: null, ingestion_job_id: null }] : [] } as never;
+      }
+      if (sql.includes("FROM compendium_import_runs")) {
+        fallbackValues = values;
+        return { rows: [{ ...runRow, generation_id: null, ingestion_job_id: null }] } as never;
+      }
+      return { rows: [], rowCount: 1 } as never;
+    },
+  }));
+  const first = await service.createRun(runInput);
+  const second = await service.createRun(runInput);
+  assert.equal(first.id, second.id);
+  assert.equal(fallbackValues[2], null);
+  assert.equal(fallbackValues[3], null);
 });
 
 test("run ownership is fully validated before insert or conflict fallback", async () => {

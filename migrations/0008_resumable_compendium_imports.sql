@@ -59,6 +59,14 @@ occurrence_count = (
   WHERE occurrence.import_run_id = run.id
 );
 
+-- A generation is the identity-bearing owner when present, so its job is
+-- derived rather than caller-selected. This also normalizes 0007 rows.
+UPDATE compendium_import_runs run
+SET ingestion_job_id = generation.ingestion_job_id
+FROM ingestion_generations generation
+WHERE run.generation_id = generation.id
+  AND run.ingestion_job_id IS DISTINCT FROM generation.ingestion_job_id;
+
 ALTER TABLE compendium_import_runs
   ALTER COLUMN parser_version SET NOT NULL,
   ALTER COLUMN prompt_version SET NOT NULL,
@@ -84,10 +92,20 @@ ALTER TABLE compendium_import_runs
   ),
   ADD CONSTRAINT compendium_import_runs_success_checkpoint CHECK (
     status <> 'succeeded' OR checkpoint = 'completed'
-  ),
-  ADD CONSTRAINT compendium_import_runs_identity_unique UNIQUE NULLS NOT DISTINCT
-    (source_id, file_id, generation_id, importer, importer_version, parser_version,
-     prompt_version, model_version, input_sha256);
+  );
+
+-- Generation-backed identity deliberately omits the derived job. Without a
+-- generation, the optional job is identity-bearing and NULL compares equal.
+CREATE UNIQUE INDEX IF NOT EXISTS compendium_import_runs_generation_identity_idx
+  ON compendium_import_runs (
+    source_id, file_id, generation_id, importer, importer_version, parser_version,
+    prompt_version, model_version, input_sha256
+  ) WHERE generation_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS compendium_import_runs_job_identity_idx
+  ON compendium_import_runs (
+    source_id, file_id, ingestion_job_id, importer, importer_version, parser_version,
+    prompt_version, model_version, input_sha256
+  ) NULLS NOT DISTINCT WHERE generation_id IS NULL;
 
 CREATE INDEX IF NOT EXISTS compendium_import_runs_resume_idx
   ON compendium_import_runs(status, lease_expires_at)
@@ -103,7 +121,7 @@ BEGIN
     SELECT 1 FROM ingestion_generations generation
     WHERE generation.id = NEW.generation_id AND generation.file_id = NEW.file_id
       AND generation.source_id = NEW.source_id
-      AND (NEW.ingestion_job_id IS NULL OR generation.ingestion_job_id = NEW.ingestion_job_id)
+      AND generation.ingestion_job_id IS NOT DISTINCT FROM NEW.ingestion_job_id
   )) OR (NEW.ingestion_job_id IS NOT NULL AND NOT EXISTS (
     SELECT 1 FROM ingestion_jobs job
     WHERE job.id = NEW.ingestion_job_id AND job.file_id = NEW.file_id
