@@ -13,7 +13,8 @@
     "db:migrate": "node --experimental-strip-types scripts/migrate.mts",
     "worker": "node --experimental-strip-types src/worker/index.ts",
     "ingest": "node --experimental-strip-types scripts/ingest.mts",
-    "content-index": "node --experimental-strip-types scripts/content-index.mts"
+    "content-index": "node --experimental-strip-types scripts/content-index.mts",
+    "corpus-export": "node --experimental-strip-types scripts/corpus-export.mts"
   },
   "dependencies": {
     "ajv": "^8.20.0",
