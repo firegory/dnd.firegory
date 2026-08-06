@@ -269,6 +269,10 @@ export class ContentMetadataService {
     input: UpdateSourceMetadataInput,
   ): Promise<SourceMetadataRecord> {
     assertAdminContext(admin);
+    if (!isRecord(input)) throw new ContentMetadataValidationError("source update must be an object.");
+    if ("publication" in input && input.publication !== undefined && !isRecord(input.publication)) {
+      throw new ContentMetadataValidationError("publication must be a non-null object.");
+    }
     const current = await this.getSource(admin, sourceId);
     const publication = input.publication === undefined
       ? current.publication
@@ -453,7 +457,7 @@ export function normalizeSourceInput(input: CreateSourceMetadataInput): Omit<Req
   const canonicalSourceId = optionalStableId(input.canonicalSourceId, "canonicalSourceId");
   const publication = normalizePublication(input.publication, title, input.edition);
   const license = optionalTrimmed(input.license, "license");
-  const ownerUserId = input.ownerUserId ? requireTrimmed(input.ownerUserId, "ownerUserId") : null;
+  const ownerUserId = input.ownerUserId ? requireUuid(input.ownerUserId, "ownerUserId") : null;
 
   if (input.accessTier === "open") {
     if (ownerUserId) throw new ContentMetadataValidationError("Open/SRD sources cannot have an owner.");
@@ -470,8 +474,8 @@ export function normalizeSourceInput(input: CreateSourceMetadataInput): Omit<Req
 }
 
 function normalizePublication(input: PublicationMetadataInput | undefined, sourceTitle: string, edition: SourceEdition): PublicationMetadata {
-  const publication = input ?? {};
-  if (!isRecord(publication)) throw new ContentMetadataValidationError("publication must be an object.");
+  const publication = input === undefined ? {} : input;
+  if (!isRecord(publication)) throw new ContentMetadataValidationError("publication must be a non-null object.");
   const allowed = new Set(["code", "title", "publisher", "releaseYear", "revision", "origin", "attribution", "sourcePriority", "canonicalBookId"]);
   for (const key of Object.keys(publication)) {
     if (!allowed.has(key)) throw new ContentMetadataValidationError(`publication.${key} is not supported.`);
@@ -525,16 +529,17 @@ function normalizeOrigin(origin: PublicationMetadataInput["origin"]): Publicatio
     throw new ContentMetadataValidationError("publication.origin.url and publication.origin.id must be provided together.");
   }
   if (!url || !id) return null;
+  const normalizedUrl = url.replace(/^https?:/i, (scheme) => scheme.toLowerCase());
   let parsed: URL;
   try {
-    parsed = new URL(url);
+    parsed = new URL(normalizedUrl);
   } catch {
     throw new ContentMetadataValidationError("publication.origin.url must be a valid HTTP(S) URL.");
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new ContentMetadataValidationError("publication.origin.url must be a valid HTTP(S) URL.");
   }
-  return { url, id };
+  return { url: normalizedUrl, id };
 }
 
 export function normalizeFileInput(input: CreateFileMetadataInput): Required<CreateFileMetadataInput> {
@@ -587,6 +592,14 @@ function optionalStableId(value: string | null | undefined, field: string): stri
     throw new ContentMetadataValidationError(`${field} must be a lowercase stable ID.`);
   }
   return id;
+}
+
+function requireUuid(value: string, field: string): string {
+  const uuid = requireTrimmed(value, field).toLowerCase();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(uuid)) {
+    throw new ContentMetadataValidationError(`${field} must be a UUID.`);
+  }
+  return uuid;
 }
 
 function validateEnum<T extends readonly string[]>(value: string, allowed: T, field: string): asserts value is T[number] {

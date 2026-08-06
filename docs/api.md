@@ -329,14 +329,14 @@ Create a new source metadata record.
 | `edition` | string | yes | `5e` or `5.5e` |
 | `language` | string | yes | `en` or `ru` |
 | `accessTier` | string | yes | `open`, `premium`, or `personal` |
-| `ownerUserId` | string | no | Required for `personal` tier |
+| `ownerUserId` | UUID string | no | Required for `personal` tier; rejected for `open` and `premium` |
 | `publication` | object | no | Bibliographic projection; omitted values retain documented nullable/default behavior |
 | `publication.code` | string or null | no | Publication/catalog code |
 | `publication.title` | string | no | Publication title; defaults to source `title` |
 | `publication.publisher` | string or null | no | Publisher |
 | `publication.releaseYear` | integer or null | no | 1974-2100; `5.5e` cannot predate 2024 |
 | `publication.revision` | string or null | no | Printing/revision; requires `releaseYear` |
-| `publication.origin` | object or null | no | External HTTP(S) `url` and `id`, supplied together |
+| `publication.origin` | object or null | no | External HTTP(S) `url` and `id`, supplied together; URL schemes are normalized to lowercase |
 | `publication.attribution` | string or null | no | Display attribution |
 | `publication.sourcePriority` | integer | no | 0-1000; defaults to 0 |
 | `publication.canonicalBookId` | string or null | no | Stable conceptual book identity |

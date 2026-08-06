@@ -2,10 +2,9 @@ import { NextResponse } from "next/server";
 
 import { resolveAdminContextFromRequest } from "../../../../../server/admin/admin-context.ts";
 import {
-  ContentMetadataNotFoundError,
   ContentMetadataService,
-  ContentMetadataValidationError,
 } from "../../../../../server/content/metadata.ts";
+import { mapContentMetadataHttpError } from "../../../../../server/content/metadata-http.ts";
 
 function getService(): ContentMetadataService {
   return new ContentMetadataService();
@@ -21,7 +20,7 @@ export async function GET(request: Request, context: RouteContext) {
     const { sourceId } = await context.params;
     return NextResponse.json(await getService().getSource(admin, sourceId));
   } catch (error) {
-    return errorResponse(error);
+    return sourceMetadataErrorResponse(error);
   }
 }
 
@@ -33,7 +32,7 @@ export async function PATCH(request: Request, context: RouteContext) {
     const { sourceId } = await context.params;
     return NextResponse.json(await getService().updateSource(admin, sourceId, await request.json()));
   } catch (error) {
-    return errorResponse(error);
+    return sourceMetadataErrorResponse(error);
   }
 }
 
@@ -45,7 +44,7 @@ export async function DELETE(request: Request, context: RouteContext) {
     const { sourceId } = await context.params;
     return NextResponse.json(await getService().deleteSource(admin, sourceId));
   } catch (error) {
-    return errorResponse(error);
+    return sourceMetadataErrorResponse(error);
   }
 }
 
@@ -56,12 +55,8 @@ function forbidden(): NextResponse {
   );
 }
 
-function errorResponse(error: unknown): NextResponse {
-  if (error instanceof ContentMetadataValidationError) {
-    return NextResponse.json({ error: error.message }, { status: 400 });
-  }
-  if (error instanceof ContentMetadataNotFoundError) {
-    return NextResponse.json({ error: error.message }, { status: 404 });
-  }
+function sourceMetadataErrorResponse(error: unknown): NextResponse {
+  const mapped = mapContentMetadataHttpError(error);
+  if (mapped) return NextResponse.json(mapped.body, { status: mapped.status });
   throw error;
 }

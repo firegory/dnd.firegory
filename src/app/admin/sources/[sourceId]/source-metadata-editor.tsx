@@ -1,64 +1,29 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { AppSelect } from "../../../../components/ui/select";
 import { useUiLanguage } from "../../../../components/ui/i18n";
 import type { SourceWithStats } from "../../../../server/admin/source-view";
+import {
+  createSourceMetadataFormState,
+  sourceMetadataPatchFromForm,
+  type SourceMetadataFormState,
+} from "./source-metadata-form";
 
 const LANGUAGE_OPTIONS = [
   { value: "ru", label: "RU" },
   { value: "en", label: "EN" },
 ];
 
-const EDITION_VALUES = new Set(["5.5e", "5e"]);
-const LANGUAGE_VALUES = new Set(["ru", "en"]);
-
-const STORAGE_KEYS = {
-  edition: "dnd.firegory.sourceMetadata.edition",
-  language: "dnd.firegory.sourceMetadata.language",
-} as const;
-
 export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
   const { t } = useUiLanguage();
-  const [title, setTitle] = useState(source.title);
-  const [category, setCategory] = useState(source.category);
-  const [edition, setEdition] = useState(source.edition);
-  const [language, setLanguage] = useState(source.language);
-  const [accessTier, setAccessTier] = useState(source.accessTier);
-  const [ownerUserId, setOwnerUserId] = useState(source.ownerUserId ?? "");
-  const [canonicalSourceId, setCanonicalSourceId] = useState(source.canonicalSourceId ?? "");
-  const [publicationCode, setPublicationCode] = useState(source.publication.code ?? "");
-  const [publicationTitle, setPublicationTitle] = useState(source.publication.title);
-  const [publisher, setPublisher] = useState(source.publication.publisher ?? "");
-  const [releaseYear, setReleaseYear] = useState(source.publication.releaseYear?.toString() ?? "");
-  const [revision, setRevision] = useState(source.publication.revision ?? "");
-  const [originUrl, setOriginUrl] = useState(source.publication.origin?.url ?? "");
-  const [originId, setOriginId] = useState(source.publication.origin?.id ?? "");
-  const [attribution, setAttribution] = useState(source.publication.attribution ?? "");
-  const [sourcePriority, setSourcePriority] = useState(source.publication.sourcePriority.toString());
-  const [canonicalBookId, setCanonicalBookId] = useState(source.publication.canonicalBookId ?? "");
-  const [license, setLicense] = useState(source.license ?? "");
+  const [form, setForm] = useState(() => createSourceMetadataFormState(source));
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [message, setMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    const storedEdition = window.localStorage.getItem(STORAGE_KEYS.edition);
-    const storedLanguage = window.localStorage.getItem(STORAGE_KEYS.language);
-    if (storedEdition && EDITION_VALUES.has(storedEdition)) {
-      queueMicrotask(() => setEdition(storedEdition as typeof edition));
-    }
-    if (storedLanguage && LANGUAGE_VALUES.has(storedLanguage)) {
-      queueMicrotask(() => setLanguage(storedLanguage as typeof language));
-    }
-  }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEYS.edition, edition);
-  }, [edition]);
-
-  useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEYS.language, language);
-  }, [language]);
+  function setField<K extends keyof SourceMetadataFormState>(field: K, value: SourceMetadataFormState[K]) {
+    setForm((current) => ({ ...current, [field]: value }));
+  }
 
   const categoryOptions = [
     { value: "core_rules", label: t("coreRules") },
@@ -82,27 +47,7 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
       const response = await fetch(`/api/admin/sources/${source.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          canonicalSourceId: canonicalSourceId || null,
-          title,
-          category,
-          edition,
-          language,
-          accessTier,
-          ownerUserId: accessTier === "personal" ? ownerUserId || null : null,
-          publication: {
-            code: publicationCode || null,
-            title: publicationTitle,
-            publisher: publisher || null,
-            releaseYear: releaseYear ? Number(releaseYear) : null,
-            revision: revision || null,
-            origin: originUrl || originId ? { url: originUrl || null, id: originId || null } : null,
-            attribution: attribution || null,
-            sourcePriority: Number(sourcePriority),
-            canonicalBookId: canonicalBookId || null,
-          },
-          license: license || null,
-        }),
+        body: JSON.stringify(sourceMetadataPatchFromForm(form)),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -136,28 +81,28 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
         <label className="flex flex-col gap-1.5 sm:col-span-2">
           <span className="text-xs font-semibold tracking-wide text-text-muted uppercase">{t("title")}</span>
           <input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
+            value={form.title}
+            onChange={(event) => setField("title", event.target.value)}
             className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
           />
         </label>
-        <AppSelect label={t("category")} value={category} options={categoryOptions} onChange={(value) => setCategory(value as typeof category)} />
-        <AppSelect label={t("edition")} value={edition} options={editionOptions} onChange={(value) => setEdition(value as typeof edition)} />
-        <AppSelect label={t("language")} value={language} options={LANGUAGE_OPTIONS} onChange={(value) => setLanguage(value as typeof language)} />
-        <AppSelect label={t("access")} value={accessTier} options={accessOptions} onChange={(value) => setAccessTier(value as typeof accessTier)} />
-        <TextField label={t("ownerUserId")} value={ownerUserId} onChange={setOwnerUserId} disabled={accessTier !== "personal"} />
-        <TextField label={t("canonicalSourceId")} value={canonicalSourceId} onChange={setCanonicalSourceId} />
-        <TextField label={t("publicationCode")} value={publicationCode} onChange={setPublicationCode} />
-        <TextField label={t("publicationTitle")} value={publicationTitle} onChange={setPublicationTitle} />
-        <TextField label={t("publisher")} value={publisher} onChange={setPublisher} />
-        <TextField label={t("releaseYear")} value={releaseYear} onChange={setReleaseYear} type="number" />
-        <TextField label={t("revision")} value={revision} onChange={setRevision} />
-        <TextField label={t("externalOriginUrl")} value={originUrl} onChange={setOriginUrl} type="url" />
-        <TextField label={t("externalOriginId")} value={originId} onChange={setOriginId} />
-        <TextField label={t("attribution")} value={attribution} onChange={setAttribution} />
-        <TextField label={t("sourcePriority")} value={sourcePriority} onChange={setSourcePriority} type="number" />
-        <TextField label={t("canonicalBookId")} value={canonicalBookId} onChange={setCanonicalBookId} />
-        <TextField label={t("license")} value={license} onChange={setLicense} />
+        <AppSelect label={t("category")} value={form.category} options={categoryOptions} onChange={(value) => setField("category", value as SourceMetadataFormState["category"])} />
+        <AppSelect label={t("edition")} value={form.edition} options={editionOptions} onChange={(value) => setField("edition", value as SourceMetadataFormState["edition"])} />
+        <AppSelect label={t("language")} value={form.language} options={LANGUAGE_OPTIONS} onChange={(value) => setField("language", value as SourceMetadataFormState["language"])} />
+        <AppSelect label={t("access")} value={form.accessTier} options={accessOptions} onChange={(value) => setField("accessTier", value as SourceMetadataFormState["accessTier"])} />
+        <TextField label={t("ownerUserId")} value={form.ownerUserId} onChange={(value) => setField("ownerUserId", value)} disabled={form.accessTier !== "personal"} />
+        <TextField label={t("canonicalSourceId")} value={form.canonicalSourceId} onChange={(value) => setField("canonicalSourceId", value)} />
+        <TextField label={t("publicationCode")} value={form.publicationCode} onChange={(value) => setField("publicationCode", value)} />
+        <TextField label={t("publicationTitle")} value={form.publicationTitle} onChange={(value) => setField("publicationTitle", value)} />
+        <TextField label={t("publisher")} value={form.publisher} onChange={(value) => setField("publisher", value)} />
+        <TextField label={t("releaseYear")} value={form.releaseYear} onChange={(value) => setField("releaseYear", value)} type="number" />
+        <TextField label={t("revision")} value={form.revision} onChange={(value) => setField("revision", value)} />
+        <TextField label={t("externalOriginUrl")} value={form.originUrl} onChange={(value) => setField("originUrl", value)} type="url" />
+        <TextField label={t("externalOriginId")} value={form.originId} onChange={(value) => setField("originId", value)} />
+        <TextField label={t("attribution")} value={form.attribution} onChange={(value) => setField("attribution", value)} />
+        <TextField label={t("sourcePriority")} value={form.sourcePriority} onChange={(value) => setField("sourcePriority", value)} type="number" />
+        <TextField label={t("canonicalBookId")} value={form.canonicalBookId} onChange={(value) => setField("canonicalBookId", value)} />
+        <TextField label={t("license")} value={form.license} onChange={(value) => setField("license", value)} />
       </div>
 
       <div className="mt-5 flex gap-3">
@@ -172,24 +117,7 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
         <button
           type="button"
           onClick={() => {
-            setTitle(source.title);
-            setCategory(source.category);
-            setEdition(source.edition);
-            setLanguage(source.language);
-            setAccessTier(source.accessTier);
-            setOwnerUserId(source.ownerUserId ?? "");
-            setCanonicalSourceId(source.canonicalSourceId ?? "");
-            setPublicationCode(source.publication.code ?? "");
-            setPublicationTitle(source.publication.title);
-            setPublisher(source.publication.publisher ?? "");
-            setReleaseYear(source.publication.releaseYear?.toString() ?? "");
-            setRevision(source.publication.revision ?? "");
-            setOriginUrl(source.publication.origin?.url ?? "");
-            setOriginId(source.publication.origin?.id ?? "");
-            setAttribution(source.publication.attribution ?? "");
-            setSourcePriority(source.publication.sourcePriority.toString());
-            setCanonicalBookId(source.publication.canonicalBookId ?? "");
-            setLicense(source.license ?? "");
+            setForm(createSourceMetadataFormState(source));
             setStatus("idle");
             setMessage(null);
           }}

@@ -39,11 +39,16 @@ import {
   contentSourceFromMetadataRecord,
   sourceMetadataInputFromContentSource,
 } from "../../src/server/content/source-projection.ts";
-import { normalizeSourceInput, type SourceMetadataRecord } from "../../src/server/content/metadata.ts";
+import {
+  ContentMetadataValidationError,
+  normalizeSourceInput,
+  type SourceMetadataRecord,
+} from "../../src/server/content/metadata.ts";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const dataRoot = resolve(repositoryRoot, "content-repository");
 const schemasRoot = resolve(dataRoot, "schemas/v1");
+const ownerUserId = "11111111-1111-4111-8111-111111111111";
 
 test("repository paths are deterministic for stable IDs", () => {
   const revisionId = `rev-${"a".repeat(64)}`;
@@ -136,16 +141,16 @@ test("source authorization metadata enforces current access invariants", async (
   assertContentSource(open);
   assert.doesNotThrow(() => assertContentSource({ ...open, accessTier: "premium", shared: true }));
   assert.doesNotThrow(() =>
-    assertContentSource({ ...open, accessTier: "personal", shared: false, ownerUserId: "user-1" }),
+    assertContentSource({ ...open, accessTier: "personal", shared: false, ownerUserId }),
   );
 
   const invalid = [
     { ...open, accessTier: "open", shared: true },
-    { ...open, accessTier: "open", ownerUserId: "user-1" },
+    { ...open, accessTier: "open", ownerUserId },
     { ...open, accessTier: "premium", shared: false },
-    { ...open, accessTier: "premium", ownerUserId: "user-1", shared: true },
+    { ...open, accessTier: "premium", ownerUserId, shared: true },
     { ...open, accessTier: "personal", ownerUserId: null },
-    { ...open, accessTier: "personal", ownerUserId: "user-1", shared: true },
+    { ...open, accessTier: "personal", ownerUserId, shared: true },
   ];
   for (const source of invalid) assert.throws(() => assertContentSource(source), ContentSchemaValidationError);
 });
@@ -178,6 +183,73 @@ test("source schema rejects contradictory publication metadata", async () => {
     }),
     ContentSchemaValidationError,
   );
+});
+
+test("canonical schema and runtime agree on every publication field contract", async (t) => {
+  const source = (await readJson(resolve(dataRoot, "sources/srd-2014/source.json"))) as ContentSource;
+  assertContentSource(source);
+  assert.doesNotThrow(() => normalizeSourceInput(sourceMetadataInputFromContentSource(source)));
+
+  const malformed = [
+    ["code", (value: MutableSource) => { value.publication.code = " "; }],
+    ["title", (value: MutableSource) => { value.publication.title = " \t "; }],
+    ["publisher", (value: MutableSource) => { value.publication.publisher = "\n"; }],
+    ["releaseYear", (value: MutableSource) => { value.publication.releaseYear = 1973; }],
+    ["revision", (value: MutableSource) => { value.publication.revision = " "; }],
+    ["origin URL", (value: MutableSource) => { value.publication.origin.url = "ftp://example.com/book"; }],
+    ["origin ID", (value: MutableSource) => { value.publication.origin.id = " "; }],
+    ["attribution", (value: MutableSource) => { value.publication.attribution = " "; }],
+    ["sourcePriority", (value: MutableSource) => { value.publication.sourcePriority = -1; }],
+    ["canonicalBookId", (value: MutableSource) => { value.publication.canonicalBookId = "Not Stable"; }],
+    ["license", (value: MutableSource) => { value.license = " "; }],
+  ] as const;
+
+  for (const [field, mutateSource] of malformed) {
+    await t.test(field, () => {
+      const candidate = structuredClone(source) as unknown as MutableSource;
+      mutateSource(candidate);
+      assert.throws(() => assertContentSource(candidate), ContentSchemaValidationError);
+      assert.throws(() => normalizeSourceInput(sourceMetadataInputFromContentSource(candidate as unknown as ContentSource)), ContentMetadataValidationError);
+    });
+  }
+});
+
+test("origin URL scheme acceptance and normalization match across layers", async () => {
+  const source = (await readJson(resolve(dataRoot, "sources/srd-2014/source.json"))) as ContentSource;
+  const candidate = structuredClone(source) as unknown as MutableSource;
+  candidate.publication.origin.url = "HTTPS://example.com/books/basic-rules";
+
+  assertContentSource(candidate);
+  const normalized = normalizeSourceInput(
+    sourceMetadataInputFromContentSource(candidate as unknown as ContentSource),
+  );
+  assert.equal(normalized.publication.origin?.url, "https://example.com/books/basic-rules");
+});
+
+test("canonical schema and runtime agree on source identity and corpus fields", async (t) => {
+  const source = (await readJson(resolve(dataRoot, "sources/srd-2014/source.json"))) as ContentSource;
+  const malformed = [
+    ["sourceId", (value: MutableSource) => { value.sourceId = "Not Stable"; }],
+    ["source title", (value: MutableSource) => { value.title = " "; }],
+    ["category", (value: MutableSource) => { value.category = "invalid"; }],
+    ["edition", (value: MutableSource) => { value.edition = "4e"; }],
+    ["language", (value: MutableSource) => { value.language = "de"; }],
+    ["accessTier", (value: MutableSource) => { value.accessTier = "private"; }],
+    ["ownerUserId", (value: MutableSource) => {
+      value.accessTier = "personal";
+      value.shared = false;
+      value.ownerUserId = "user-1";
+    }],
+  ] as const;
+
+  for (const [field, mutateSource] of malformed) {
+    await t.test(field, () => {
+      const candidate = structuredClone(source) as unknown as MutableSource;
+      mutateSource(candidate);
+      assert.throws(() => assertContentSource(candidate), ContentSchemaValidationError);
+      assert.throws(() => normalizeSourceInput(sourceMetadataInputFromContentSource(candidate as unknown as ContentSource)), ContentMetadataValidationError);
+    });
+  }
 });
 
 test("canonical validation rejects content that does not match its hashes", async () => {
@@ -369,6 +441,29 @@ type MutableRevision = {
   text: { sections: Array<{ text: string; startOffset: number; endOffset: number }> };
   citations: Array<{ sourceId: string; fileId: string; quote: string }>;
   entry: { typedFields: Array<Record<string, unknown>> };
+};
+
+type MutableSource = {
+  sourceId: string;
+  title: string;
+  category: string;
+  edition: string;
+  language: string;
+  accessTier: string;
+  shared: boolean;
+  ownerUserId: string | null;
+  publication: {
+    code: string;
+    title: string;
+    publisher: string;
+    releaseYear: number;
+    revision: string;
+    origin: { url: string; id: string };
+    attribution: string;
+    sourcePriority: number;
+    canonicalBookId: string;
+  };
+  license: string;
 };
 
 function mutate(revision: CanonicalRevision, mutation: (value: MutableRevision) => void): CanonicalRevision {

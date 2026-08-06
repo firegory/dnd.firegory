@@ -13,6 +13,7 @@ import {
 const admin: AdminContext = { userId: "admin-1", role: "admin" };
 const now = new Date("2026-05-19T00:00:00.000Z");
 const checksum = "a".repeat(64);
+const ownerUserId = "11111111-1111-4111-8111-111111111111";
 
 test("source metadata normalization validates corpus and access tiers", () => {
   assert.deepEqual(
@@ -80,7 +81,7 @@ test("source metadata normalization validates corpus and access tiers", () => {
         edition: "5e",
         language: "en",
         accessTier: "open",
-        ownerUserId: "user-1",
+        ownerUserId,
       }),
     /Open\/SRD sources cannot have an owner/,
   );
@@ -259,6 +260,18 @@ test("content metadata service deep-merges partial publication updates without l
   assert.equal(db.calls[1]?.values?.[18], "players-handbook");
 });
 
+test("content metadata service rejects publication null before querying", async () => {
+  const db = new RecordingDb([]);
+  const service = new ContentMetadataService(db);
+
+  await assert.rejects(
+    () => service.updateSource(admin, "source-1", { publication: null } as never),
+    (error: unknown) => error instanceof ContentMetadataValidationError
+      && error.message === "publication must be a non-null object.",
+  );
+  assert.equal(db.calls.length, 0);
+});
+
 test("content metadata service creates file records linked to a source", async () => {
   const db = new RecordingDb([[fileRow({ uploaded_by_user_id: admin.userId })]]);
   const service = new ContentMetadataService(db);
@@ -325,6 +338,32 @@ test("publication validation rejects malformed and contradictory metadata", () =
   assert.throws(
     () => normalizeSourceInput({ ...base, canonicalSourceId: "Not Stable" }),
     /lowercase stable ID/,
+  );
+});
+
+test("ownerUserId is UUID-normalized and access invariants remain enforced", () => {
+  const base = {
+    title: "Rules",
+    category: "core_rules" as const,
+    edition: "5e" as const,
+    language: "en" as const,
+  };
+  assert.equal(normalizeSourceInput({
+    ...base,
+    accessTier: "personal",
+    ownerUserId: ownerUserId.toUpperCase(),
+  }).ownerUserId, ownerUserId);
+  assert.throws(
+    () => normalizeSourceInput({ ...base, accessTier: "personal", ownerUserId: "user-1" }),
+    /ownerUserId must be a UUID/,
+  );
+  assert.throws(
+    () => normalizeSourceInput({ ...base, accessTier: "open", ownerUserId }),
+    /Open\/SRD sources cannot have an owner/,
+  );
+  assert.throws(
+    () => normalizeSourceInput({ ...base, accessTier: "premium", ownerUserId }),
+    /Shared premium sources cannot have an owner/,
   );
 });
 

@@ -20,6 +20,8 @@ import {
 import { computeChecksum } from "../../src/server/ingestion/paths.ts";
 import { createSourceRecord } from "../../src/server/ingestion/storage.ts";
 
+const ownerUserId = "11111111-1111-4111-8111-111111111111";
+
 describe("ingestion: source metadata validation", () => {
   it("validates a complete open source input", () => {
     const result = normalizeSourceInput({
@@ -60,12 +62,12 @@ describe("ingestion: source metadata validation", () => {
       edition: "5.5e",
       language: "ru",
       accessTier: "personal",
-      ownerUserId: "user-123",
+      ownerUserId,
     });
 
     assert.equal(result.accessTier, "personal");
     assert.equal(result.shared, false);
-    assert.equal(result.ownerUserId, "user-123");
+    assert.equal(result.ownerUserId, ownerUserId);
   });
 
   it("rejects open source with ownerUserId", () => {
@@ -77,7 +79,7 @@ describe("ingestion: source metadata validation", () => {
           edition: "5e",
           language: "en",
           accessTier: "open",
-          ownerUserId: "user-123",
+          ownerUserId,
         }),
       ContentMetadataValidationError,
     );
@@ -92,7 +94,7 @@ describe("ingestion: source metadata validation", () => {
           edition: "5e",
           language: "en",
           accessTier: "premium",
-          ownerUserId: "user-123",
+          ownerUserId,
         }),
       ContentMetadataValidationError,
     );
@@ -237,12 +239,12 @@ describe("ingestion: source record creation", () => {
       edition: "5.5e",
       language: "ru",
       accessTier: "personal",
-      ownerUserId: "user-1",
+      ownerUserId,
       createdByUserId: "admin-1",
       client: client as never,
     });
 
-    assert.deepEqual(calls[0]?.params.slice(5, 8), ["personal", false, "user-1"]);
+    assert.deepEqual(calls[0]?.params.slice(5, 8), ["personal", false, ownerUserId]);
     assert.equal(calls[0]?.params[19], "admin-1");
   });
 });
