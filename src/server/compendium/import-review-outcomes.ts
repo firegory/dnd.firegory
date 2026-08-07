@@ -1,6 +1,7 @@
 import type { QueryResultRow } from "pg";
 
 import { withTransaction } from "../db/client.ts";
+import { recordEditorPublicationOutcome } from "./entry-editor.ts";
 
 export type ReviewPublicationOutcome = "completed" | "failed";
 type OutcomeTransaction = typeof withTransaction;
@@ -11,6 +12,10 @@ export async function recordImportReviewPublicationOutcome(
   lastError: string | null,
   transaction: OutcomeTransaction = withTransaction,
 ): Promise<void> {
+  if (idempotencyKey.startsWith("editor-")) {
+    await recordEditorPublicationOutcome(idempotencyKey, status, lastError, transaction);
+    return;
+  }
   if (!idempotencyKey.startsWith("review-")) return;
   if (status === "failed" && !lastError) throw new TypeError("Failed publication outcomes require an error.");
   await transaction(async (client) => {
