@@ -17,3 +17,14 @@ export function shouldApplyDetailResponse(input: Readonly<{
     && detailMatchesSelection(input.requested, input.selected)
     && detailMatchesSelection(input.requested, input.response);
 }
+
+export function mutationStillTargetsSelection(input: Readonly<{
+  mutationEpoch: number;
+  currentEpoch: number;
+  captured: EntrySelection | null;
+  selected: EntrySelection | null;
+}>): boolean {
+  if (input.mutationEpoch !== input.currentEpoch) return false;
+  if (input.captured === null) return input.selected === null;
+  return detailMatchesSelection(input.captured, input.selected);
+}

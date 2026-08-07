@@ -31,4 +31,10 @@ test("cancel is local-only and evidence has preview and exact code-point spans",
   assert.match(source,/basedOnRevisionId:detail\.editorHeadRevisionId/);
   assert.match(source,/setDetail\(null\);setForm\(blankForm\(\)\)/);
   assert.match(source,/actionsDisabled=busy\|\|detailLoading\|\|!detailCurrent/);
+  assert.match(source,/function startNew\(\)\{ if\(busy\|\|mutationInFlight\.current\)return/);
+  assert.match(source,/function selectEntry\(entry:EntrySelection\)\{ if\(busy\|\|mutationInFlight\.current\)return/);
+  assert.match(source,/<button disabled=\{busy\} onClick=\{startNew\}/);
+  assert.match(source,/key=\{entry\.versionId\} disabled=\{busy\}/);
+  assert.match(source,/if\(mutationCurrent\(\)\)await loadDetail\(mutationSelection/);
+  assert.match(selectionSource,/mutationEpoch !== input\.currentEpoch/);
 });
