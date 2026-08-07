@@ -103,7 +103,8 @@
         { "$ref": "#/$defs/stringField" },
         { "$ref": "#/$defs/numberField" },
         { "$ref": "#/$defs/booleanField" },
-        { "$ref": "#/$defs/stringListField" }
+        { "$ref": "#/$defs/stringListField" },
+        { "$ref": "#/$defs/jsonField" }
       ]
     },
     "fieldBase": {
@@ -138,6 +139,12 @@
       "allOf": [
         { "$ref": "#/$defs/fieldBase" },
         { "type": "object", "additionalProperties": false, "properties": { "key": true, "label": true, "type": { "const": "stringList" }, "value": { "type": "array", "items": { "type": "string" } } } }
+      ]
+    },
+    "jsonField": {
+      "allOf": [
+        { "$ref": "#/$defs/fieldBase" },
+        { "type": "object", "additionalProperties": false, "properties": { "key": true, "label": true, "type": { "const": "json" }, "value": true } }
       ]
     }
   }

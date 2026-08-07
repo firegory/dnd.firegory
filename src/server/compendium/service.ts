@@ -2,6 +2,7 @@ import type { QueryResultRow } from "pg";
 
 import { withTransaction } from "../db/client.ts";
 import { normalizeSpellClasses, SpellValidationError, validateSpellProjection, type SpellProjection } from "./spell-schema.ts";
+import { challengeRatingNumber, CreatureValidationError, normalizeCreatureProjection, type CreatureProjection } from "./creature-schema.ts";
 
 export const COMPENDIUM_ENTRY_TYPES = [
   "spell", "creature", "item", "class", "feature", "species", "background", "feat", "equipment",
@@ -30,7 +31,7 @@ type ExtensionData = Readonly<Record<string, unknown>>;
 type ProjectionBase = Readonly<{ extensionData?: ExtensionData }>;
 export type ProjectionInput =
   | (ProjectionBase & Omit<SpellProjection, "concentration" | "ritual"> & Readonly<{ type: "spell"; concentration?: boolean; ritual?: boolean }>)
-  | (ProjectionBase & Readonly<{ type: "creature"; size: "tiny" | "small" | "medium" | "large" | "huge" | "gargantuan"; creatureType: string; alignment?: string | null; armorClass: number; hitPoints: number; challengeRating: number; speed: string }>)
+  | (ProjectionBase & CreatureProjection & Readonly<{ type: "creature" }>)
   | (ProjectionBase & Readonly<{ type: "item"; category: "armor" | "potion" | "ring" | "rod" | "scroll" | "staff" | "wand" | "weapon" | "wondrous" | "other"; rarity: "common" | "uncommon" | "rare" | "very_rare" | "legendary" | "artifact" | "varies"; requiresAttunement?: boolean }>)
   | (ProjectionBase & Readonly<{ type: "class"; hitDie: 6 | 8 | 10 | 12; primaryAbility: string; spellcastingAbility?: string | null }>)
   | (ProjectionBase & Readonly<{ type: "feature"; level: number; featureKind: string }>)
@@ -334,8 +335,9 @@ function validateProjection(projection: ProjectionInput): void {
       catch (error) { if (error instanceof SpellValidationError) throw new CompendiumValidationError(error.message); throw error; }
       return;
     case "creature":
-      enumValue(projection.size, ["tiny", "small", "medium", "large", "huge", "gargantuan"], "creature.size");
-      integerRange(projection.armorClass, 0, 50, "creature.armorClass"); integerRange(projection.hitPoints, 1, 2147483647, "creature.hitPoints"); challengeRating(projection.challengeRating); requireText(projection.creatureType, "creature.creatureType"); requireText(projection.speed, "creature.speed"); optionalText(projection.alignment, "creature.alignment"); return;
+      try { normalizeCreatureProjection(creatureProjectionValue(projection)); }
+      catch (error) { if (error instanceof CreatureValidationError) throw new CompendiumValidationError(error.message); throw error; }
+      return;
     case "class": if (![6, 8, 10, 12].includes(projection.hitDie)) throw new CompendiumValidationError("class.hitDie must be d6, d8, d10, or d12."); requireText(projection.primaryAbility, "class.primaryAbility"); optionalText(projection.spellcastingAbility, "class.spellcastingAbility"); return;
     case "feature": integerRange(projection.level, 1, 20, "feature.level"); requireText(projection.featureKind, "feature.featureKind"); return;
     case "species": enumValue(projection.size, ["tiny", "small", "medium", "large", "huge", "gargantuan"], "species.size"); integerRange(projection.speed, 1, 2147483647, "species.speed"); return;
@@ -371,7 +373,26 @@ async function insertProjection(client: DbClient, revisionId: string, projection
   const extension = json(projection.extensionData);
   switch (projection.type) {
     case "spell": await client.query("INSERT INTO compendium_spells (revision_id, level, school, casting_time, range_text, duration, components, concentration, ritual, classes, extension_data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)", [revisionId, projection.level, projection.school, projection.castingTime.trim(), projection.range.trim(), projection.duration.trim(), projection.components.trim(), projection.concentration ?? false, projection.ritual ?? false, normalizeSpellClasses(projection.classes), extension]); return;
-    case "creature": await client.query("INSERT INTO compendium_creatures (revision_id, size, creature_type, alignment, armor_class, hit_points, challenge_rating, speed, extension_data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)", [revisionId, projection.size, projection.creatureType.trim(), projection.alignment?.trim() || null, projection.armorClass, projection.hitPoints, projection.challengeRating, projection.speed.trim(), extension]); return;
+    case "creature": {
+      const creature = normalizeCreatureProjection(creatureProjectionValue(projection));
+      const primarySpeed = creature.speeds.find((speed) => speed.mode === "walk") ?? creature.speeds[0];
+      await client.query(`INSERT INTO compendium_creatures
+        (revision_id, size, creature_type, alignment, armor_class, hit_points, challenge_rating, speed,
+         challenge_rating_numerator, challenge_rating_denominator, armor_classes, hit_points_detail, speeds,
+         abilities, saves, skills, damage_resistances, damage_immunities, condition_immunities, senses,
+         passive_perception, languages, traits, actions, bonus_actions, reactions, legendary_actions, extension_data)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,
+          $17,$18,$19,$20,$21,$22,$23::jsonb,$24::jsonb,$25::jsonb,$26::jsonb,$27::jsonb,$28::jsonb)`,
+      [revisionId, creature.size, creature.creatureType, creature.alignment, creature.armorClass[0].value,
+        creature.hitPoints.average, challengeRatingNumber(creature.challengeRating), `${primarySpeed.distance} ${primarySpeed.unit}`,
+        creature.challengeRating.numerator, creature.challengeRating.denominator, JSON.stringify(creature.armorClass),
+        JSON.stringify(creature.hitPoints), JSON.stringify(creature.speeds), JSON.stringify(creature.abilities),
+        JSON.stringify(creature.saves), JSON.stringify(creature.skills), creature.damageResistances, creature.damageImmunities,
+        creature.conditionImmunities, creature.senses, creature.passivePerception, creature.languages, JSON.stringify(creature.traits),
+        JSON.stringify(creature.actions), JSON.stringify(creature.bonusActions), JSON.stringify(creature.reactions),
+        JSON.stringify(creature.legendaryActions), extension]);
+      return;
+    }
     case "item": await client.query("INSERT INTO compendium_items (revision_id, category, rarity, requires_attunement, extension_data) VALUES ($1,$2,$3,$4,$5::jsonb)", [revisionId, projection.category, projection.rarity, projection.requiresAttunement ?? false, extension]); return;
     case "class": await client.query("INSERT INTO compendium_classes (revision_id, hit_die, primary_ability, spellcasting_ability, extension_data) VALUES ($1,$2,$3,$4,$5::jsonb)", [revisionId, projection.hitDie, projection.primaryAbility.trim(), projection.spellcastingAbility?.trim() || null, extension]); return;
     case "feature": await client.query("INSERT INTO compendium_features (revision_id, level, feature_kind, extension_data) VALUES ($1,$2,$3,$4::jsonb)", [revisionId, projection.level, projection.featureKind.trim(), extension]); return;
@@ -397,10 +418,14 @@ function decimalRange(value: number, min: number, max: number, scale: number, fi
     throw new CompendiumValidationError(`${field} supports at most ${scale} decimal places.`);
   }
 }
-function challengeRating(value: number): void { if (![0, 0.125, 0.25, 0.5].includes(value) && (!Number.isInteger(value) || value < 1 || value > 30)) throw new CompendiumValidationError("creature.challengeRating must be 0, 1/8, 1/4, 1/2, or an integer from 1 to 30."); }
 function validateObject(value: ExtensionData | undefined, field: string): void { if (value !== undefined && (value === null || Array.isArray(value) || typeof value !== "object")) throw new CompendiumValidationError(`${field} must be an object.`); }
 function enumValue(value: string, allowed: readonly string[], field: string): void { if (!allowed.includes(value)) throw new CompendiumValidationError(`${field} must be one of: ${allowed.join(", ")}.`); }
 function json(value: ExtensionData | undefined): string { return JSON.stringify(value ?? {}); }
+function creatureProjectionValue(projection: Extract<ProjectionInput, { type: "creature" }>): CreatureProjection {
+  const value = { ...projection } as Record<string, unknown>;
+  delete value.type; delete value.extensionData;
+  return value as CreatureProjection;
+}
 async function insertEditorAudit(client: DbClient, versionId: string, revisionId: string, eventType: string, actor: string, reason: string): Promise<void> {
   await client.query(
     `INSERT INTO compendium_editor_audit (version_id, revision_id, event_type, actor, reason)

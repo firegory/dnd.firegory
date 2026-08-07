@@ -2,7 +2,7 @@ export type AppLayoutRole = "user" | "premium" | "admin";
 
 export type NavigationItem = {
   href: string;
-  labelKey: "compendium" | "search" | "spells" | "settings" | "sources" | "upload" | "users" | "importReview" | "structuredEditor";
+  labelKey: "compendium" | "search" | "spells" | "bestiary" | "settings" | "sources" | "upload" | "users" | "importReview" | "structuredEditor";
 };
 const ADMIN_NAV_ITEMS: readonly NavigationItem[] = [
   { href: "/admin/sources", labelKey: "sources" },
@@ -17,6 +17,7 @@ export function getNavigationItems(userRole?: AppLayoutRole, locale: "ru" | "en"
     { href: `/${locale}/compendium`, labelKey: "compendium" },
     { href: "/search", labelKey: "search" },
     { href: "/spells", labelKey: "spells" },
+    { href: "/bestiary", labelKey: "bestiary" },
     { href: "/settings", labelKey: "settings" },
   ];
   return userRole === "admin" ? [...base, ...ADMIN_NAV_ITEMS] : base;

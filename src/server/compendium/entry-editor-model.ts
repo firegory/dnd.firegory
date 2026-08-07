@@ -10,6 +10,7 @@ import {
   type ProjectionInput,
 } from "./service.ts";
 import { normalizeSpellClasses } from "./spell-schema.ts";
+import { validateCreatureProjection } from "./creature-schema.ts";
 
 export type EditorBlock =
   | Readonly<{ type: "heading" | "paragraph"; text: string }>
@@ -40,7 +41,7 @@ const ROOT_KEYS = ["aliases", "blocks", "canonicalKey", "citations", "edition", 
 const CORRECTION_KEYS = ["basedOnRevisionId", "blocks", "citations", "projection", "reason", "summary", "title"];
 const PROJECTION_KEYS: Readonly<Record<CompendiumEntryType, readonly string[]>> = {
   spell: ["castingTime", "classes", "components", "concentration", "duration", "level", "range", "ritual", "school", "type"],
-  creature: ["alignment", "armorClass", "challengeRating", "creatureType", "hitPoints", "size", "speed", "type"],
+  creature: ["abilities", "actions", "alignment", "armorClass", "bonusActions", "challengeRating", "conditionImmunities", "creatureType", "damageImmunities", "damageResistances", "hitPoints", "languages", "legendaryActions", "passivePerception", "reactions", "saves", "senses", "size", "skills", "speeds", "traits", "type"],
   item: ["category", "rarity", "requiresAttunement", "type"],
   class: ["hitDie", "primaryAbility", "spellcastingAbility", "type"],
   feature: ["featureKind", "level", "type"],
@@ -130,6 +131,11 @@ function parseProjection(value: unknown, entryType: CompendiumEntryType): Projec
   }
   if (entryType === "spell") {
     try { return { ...projection, classes: normalizeSpellClasses(projection.classes) } as ProjectionInput; }
+    catch (error) { if (error instanceof Error) fail(error.message); throw error; }
+  }
+  if (entryType === "creature") {
+    const value = { ...projection }; delete value.type;
+    try { return { type: "creature", ...validateCreatureProjection(value) } as ProjectionInput; }
     catch (error) { if (error instanceof Error) fail(error.message); throw error; }
   }
   return projection as ProjectionInput;

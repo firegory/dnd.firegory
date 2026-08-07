@@ -90,16 +90,34 @@ const attributesByType = {
     },
   },
   creature: {
+    anyOf: [{
+      type: "object", additionalProperties: false,
+      required: ["size", "creatureType", "alignment", "armorClass", "hitPoints", "challengeRating", "speed"],
+      properties: {
+        size: { enum: ["tiny", "small", "medium", "large", "huge", "gargantuan"] }, creatureType: stringField,
+        alignment: nullableStringField, armorClass: { type: "integer", minimum: 0, maximum: 50 },
+        hitPoints: { type: "integer", minimum: 1, maximum: 2147483647 },
+        challengeRating: { enum: [0, 0.125, 0.25, 0.5, ...Array.from({ length: 30 }, (_, index) => index + 1)] }, speed: stringField,
+      },
+    }, {
     type: "object", additionalProperties: false,
-    required: ["size", "creatureType", "alignment", "armorClass", "hitPoints", "challengeRating", "speed"],
+    required: ["size", "creatureType", "alignment", "armorClass", "hitPoints", "challengeRating", "speeds", "abilities", "saves", "skills", "damageResistances", "damageImmunities", "conditionImmunities", "senses", "passivePerception", "languages", "traits", "actions", "bonusActions", "reactions", "legendaryActions"],
     properties: {
       size: { enum: ["tiny", "small", "medium", "large", "huge", "gargantuan"] },
       creatureType: stringField, alignment: nullableStringField,
-      armorClass: { type: "integer", minimum: 0, maximum: 50 },
-      hitPoints: { type: "integer", minimum: 1, maximum: 2147483647 },
-      challengeRating: { enum: [0, 0.125, 0.25, 0.5, ...Array.from({ length: 30 }, (_, index) => index + 1)] },
-      speed: stringField,
+      armorClass: { type: "array", minItems: 1, items: { type: "object", additionalProperties: false, required: ["value"], properties: { value: { type: "integer", minimum: 0, maximum: 50 }, note: stringField } } },
+      hitPoints: { type: "object", additionalProperties: false, required: ["average"], properties: { average: { type: "integer", minimum: 1 }, formula: stringField } },
+      challengeRating: { type: "object", additionalProperties: false, required: ["numerator", "denominator"], properties: { numerator: { type: "integer", minimum: 0, maximum: 30 }, denominator: { enum: [1, 2, 4, 8] } } },
+      speeds: { type: "array", minItems: 1, items: { type: "object", additionalProperties: false, required: ["mode", "distance", "unit"], properties: { mode: { enum: ["walk", "burrow", "climb", "fly", "swim"] }, distance: { type: "integer", minimum: 0 }, unit: { enum: ["ft", "m"] }, note: stringField } } },
+      abilities: { type: "object", additionalProperties: false, required: ["str", "dex", "con", "int", "wis", "cha"], properties: Object.fromEntries(["str", "dex", "con", "int", "wis", "cha"].map((key) => [key, { type: "integer", minimum: 1, maximum: 30 }])) },
+      saves: { type: "object", additionalProperties: { type: "integer", minimum: -30, maximum: 30 } },
+      skills: { type: "object", additionalProperties: { type: "integer", minimum: -30, maximum: 30 } },
+      damageResistances: { type: "array", items: stringField, uniqueItems: true }, damageImmunities: { type: "array", items: stringField, uniqueItems: true },
+      conditionImmunities: { type: "array", items: stringField, uniqueItems: true }, senses: { type: "array", items: stringField, uniqueItems: true },
+      passivePerception: { type: "integer", minimum: 0, maximum: 100 }, languages: { type: "array", items: stringField, uniqueItems: true },
+      traits: blockList(), actions: blockList(), bonusActions: blockList(), reactions: blockList(), legendaryActions: blockList(),
     },
+    }],
   },
   equipment: {
     type: "object", additionalProperties: false,
@@ -253,8 +271,19 @@ function citationSupportsField(candidate: CandidateWire, path: string, quote: st
   if (typeof value === "boolean") return supportsBoolean(path, value, quote);
   if (path === "$.attributes.level" && value === 0 && /(?:cantrip|заговор)/iu.test(quote)) return true;
   if (typeof value === "number") return numericValues(quote).some((number) => Math.abs(number - value) < 0.000001);
-  if (Array.isArray(value)) return value.every((item) => scalarTextSupported(path, item, quote));
+  if (Array.isArray(value)) return scalarValues(value).every((item) => scalarTextSupported(path, item, quote));
+  if (isRecord(value)) return scalarValues(value).every((item) => scalarTextSupported(path, item, quote));
   return scalarTextSupported(path, value, quote);
+}
+
+function blockList() {
+  return { type: "array", items: { type: "object", additionalProperties: false, required: ["name", "text"], properties: { name: stringField, text: stringField } } } as const;
+}
+
+function scalarValues(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value.flatMap(scalarValues);
+  if (isRecord(value)) return Object.values(value).flatMap(scalarValues);
+  return [value];
 }
 
 function scalarTextSupported(path: string, value: unknown, quote: string): boolean {
