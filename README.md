@@ -273,7 +273,7 @@ The system supports separate embedding providers for ingestion (batch embeddings
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `ZAI_EMBEDDING_BASE_URL` | z.ai default | z.ai embedding API base URL |
+| `ZAI_EMBEDDING_BASE_URL` | `https://api.z.ai/api/paas/v4` | z.ai embedding API base URL |
 | `ZAI_EMBEDDING_MODEL` | `z-embedding` | z.ai embedding model name |
 | `ZAI_EMBEDDING_DIMENSIONS` | `1024` | z.ai embedding vector dimensions |
 
