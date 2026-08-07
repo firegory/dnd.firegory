@@ -64,6 +64,13 @@ export class PublicationCommandError extends Error {
   }
 }
 
+export class PublicationEnqueueAmbiguousError extends Error {
+  constructor(error: unknown) {
+    super(error instanceof Error ? error.message : String(error), { cause: error });
+    this.name = "PublicationEnqueueAmbiguousError";
+  }
+}
+
 type Enqueue = (idempotencyKey: string, generation: string) => Promise<unknown>;
 type SubmitOptions = Readonly<{
   spoolRoot?: string;
@@ -161,17 +168,21 @@ async function submitCanonicalCommand(
   if (currentState?.status === "failed") {
     throw new Error(`Publication ${input.idempotencyKey} is quarantined: ${currentState.lastError ?? "unknown failure"}`);
   }
-  await (options.enqueue ?? enqueuePublication)(input.idempotencyKey, installedCommand.generation);
-  await options.afterEnqueue?.();
-  await writeOutboxEvent(spoolRoot, {
-    schemaVersion: 1,
-    kind: "publicationOutboxEvent",
-    idempotencyKey: input.idempotencyKey,
-    status: "queued",
-    generation: installedCommand.generation,
-    eventId: randomUUID(),
-    updatedAt: now,
-  });
+  try {
+    await (options.enqueue ?? enqueuePublication)(input.idempotencyKey, installedCommand.generation);
+    await options.afterEnqueue?.();
+    await writeOutboxEvent(spoolRoot, {
+      schemaVersion: 1,
+      kind: "publicationOutboxEvent",
+      idempotencyKey: input.idempotencyKey,
+      status: "queued",
+      generation: installedCommand.generation,
+      eventId: randomUUID(),
+      updatedAt: now,
+    });
+  } catch (error) {
+    throw new PublicationEnqueueAmbiguousError(error);
+  }
   return { commandPath, existing };
 }
 
@@ -584,17 +595,21 @@ async function enqueueExistingCommand(
   if (state?.status === "failed") {
     throw new Error(`Publication ${command.idempotencyKey} is quarantined: ${state.lastError ?? "unknown failure"}`);
   }
-  await (options.enqueue ?? enqueuePublication)(command.idempotencyKey, command.generation);
-  await options.afterEnqueue?.();
-  await writeOutboxEvent(spoolRoot, {
-    schemaVersion: 1,
-    kind: "publicationOutboxEvent",
-    idempotencyKey: command.idempotencyKey,
-    status: "queued",
-    generation: command.generation,
-    eventId: randomUUID(),
-    updatedAt: now,
-  });
+  try {
+    await (options.enqueue ?? enqueuePublication)(command.idempotencyKey, command.generation);
+    await options.afterEnqueue?.();
+    await writeOutboxEvent(spoolRoot, {
+      schemaVersion: 1,
+      kind: "publicationOutboxEvent",
+      idempotencyKey: command.idempotencyKey,
+      status: "queued",
+      generation: command.generation,
+      eventId: randomUUID(),
+      updatedAt: now,
+    });
+  } catch (error) {
+    throw new PublicationEnqueueAmbiguousError(error);
+  }
   return { commandPath, existing: true };
 }
 
