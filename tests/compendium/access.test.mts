@@ -198,11 +198,15 @@ test("citation cards expose admin source links only in the admin branch", async 
 });
 
 test("both citation preview lookup paths reuse the centralized source predicate", async () => {
-  const source = await readFile(new URL("../../src/server/citations/preview.ts", import.meta.url), "utf8");
+  const [source, route] = await Promise.all([
+    readFile(new URL("../../src/server/citations/preview.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../src/app/api/citations/preview/route.ts", import.meta.url), "utf8"),
+  ]);
   assert.equal((source.match(/buildRetrievalAuthorizationFilter\(user\)/g) ?? []).length, 2);
   assert.equal((source.match(/buildSourceAccessSql\(filter\)/g) ?? []).length, 2);
   assert.match(source, /getAuthorizedCitationPreviewFile[\s\S]*WHERE \$\{accessFilter\.sql\}/);
   assert.match(source, /lookupChunkBbox[\s\S]*AND \$\{accessFilter\.sql\}/);
+  assert.equal((route.match(/hasPageFallback\(url\).*handlePagePreview\(url, user\)/g) ?? []).length, 2);
 });
 
 type Provenance = Readonly<{ source: SourceAccessMetadata; deleted: boolean }>;

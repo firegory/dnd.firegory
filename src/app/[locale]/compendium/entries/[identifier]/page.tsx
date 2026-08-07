@@ -7,6 +7,7 @@ import { requireUser } from "../../../../../server/auth/session";
 import { isGuideLocale } from "../../../../../server/compendium/guides";
 import { categoryByEntryType } from "../../../../../server/compendium/landing";
 import { CompendiumNotFoundError, CompendiumReadService } from "../../../../../server/compendium/read-service";
+import { citationPreviewHref } from "../../../../../server/citations/preview";
 
 export default async function EntryPage({ params }: { params: Promise<{ locale: string; identifier: string }> }) {
   const { locale, identifier } = await params;
@@ -47,9 +48,7 @@ export default async function EntryPage({ params }: { params: Promise<{ locale: 
             const chunkId = citationText(citation, "chunkId");
             const sourceId = citationText(citation, "sourceId");
             const fileId = citationText(citation, "fileId");
-            const previewHref = sourceId && fileId && page
-              ? `/api/citations/preview?sourceId=${encodeURIComponent(sourceId)}&fileId=${encodeURIComponent(fileId)}&page=${page}`
-              : chunkId ? `/api/citations/preview?chunkId=${encodeURIComponent(chunkId)}` : null;
+            const previewHref = citationPreviewHref({ chunkId, sourceId, fileId, page });
             return <li key={citationText(citation, "id") ?? index}>
               <blockquote>«{quote}»</blockquote>
               <span>{entry.source.publication.title}{page ? ` · ${locale === "ru" ? "стр." : "p."} ${page}` : ""}{section ? ` · ${section}` : ""}</span>

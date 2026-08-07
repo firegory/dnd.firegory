@@ -12,7 +12,8 @@ export const MIGRATION_FILENAMES = [
   "0011_compendium_candidate_identity.sql",
   // 0012 remains reserved by parallel compendium work.
   "0013_compendium_import_review.sql",
-  "0014_compendium_guide_candidate_type.sql",
+  // 0014 belongs to #79 and 0015 belongs to #86; their branches merge before this migration.
+  "0016_compendium_guide_candidate_type.sql",
 ] as const;
 
 export type MigrationFilename = (typeof MIGRATION_FILENAMES)[number];

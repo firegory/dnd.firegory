@@ -49,6 +49,7 @@ async function handleChunkPreview(
 
   const chunkData = await lookupChunkBbox(user, parsed.chunkId);
   if (!chunkData) {
+    if (hasPageFallback(url)) return handlePagePreview(url, user);
     return NextResponse.json(
       { error: "Chunk bbox not found. Re-ingest the source to enable precise previews." },
       { status: 404 },
@@ -101,12 +102,17 @@ async function handleChunkPreview(
       },
     });
   } catch (error) {
+    if (hasPageFallback(url)) return handlePagePreview(url, user);
     const message = error instanceof Error ? error.message : "Unknown render error";
     return NextResponse.json(
       { error: "Citation preview is unavailable.", detail: message.includes("ENOENT") ? "Original PDF is unavailable." : undefined },
       { status: 503 },
     );
   }
+}
+
+function hasPageFallback(url: URL): boolean {
+  return Boolean(url.searchParams.get("sourceId") && url.searchParams.get("fileId") && url.searchParams.get("page"));
 }
 
 async function handlePagePreview(

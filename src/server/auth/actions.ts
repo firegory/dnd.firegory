@@ -20,6 +20,7 @@ export async function registerAction(
   _state: AuthActionState,
   formData: FormData,
 ): Promise<AuthActionState> {
+  const nextPath = validatedRedirectPath(formData.get("next"));
   try {
     const user = await registerUser({
       email: String(formData.get("email") ?? ""),
@@ -32,7 +33,7 @@ export async function registerAction(
     return { error: toMessage(error) };
   }
 
-  redirect("/");
+  redirect(nextPath);
 }
 
 export async function loginAction(

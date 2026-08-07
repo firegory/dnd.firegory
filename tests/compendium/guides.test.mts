@@ -67,8 +67,7 @@ describe("localized beginner guide access", () => {
     assert.match(category, /entries\/\$\{entry\.id\}/);
     assert.doesNotMatch(category, /entries\/\$\{encodeURIComponent\(entry\.slug\)\}/);
     assert.match(entry, /CompendiumNotFoundError/);
-    assert.match(entry, /api\/citations\/preview\?sourceId=/);
-    assert.match(entry, /api\/citations\/preview\?chunkId=/);
+    assert.match(entry, /citationPreviewHref\(\{ chunkId, sourceId, fileId, page \}\)/);
     assert.match(entry, /publication\.originUrl/);
     assert.match(entry, /citationNumber\(citation, "page"\)/);
     assert.match(entry, /citationText\(citation, "section"\)/);
