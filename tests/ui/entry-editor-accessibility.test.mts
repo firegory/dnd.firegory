@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const source = await readFile("src/app/admin/compendium/entries/editor-client.tsx","utf8");
+const selectionSource = await readFile("src/app/admin/compendium/entries/entry-selection.ts","utf8");
 
 test("entry editor exposes responsive, localized, accessible structured controls",()=>{
   assert.match(source,/COPY = \{/);
@@ -23,7 +24,11 @@ test("cancel is local-only and evidence has preview and exact code-point spans",
   assert.match(source,/api\/citations\/preview/);
   assert.match(source,/expectedActiveRevisionId:detail\.canonicalRevisionId/);
   assert.match(source,/detailController\.current\?\.abort\(\)/);
-  assert.match(source,/sequence!==detailSequence\.current/);
+  assert.match(source,/shouldApplyDetailResponse/);
+  assert.match(selectionSource,/requestSequence === input\.currentSequence/);
   assert.match(source,/aria-busy=\{detailLoading\}/);
+  assert.match(source,/aria-live="polite"/);
   assert.match(source,/basedOnRevisionId:detail\.editorHeadRevisionId/);
+  assert.match(source,/setDetail\(null\);setForm\(blankForm\(\)\)/);
+  assert.match(source,/actionsDisabled=busy\|\|detailLoading\|\|!detailCurrent/);
 });
