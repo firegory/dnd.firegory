@@ -740,7 +740,9 @@ function snapshotEvidence(
 function lockCollectorMerge(row: CandidateRow, resolved: Record<string, unknown>): Record<string, unknown> {
   if (!isSnapshotContent(row.content)) return resolved;
   if (!isSnapshotContent(resolved) || resolved.kind !== row.content.kind) throw new ImportReviewError("Collector merge must retain the typed snapshot candidate envelope.", 409);
-  for (const field of ["schemaVersion", "kind", "externalId", "sourceUrl", "sha256", "parserVersion", "title", "aliases", "body", "sourceVersion"] as const) {
+  const immutableFields = ["schemaVersion", "kind", "externalId", "sourceUrl", "sha256", "parserVersion", "title", "aliases", "body", "sourceVersion",
+    ...(isSnapshotCreatureContent(row.content) ? ["citations", "extraction"] : [])] as const;
+  for (const field of immutableFields) {
     if (JSON.stringify(resolved[field]) !== JSON.stringify(row.content[field])) {
       throw new ImportReviewError(`Collector merge cannot modify immutable ${field} evidence.`, 409);
     }

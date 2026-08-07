@@ -19,7 +19,7 @@ import {
 import type { CompendiumEntryType } from "./service.ts";
 import { validateSpellProjection } from "./spell-schema.ts";
 import { validateCreatureProjection } from "./creature-schema.ts";
-import { spellDetailEvidence, type SnapshotCreatureCandidate, type SnapshotSpellCandidate } from "./next-dnd/import-adapter.ts";
+import { creatureEvidenceCitations, spellDetailEvidence, type SnapshotCreatureCandidate, type SnapshotSpellCandidate } from "./next-dnd/import-adapter.ts";
 import { NEXT_DND_PARSER_VERSION } from "./next-dnd/parser.ts";
 
 export type SnapshotSpellEvidence = Readonly<{
@@ -412,14 +412,11 @@ function validateSnapshotCreatureCandidate(value: unknown, candidateKey: string,
       || value.sourceVersion.index.metadataEvidenceText !== evidence.metadataEvidenceText) throw new CandidateProjectionError("Collector creature provenance does not match persisted immutable evidence.");
   if (!isRecord(value.extraction) || value.extraction.status !== "ready" || !Array.isArray(value.extraction.missingFields) || value.extraction.missingFields.length) throw new CandidateProjectionError("Typed collector creature extraction is incomplete.");
   const projection = validateCreatureProjection(value.attributes);
-  const paths = new Set(["$.title", "$.body", ...Object.keys(projection).map((key) => `$.attributes.${key}`)]);
-  if (!Array.isArray(value.citations) || value.citations.length !== paths.size) throw new CandidateProjectionError("Collector creature requires one citation for every canonical field.");
-  for (const citation of value.citations) {
-    if (!isRecord(citation) || typeof citation.fieldPath !== "string" || !paths.delete(citation.fieldPath)
-        || typeof citation.quote !== "string" || !citation.quote.trim() || ![evidence.sourceUrl, evidence.indexUrl].includes(String(citation.sourceUrl))) throw new CandidateProjectionError("Collector creature citations do not match immutable evidence.");
-    const haystack = citation.sourceUrl === evidence.sourceUrl ? String(value.body) : evidence.metadataEvidenceText;
-    if (citation.fieldPath === "$.title" ? citation.quote !== value.title : citation.fieldPath === "$.body" ? citation.quote !== value.body : !haystack.includes(citation.quote)) throw new CandidateProjectionError(`Collector creature citation ${citation.fieldPath} is not exact immutable evidence.`);
-  }
+  let expectedCitations;
+  try { expectedCitations = [{ fieldPath: "$.title", quote: value.title, sourceUrl: evidence.sourceUrl }, { fieldPath: "$.body", quote: value.body, sourceUrl: evidence.sourceUrl },
+    ...creatureEvidenceCitations(projection, value.body, evidence.metadataEvidenceText, evidence.sourceUrl, evidence.indexUrl)]; }
+  catch (error) { throw new CandidateProjectionError(error instanceof Error ? error.message : String(error)); }
+  if (!Array.isArray(value.citations) || JSON.stringify(value.citations) !== JSON.stringify(expectedCitations)) throw new CandidateProjectionError("Collector creature values and citations must exactly match immutable detail and metadata evidence.");
   return value as unknown as SnapshotCreatureCandidate;
 }
 
@@ -589,7 +586,7 @@ function codeUnitOffset(value: string, codePointOffset: number): number {
 
 function evidenceKey(fieldPath: string): string {
   const value = fieldPath.replace(/^\$\./, "").replace(/^attributes\./, "attribute-")
-    .replace(/([a-z0-9])([A-Z])/g, "$1-$2").replaceAll(".", "-").toLowerCase();
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2").replace(/\[([0-9]+)\]/g, "-$1").replaceAll(".", "-").toLowerCase();
   if (!STABLE_ID.test(value)) throw new CandidateProjectionError(`Evidence path ${fieldPath} has no stable canonical citation identity.`);
   return value;
 }

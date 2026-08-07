@@ -923,6 +923,7 @@
   .stat-block-feature h3 { display: inline; color: #6f211f; font-family: var(--font-display); font-size: 1rem; font-style: italic; }
   .stat-block-feature p { display: inline; margin-left: 5px; line-height: 1.5; white-space: pre-wrap; }
   .bestiary-citations blockquote { margin: 10px 0; padding: 10px 14px; border-left: 3px solid #7c302b; background: rgba(255,248,224,.5); overflow-wrap: anywhere; }
+  .print-source-text { display: none; }
 }
 
 @media (max-width: 61.999rem) {
@@ -1229,9 +1230,15 @@
     color: #fff !important;
   }
 
+  .print-source-text {
+    display: inline;
+  }
+
   .bestiary-citations,
-  .source-versions {
-    display: none;
+  .source-attribution,
+  .source-versions,
+  .collector-version {
+    display: block;
   }
 
   .app-content .print-content {

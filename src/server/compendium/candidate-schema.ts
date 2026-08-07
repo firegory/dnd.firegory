@@ -2,6 +2,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
 import type { CompendiumEdition, CompendiumEntryType, CompendiumLanguage } from "./service.ts";
+import { creatureEvidencePaths, validateCreatureProjection } from "./creature-schema.ts";
 
 export const EXTRACTION_SCHEMA_VERSION = 1 as const;
 export const EXTRACTION_PARSER_VERSION = "2";
@@ -66,7 +67,7 @@ const citationSchema = {
   additionalProperties: false,
   required: ["fieldPath", "chunkId", "quote", "quoteSpanStart", "quoteSpanEnd"],
   properties: {
-    fieldPath: { type: "string", pattern: "^\\$\\.(?:entryType|candidateKey|title|body|attributes\\.[A-Za-z][A-Za-z0-9]*)$" },
+    fieldPath: { type: "string", pattern: "^\\$\\.(?:entryType|candidateKey|title|body|attributes\\.[A-Za-z][A-Za-z0-9]*(?:\\.[A-Za-z][A-Za-z0-9]*|\\[[0-9]+\\])*)$" },
     chunkId: { type: "string", format: "uuid" },
     quote: { type: "string", minLength: 1 },
     quoteSpanStart: { type: "integer", minimum: 0 },
@@ -95,7 +96,7 @@ const attributesByType = {
       required: ["size", "creatureType", "alignment", "armorClass", "hitPoints", "challengeRating", "speed"],
       properties: {
         size: { enum: ["tiny", "small", "medium", "large", "huge", "gargantuan"] }, creatureType: stringField,
-        alignment: nullableStringField, armorClass: { type: "integer", minimum: 0, maximum: 50 },
+        alignment: nullableStringField, armorClass: { type: "integer", minimum: 1, maximum: 50 },
         hitPoints: { type: "integer", minimum: 1, maximum: 2147483647 },
         challengeRating: { enum: [0, 0.125, 0.25, 0.5, ...Array.from({ length: 30 }, (_, index) => index + 1)] }, speed: stringField,
       },
@@ -105,10 +106,10 @@ const attributesByType = {
     properties: {
       size: { enum: ["tiny", "small", "medium", "large", "huge", "gargantuan"] },
       creatureType: stringField, alignment: nullableStringField,
-      armorClass: { type: "array", minItems: 1, items: { type: "object", additionalProperties: false, required: ["value"], properties: { value: { type: "integer", minimum: 0, maximum: 50 }, note: stringField } } },
+      armorClass: { type: "array", minItems: 1, items: { type: "object", additionalProperties: false, required: ["value"], properties: { value: { type: "integer", minimum: 1, maximum: 50 }, note: stringField } } },
       hitPoints: { type: "object", additionalProperties: false, required: ["average"], properties: { average: { type: "integer", minimum: 1 }, formula: stringField } },
       challengeRating: { type: "object", additionalProperties: false, required: ["numerator", "denominator"], properties: { numerator: { type: "integer", minimum: 0, maximum: 30 }, denominator: { enum: [1, 2, 4, 8] } } },
-      speeds: { type: "array", minItems: 1, items: { type: "object", additionalProperties: false, required: ["mode", "distance", "unit"], properties: { mode: { enum: ["walk", "burrow", "climb", "fly", "swim"] }, distance: { type: "integer", minimum: 0 }, unit: { enum: ["ft", "m"] }, note: stringField } } },
+      speeds: { type: "array", minItems: 1, items: { type: "object", additionalProperties: false, required: ["mode", "distance", "unit"], properties: { mode: { enum: ["walk", "burrow", "climb", "fly", "swim"] }, distance: { type: "integer", minimum: 1 }, unit: { enum: ["ft", "m"] }, note: stringField } } },
       abilities: { type: "object", additionalProperties: false, required: ["str", "dex", "con", "int", "wis", "cha"], properties: Object.fromEntries(["str", "dex", "con", "int", "wis", "cha"].map((key) => [key, { type: "integer", minimum: 1, maximum: 30 }])) },
       saves: { type: "object", additionalProperties: { type: "integer", minimum: -30, maximum: 30 } },
       skills: { type: "object", additionalProperties: { type: "integer", minimum: -30, maximum: 30 } },
@@ -211,9 +212,12 @@ export function validateCandidateWire(value: unknown, chunks: readonly EvidenceC
 
   const candidate = value as CandidateWire;
   const chunksById = new Map(chunks.map((chunk) => [chunk.id, chunk]));
+  const attributePaths = candidate.entryType === "creature" && !isLegacyCreatureAttributes(candidate.attributes)
+    ? creatureEvidencePaths(validateCreatureProjection(candidate.attributes))
+    : Object.keys(candidate.attributes).map((key) => `$.attributes.${key}`);
   const requiredPaths = new Set([
     "$.entryType", "$.candidateKey", "$.title", "$.body",
-    ...Object.keys(candidate.attributes).map((key) => `$.attributes.${key}`),
+    ...attributePaths,
   ]);
   const citedPaths = new Set<string>();
   const supportedPaths = new Set<string>();
@@ -254,7 +258,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function citationSupportsField(candidate: CandidateWire, path: string, quote: string): boolean {
   if (/(?:ignore (?:the |all )?(?:system|previous)|system message|follow (?:these|my) instructions|claim .+ and cite|return only json)/iu.test(quote)) return false;
   const value = path.startsWith("$.attributes.")
-    ? candidate.attributes[path.slice("$.attributes.".length)]
+    ? valueAtAttributePath(candidate.attributes, path.slice("$.attributes.".length))
     : candidate[path.slice(2) as keyof Pick<CandidateWire, "entryType" | "candidateKey" | "title" | "body">];
   if (value === null) {
     if (path === "$.attributes.alignment") return supportsNull(quote) || (FIELD_CONTEXT[path]?.test(quote) === true && !quote.includes(","));
@@ -268,6 +272,10 @@ function citationSupportsField(candidate: CandidateWire, path: string, quote: st
   if (path === "$.entryType") return supportsEntryType(candidate.entryType, quote);
   if (path === "$.attributes.costCp") return value === null ? supportsNull(quote) : parseMoneyToCp(quote).includes(value as number);
   if (path === "$.attributes.weightLb") return value === null ? supportsNull(quote) : parseWeights(quote).includes(value as number);
+  if (path === "$.attributes.challengeRating" && isRecord(value)) {
+    const numerator = Number(value.numerator); const denominator = Number(value.denominator);
+    return denominator > 0 && numericValues(quote).some((number) => Math.abs(number - numerator / denominator) < 0.000001);
+  }
   if (typeof value === "boolean") return supportsBoolean(path, value, quote);
   if (path === "$.attributes.level" && value === 0 && /(?:cantrip|заговор)/iu.test(quote)) return true;
   if (typeof value === "number") return numericValues(quote).some((number) => Math.abs(number - value) < 0.000001);
@@ -284,6 +292,15 @@ function scalarValues(value: unknown): unknown[] {
   if (Array.isArray(value)) return value.flatMap(scalarValues);
   if (isRecord(value)) return Object.values(value).flatMap(scalarValues);
   return [value];
+}
+
+function valueAtAttributePath(attributes: Readonly<Record<string, unknown>>, path: string): unknown {
+  return path.replace(/\[([0-9]+)\]/g, ".$1").split(".").reduce<unknown>((value, part) =>
+    Array.isArray(value) ? value[Number(part)] : isRecord(value) ? value[part] : undefined, attributes);
+}
+
+function isLegacyCreatureAttributes(value: Readonly<Record<string, unknown>>): boolean {
+  return typeof value.armorClass === "number" && typeof value.hitPoints === "number" && typeof value.speed === "string";
 }
 
 function scalarTextSupported(path: string, value: unknown, quote: string): boolean {

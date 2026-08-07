@@ -100,7 +100,7 @@ test("citation validator uses half-open spans and exact quote snapshots", () => 
 });
 
 test("projection numeric validators match PostgreSQL precision and integer bounds", () => {
-  const creature = { type: "creature", size: "medium", creatureType: "beast", armorClass: 12, hitPoints: 10, challengeRating: 0.125, speed: "30 ft." } as const;
+  const creature = { type: "creature", size: "medium", creatureType: "beast", alignment: null, armorClass: 12, hitPoints: 10, challengeRating: 0.125, speed: "30 ft." } as const;
   assert.doesNotThrow(() => validateDraft({ ...draft, entryType: "creature", projection: creature }));
   assert.throws(() => validateDraft({ ...draft, entryType: "creature", projection: { ...creature, challengeRating: 0.13 } }), /challengeRating/);
   assert.throws(() => validateDraft({ ...draft, entryType: "creature", projection: { ...creature, hitPoints: 2147483648 } }), /2147483647/);

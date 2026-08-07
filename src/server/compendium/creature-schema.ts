@@ -6,6 +6,15 @@ export const CREATURE_BLOCK_SECTIONS = ["traits", "actions", "bonusActions", "re
 export type CreatureSize = (typeof CREATURE_SIZES)[number];
 export type ChallengeRating = Readonly<{ numerator: number; denominator: number }>;
 export type CreatureBlock = Readonly<{ name: string; text: string }>;
+export type LegacyCreatureProjection = Readonly<{
+  size: CreatureSize;
+  creatureType: string;
+  alignment: string | null;
+  armorClass: number;
+  hitPoints: number;
+  challengeRating: ChallengeRating;
+  speed: string;
+}>;
 export type CreatureProjection = Readonly<{
   size: CreatureSize;
   creatureType: string;
@@ -72,7 +81,7 @@ export function validateCreatureProjection(value: unknown): CreatureProjection {
   const challengeRating = normalizeChallengeRating(value.challengeRating);
   const armorClass = array(value.armorClass, "armorClass", 1, 8).map((item, index) => {
     const row = object(item, `armorClass[${index}]`); exactKeys(row, row.note === undefined ? ["value"] : ["note", "value"], `armorClass[${index}]`);
-    return { value: integer(row.value, 0, 50, `armorClass[${index}].value`), ...(row.note === undefined ? {} : { note: text(row.note, `armorClass[${index}].note`, 200) }) };
+    return { value: integer(row.value, 1, 50, `armorClass[${index}].value`), ...(row.note === undefined ? {} : { note: text(row.note, `armorClass[${index}].note`, 200) }) };
   });
   const hp = object(value.hitPoints, "hitPoints"); exactKeys(hp, hp.formula === undefined ? ["average"] : ["average", "formula"], "hitPoints");
   const hitPoints = { average: integer(hp.average, 1, 2147483647, "hitPoints.average"), ...(hp.formula === undefined ? {} : { formula: text(hp.formula, "hitPoints.formula", 40) }) };
@@ -83,7 +92,7 @@ export function validateCreatureProjection(value: unknown): CreatureProjection {
     if (typeof row.mode !== "string" || !MOVEMENT_MODES.includes(row.mode as never) || modes.has(row.mode)) fail("Creature movement modes must be unique and supported.");
     modes.add(row.mode);
     if (row.unit !== "ft" && row.unit !== "m") fail("Creature speed unit must be ft or m.");
-    return { mode: row.mode as (typeof MOVEMENT_MODES)[number], distance: integer(row.distance, 0, 10000, `speeds[${index}].distance`), unit: row.unit as "ft" | "m", ...(row.note === undefined ? {} : { note: text(row.note, `speeds[${index}].note`, 200) }) };
+    return { mode: row.mode as (typeof MOVEMENT_MODES)[number], distance: integer(row.distance, 1, 10000, `speeds[${index}].distance`), unit: row.unit as "ft" | "m", ...(row.note === undefined ? {} : { note: text(row.note, `speeds[${index}].note`, 200) }) };
   });
   const abilityInput = object(value.abilities, "abilities"); exactKeys(abilityInput, ABILITY_KEYS, "abilities");
   const abilities = Object.fromEntries(ABILITY_KEYS.map((key) => [key, integer(abilityInput[key], 1, 30, `abilities.${key}`)])) as CreatureProjection["abilities"];
@@ -98,17 +107,20 @@ export function validateCreatureProjection(value: unknown): CreatureProjection {
   };
 }
 
-export function normalizeCreatureProjection(value: unknown): CreatureProjection {
-  if (!isRecord(value) || typeof value.armorClass !== "number" || typeof value.hitPoints !== "number" || typeof value.speed !== "string") return validateCreatureProjection(value);
-  const speed = value.speed.match(/(\d+)\s*(ft|feet|фут(?:ов|а)?|m|м)?/iu);
-  return validateCreatureProjection({
-    size: value.size, creatureType: value.creatureType, alignment: value.alignment ?? null,
-    challengeRating: normalizeChallengeRating(value.challengeRating), armorClass: [{ value: value.armorClass }],
-    hitPoints: { average: value.hitPoints }, speeds: [{ mode: "walk", distance: Number(speed?.[1] ?? 0), unit: /^m|м$/iu.test(speed?.[2] ?? "") ? "m" : "ft" }],
-    abilities: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 }, saves: {}, skills: {}, damageResistances: [],
-    damageImmunities: [], conditionImmunities: [], senses: [], passivePerception: 10, languages: [], traits: [], actions: [],
-    bonusActions: [], reactions: [], legendaryActions: [],
-  });
+export function isLegacyCreatureProjection(value: unknown): value is LegacyCreatureProjection {
+  return isRecord(value) && typeof value.armorClass === "number" && typeof value.hitPoints === "number" && typeof value.speed === "string";
+}
+
+export function validateLegacyCreatureProjection(value: unknown): LegacyCreatureProjection {
+  if (!isRecord(value)) fail("Legacy creature projection must be an object.");
+  exactKeys(value, ["alignment", "armorClass", "challengeRating", "creatureType", "hitPoints", "size", "speed"], "legacy creature");
+  if (typeof value.size !== "string" || !CREATURE_SIZES.includes(value.size as CreatureSize)) fail("Creature size is unsupported.");
+  return {
+    size: value.size as CreatureSize, creatureType: text(value.creatureType, "creatureType", 160),
+    alignment: value.alignment === null ? null : text(value.alignment, "alignment", 160),
+    armorClass: integer(value.armorClass, 1, 50, "armorClass"), hitPoints: integer(value.hitPoints, 1, 2147483647, "hitPoints"),
+    challengeRating: normalizeChallengeRating(value.challengeRating), speed: text(value.speed, "speed", 200),
+  };
 }
 
 export function creatureProjectionFromTypedFields(fields: unknown): CreatureProjection {
@@ -116,6 +128,17 @@ export function creatureProjectionFromTypedFields(fields: unknown): CreatureProj
   const values: Record<string, unknown> = {};
   for (const field of fields) if (isRecord(field) && typeof field.key === "string") values[toCamel(field.key)] = field.value;
   return validateCreatureProjection(values);
+}
+
+export function creatureEvidencePaths(projection: CreatureProjection): string[] {
+  const paths: string[] = [];
+  const indexed = new Set(["traits", "actions", "bonusActions", "reactions", "legendaryActions", "armorClass", "speeds", "damageResistances", "damageImmunities", "conditionImmunities", "senses", "languages"]);
+  for (const [key, value] of Object.entries(projection)) {
+    if (indexed.has(key) && Array.isArray(value) && value.length) value.forEach((_, index) => paths.push(`$.attributes.${key}[${index}]`));
+    else if (key === "abilities") Object.keys(value as Record<string, unknown>).forEach((ability) => paths.push(`$.attributes.abilities.${ability}`));
+    else paths.push(`$.attributes.${key}`);
+  }
+  return paths;
 }
 
 function validateChallengeRating(value: ChallengeRating): ChallengeRating {
