@@ -2,6 +2,8 @@
 
 All endpoints return JSON. Authentication is via session cookie (`token`) set by the login/register flow.
 
+Structured administrator entry editing and its worker-mediated publication APIs are documented in [Compendium Entry Editor](compendium-entry-editor.md).
+
 ## Authentication
 
 Authentication uses Next.js server actions (form submissions to `/login` and `/register` pages), not API endpoints. After login, a session cookie (`token`) is set automatically.

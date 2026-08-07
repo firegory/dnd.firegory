@@ -137,11 +137,11 @@ test("createDraft writes all records transactionally and validates chunk ownersh
   assert.equal(statements.filter((sql) => sql.includes("INSERT INTO compendium_names")).length, 2);
   assert.ok(statements.some((sql) => sql.includes("INSERT INTO compendium_spells")));
   assert.ok(statements.some((sql) => sql.includes("INSERT INTO compendium_citations")));
-  assert.ok(statements.some((sql) => sql.includes("g.status IN ('active', 'archived')") && sql.includes("FOR SHARE OF c, g")));
+  assert.ok(statements.some((sql) => sql.includes("g.status IN ('active', 'archived')") && sql.includes("c.page_number > 0") && sql.includes("FOR SHARE OF c, g")));
   const entryStatement = statements.find((sql) => sql.includes("INSERT INTO compendium_entries"))!;
   assert.match(entryStatement, /ON CONFLICT[\s\S]*DO UPDATE[\s\S]*RETURNING id/);
   assert.doesNotMatch(entryStatement, /DO NOTHING/);
-  assert.ok(statements.some((sql) => /active_revision_id\)[\s\S]*gen_random_uuid/.test(sql)));
+  assert.ok(statements.some((sql) => /active_revision_id, editor_head_revision_id\)[\s\S]*gen_random_uuid/.test(sql)));
   assert.ok(statements.some((sql) => /INSERT INTO compendium_revisions[\s\S]*\(id, version_id/.test(sql)));
 });
 
@@ -158,7 +158,7 @@ test("createDraft rejects a citation from another source instead of inserting it
       return { rows: [] } as never;
     },
   }));
-  await assert.rejects(service.createDraft(draft), /outside the version source\/file boundary/);
+  await assert.rejects(service.createDraft(draft), /version source\/file boundary/);
   assert.ok(!statements.some((sql) => sql.includes("INSERT INTO compendium_citations")));
 });
 

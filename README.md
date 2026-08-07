@@ -91,6 +91,17 @@ cp .env.example .env
 docker compose up --build
 ```
 
+This command remains the live-reload development stack. For production, mount
+the canonical NFSv4 export on the host and use `compose.production.yml`:
+
+```bash
+npm run production:up
+```
+
+Production uses separate non-root app, worker, and gateway image targets. See
+[docs/deployment.md](docs/deployment.md) for UID/GID, secret-file, host mount,
+healthcheck, and persistence requirements.
+
 This starts:
 
 | Service | Description | Default port |

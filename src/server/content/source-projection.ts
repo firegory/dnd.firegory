@@ -3,6 +3,7 @@ import {
   ContentMetadataValidationError,
   normalizeSourceInput,
   type CreateSourceMetadataInput,
+  type FileMetadataRecord,
   type SourceMetadataRecord,
 } from "./metadata.ts";
 
@@ -18,6 +19,20 @@ export function sourceMetadataInputFromContentSource(source: ContentSource): Cre
     publication: source.publication,
     license: source.license ?? null,
   };
+}
+
+export function contentSourceFilesFromMetadataRecords(
+  canonicalSourceId: string,
+  files: readonly FileMetadataRecord[],
+): ContentSource["files"] {
+  return [...files]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((file) => ({
+      fileId: file.id,
+      path: `sources/${canonicalSourceId}/files/${file.id}.pdf`,
+      mediaType: file.mimeType,
+      contentHash: `sha256:${file.checksumSha256}`,
+    }));
 }
 
 export function contentSourceFromMetadataRecord(

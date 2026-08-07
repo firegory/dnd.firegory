@@ -28,5 +28,6 @@ next-env.d.ts
 
 # Local storage (originals, processed artifacts)
 storage/
+secrets/
 .cr/
 dnd.firegory-issue*/

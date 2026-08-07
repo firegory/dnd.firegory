@@ -14,6 +14,7 @@ import {
   reconcilePublicationOutbox,
   submitPublicationCommand as submitGuardedPublicationCommand,
   submitUnpublicationCommand,
+  PublicationEnqueueAmbiguousError,
   type PublicationCommand,
 } from "../../src/server/content-storage/publication-command.ts";
 import { createPublicationGenerationReservation } from "../../src/server/content-storage/publication-generation.ts";
@@ -72,7 +73,7 @@ test("read-only app submission durably records intent and reconciliation closes 
         afterEnqueue: () => { throw new Error("crash after enqueue"); },
       },
     ),
-    /crash after enqueue/,
+    (error: unknown) => error instanceof PublicationEnqueueAmbiguousError && /crash after enqueue/.test(error.message),
   );
 
   assert.equal((await readOutboxState(spoolRoot, "publish-dash-v2"))?.status, "pending");
@@ -119,7 +120,7 @@ test("read-only app submission durably records intent and reconciliation closes 
       { idempotencyKey: "transient-enqueue", revision: conflicting },
       { spoolRoot, dataRoot: root, enqueue: async () => { throw new Error("Redis unavailable"); } },
     ),
-    /Redis unavailable/,
+    (error: unknown) => error instanceof PublicationEnqueueAmbiguousError && /Redis unavailable/.test(error.message),
   );
   assert.equal((await readOutboxState(spoolRoot, "transient-enqueue"))?.status, "pending");
   assert.deepEqual(

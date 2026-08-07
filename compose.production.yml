@@ -1,0 +1,278 @@
+x-runtime-environment: &runtime-environment
+  NODE_ENV: production
+  HOME: /tmp
+  DATABASE_URL_FILE: /run/secrets/database_url
+  REDIS_URL_FILE: /run/secrets/redis_url
+  AUTH_SECRET_FILE: /run/secrets/auth_secret
+  ZAI_API_KEY_FILE: /run/secrets/zai_api_key
+  LLM_API_KEY_FILE: /run/secrets/llm_api_key
+  STORAGE_ROOT: /app/storage
+  PUBLICATION_SPOOL_ROOT: /app/storage/publication-spool
+  DND_DATA_ROOT: ${DND_DATA_ROOT:-/app/content-repository}
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-zai}
+  EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-}
+  LLM_BASE_URL: ${LLM_BASE_URL:-}
+  LLM_MODEL: ${LLM_MODEL:-}
+
+x-runtime-secrets: &runtime-secrets
+  - database_url
+  - redis_url
+  - auth_secret
+  - zai_api_key
+  - llm_api_key
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  init: true
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 256
+
+services:
+  migrate:
+    <<: *service-defaults
+    restart: "no"
+    build:
+      context: .
+      target: migration-production
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
+    command: ["node", "--experimental-strip-types", "scripts/migrate.mts"]
+    environment:
+      NODE_ENV: production
+      HOME: /tmp
+      DATABASE_URL_FILE: /run/secrets/database_url
+    secrets:
+      - database_url
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "${MIGRATE_CPU_LIMIT:-1.0}"
+          memory: ${MIGRATE_MEMORY_LIMIT:-512M}
+
+  app:
+    <<: *service-defaults
+    build:
+      context: .
+      target: app-production
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-3000}:3000"
+    environment:
+      <<: *runtime-environment
+      APP_URL: ${APP_URL:?Set APP_URL to the public HTTPS application URL}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-${APP_URL}}
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+    secrets: *runtime-secrets
+    volumes:
+      - type: bind
+        source: ${DND_DATA_HOST_PATH:?Set DND_DATA_HOST_PATH to the active host NFS mount}
+        target: ${DND_DATA_ROOT:-/app/content-repository}
+        read_only: true
+        bind:
+          create_host_path: false
+      - upload_spool:/app/storage
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
+      - /app/.next/cache:rw,noexec,nosuid,nodev,size=128m,mode=1777
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "scripts/app-healthcheck.mjs"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "${APP_CPU_LIMIT:-1.0}"
+          memory: ${APP_MEMORY_LIMIT:-1G}
+
+  worker:
+    <<: *service-defaults
+    build:
+      context: .
+      target: worker-production
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
+    environment: *runtime-environment
+    secrets: *runtime-secrets
+    volumes:
+      - type: bind
+        source: ${DND_DATA_HOST_PATH:?Set DND_DATA_HOST_PATH to the active host NFS mount}
+        target: ${DND_DATA_ROOT:-/app/content-repository}
+        read_only: false
+        bind:
+          create_host_path: false
+      - upload_spool:/app/storage
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=${WORKER_TMPFS_SIZE:-1G},mode=1777
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "scripts/worker-healthcheck.mjs"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "${WORKER_CPU_LIMIT:-2.0}"
+          memory: ${WORKER_MEMORY_LIMIT:-2G}
+
+  gateway:
+    <<: *service-defaults
+    build:
+      context: .
+      target: agent-gateway
+    user: "${GATEWAY_UID:-10001}:${GATEWAY_GID:-10001}"
+    ports:
+      - "${GATEWAY_BIND_ADDRESS:-127.0.0.1}:${AGENT_GATEWAY_PORT:-8787}:8787"
+    environment:
+      HOME: /tmp
+      DATABASE_URL_FILE: /run/secrets/database_url
+      AGENT_GATEWAY_HOST: 0.0.0.0
+      AGENT_GATEWAY_PORT: 8787
+      AGENT_GATEWAY_TOKENS_FILE: /run/secrets/agent_token_policies
+      AGENT_GATEWAY_CURSOR_SECRET_FILE: /run/secrets/agent_cursor_key
+      DND_DATA_ROOT: ${DND_DATA_ROOT:-/app/content-repository}
+    secrets:
+      - database_url
+      - agent_token_policies
+      - agent_cursor_key
+    volumes:
+      - type: bind
+        source: ${DND_DATA_HOST_PATH:?Set DND_DATA_HOST_PATH to the active host NFS mount}
+        target: ${DND_DATA_ROOT:-/app/content-repository}
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "--experimental-strip-types", "scripts/agent-healthcheck.mts"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "${GATEWAY_CPU_LIMIT:-0.5}"
+          memory: ${GATEWAY_MEMORY_LIMIT:-512M}
+
+  postgres:
+    image: pgvector/pgvector:0.8.1-pg16
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: postgres
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dnd_firegory}
+      POSTGRES_USER: ${POSTGRES_USER:-dnd}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "${POSTGRES_CPU_LIMIT:-1.0}"
+          memory: ${POSTGRES_MEMORY_LIMIT:-1G}
+
+  redis:
+    build:
+      context: .
+      target: redis-production
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: redis
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    secrets:
+      - redis_password
+    volumes:
+      - redis_data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+      - /run/redis:rw,noexec,nosuid,nodev,size=1m,mode=1777
+    healthcheck:
+      test: ["CMD", "redis-cli", "--user", "healthcheck", "--pass", "", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "${REDIS_CPU_LIMIT:-0.5}"
+          memory: ${REDIS_MEMORY_LIMIT:-512M}
+
+volumes:
+  upload_spool:
+  postgres_data:
+  redis_data:
+
+secrets:
+  database_url:
+    file: ${PRODUCTION_SECRETS_ROOT:-./secrets}/database-url
+  postgres_password:
+    file: ${PRODUCTION_SECRETS_ROOT:-./secrets}/postgres-password
+  redis_url:
+    file: ${PRODUCTION_SECRETS_ROOT:-./secrets}/redis-url
+  redis_password:
+    file: ${PRODUCTION_SECRETS_ROOT:-./secrets}/redis-password
+  auth_secret:
+    file: ${PRODUCTION_SECRETS_ROOT:-./secrets}/auth-secret
+  zai_api_key:
+    file: ${PRODUCTION_SECRETS_ROOT:-./secrets}/zai-api-key
+  llm_api_key:
+    file: ${PRODUCTION_SECRETS_ROOT:-./secrets}/llm-api-key
+  agent_token_policies:
+    file: ${PRODUCTION_SECRETS_ROOT:-./secrets}/agent-token-policies.json
+  agent_cursor_key:
+    file: ${PRODUCTION_SECRETS_ROOT:-./secrets}/agent-cursor-key
