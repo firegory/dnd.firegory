@@ -7,6 +7,7 @@ import { parse } from "yaml";
 const compose = await readFile(new URL("../../compose.production.yml", import.meta.url), "utf8");
 const developmentCompose = await readFile(new URL("../../docker-compose.yml", import.meta.url), "utf8");
 const dockerfile = await readFile(new URL("../../Dockerfile", import.meta.url), "utf8");
+const nextConfig = await readFile(new URL("../../next.config.ts", import.meta.url), "utf8");
 const dockerignore = await readFile(new URL("../../.dockerignore", import.meta.url), "utf8");
 const entrypoint = await readFile(new URL("../../docker/entrypoint.prod.sh", import.meta.url), "utf8");
 const redisEntrypoint = await readFile(new URL("../../docker/redis-entrypoint.sh", import.meta.url), "utf8");
@@ -42,6 +43,18 @@ function canonicalMount(service: Service) {
   ));
 }
 
+function dockerStage(name: string): { base: string; body: string } {
+  const match = new RegExp(`^FROM ([^\\n]+) AS ${name}$`, "m").exec(dockerfile);
+  assert.ok(match, `Docker stage ${name} is missing`);
+  const remaining = dockerfile.slice(match.index + match[0].length);
+  const nextStage = /^FROM /m.exec(remaining);
+  return { base: match[1], body: remaining.slice(0, nextStage?.index) };
+}
+
+function finalUser(stage: string): string | undefined {
+  return [...stage.matchAll(/^USER (.+)$/gm)].at(-1)?.[1];
+}
+
 test("production images are pinned, standalone, and use compatible identities", () => {
   assert.equal(production.services.app.build?.target, "app-production");
   assert.equal(production.services.worker.build?.target, "worker-production");
@@ -55,6 +68,42 @@ test("production images are pinned, standalone, and use compatible identities", 
   assert.equal(production.services.postgres.image, "pgvector/pgvector:0.8.1-pg16");
   assert.match(dockerfile, /\.next\/standalone/);
   assert.match(dockerfile, /CMD \["node", "server\.js"\]/);
+});
+
+test("production Docker stages preserve dependency and runtime boundaries", () => {
+  assert.match(dockerfile, /^ARG NODE_IMAGE=node:\d+\.\d+\.\d+-bookworm-slim$/m);
+  for (const name of ["agent-dependencies", "agent-gateway", "production-dependencies", "production-build", "production-base", "app-production"]) {
+    assert.equal(dockerStage(name).base, "${NODE_IMAGE}");
+  }
+  assert.equal(dockerStage("migration-production").base, "production-base");
+  assert.equal(dockerStage("worker-production").base, "production-base");
+
+  const app = dockerStage("app-production").body;
+  const worker = dockerStage("worker-production").body;
+  const gateway = dockerStage("agent-gateway").body;
+  assert.equal(finalUser(app), "10001:10001");
+  assert.equal(finalUser(worker), "10001:10001");
+  assert.equal(finalUser(gateway), "10001:10001");
+
+  const productionDependencies = dockerStage("production-dependencies").body;
+  const productionBase = dockerStage("production-base").body;
+  const agentDependencies = dockerStage("agent-dependencies").body;
+  assert.match(productionDependencies, /RUN npm ci --omit=dev/);
+  assert.match(agentDependencies, /RUN npm ci --omit=dev/);
+  assert.match(productionBase, /COPY --from=production-dependencies \/app\/node_modules \.\/node_modules/);
+  assert.match(gateway, /COPY --from=agent-dependencies \/app\/node_modules \.\/node_modules/);
+  assert.doesNotMatch(productionDependencies, /COPY \. \./);
+  assert.doesNotMatch(agentDependencies, /COPY \. \./);
+
+  assert.match(worker, /USER root[\s\S]*apt-get install[\s\S]*ocrmypdf[\s\S]*tesseract-ocr[\s\S]*USER 10001:10001/);
+  assert.doesNotMatch(`${app}\n${gateway}`, /apt-get|ocrmypdf|tesseract-ocr/);
+
+  assert.match(nextConfig, /output: "standalone"/);
+  assert.match(app, /COPY --from=production-build --chown=10001:10001 \/app\/\.next\/standalone \.\//);
+  assert.doesNotMatch(app, /npm ci|node_modules|COPY \. \./);
+  assert.match(gateway, /COPY scripts\/agent-gateway\.mts scripts\/agent-healthcheck\.mts \.\/scripts\//);
+  assert.match(gateway, /COPY src\/server\/agent \.\/src\/server\/agent/);
+  assert.doesNotMatch(gateway, /COPY \. \.|COPY src \.\/src|npm ci/);
 });
 
 test("canonical host bind access is read-only except for the worker", () => {
