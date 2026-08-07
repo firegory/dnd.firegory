@@ -39,6 +39,13 @@ export type SnapshotDetail = SnapshotResource & Readonly<{
   externalId: string;
   normalized: NextDndNormalizedDetail;
   indexMetadata: Readonly<Record<string, unknown>>;
+  indexSource: Readonly<{
+    url: string;
+    fingerprintSha256: string;
+    rawBlobPath: string;
+    fetchedAt: string;
+    cardFingerprintSha256: string;
+  }>;
 }>;
 
 export type ParserFailure = Readonly<{
@@ -242,7 +249,21 @@ export async function collectNextDndSnapshots(options: CollectNextDndOptions): P
       const detailResource = resourceFromFetch(detailFetch, "detail", category, entry.externalId);
       try {
         const normalized = parseNextDndDetail(decodeUtf8(detailFetch.bytes, entry.sourceUrl), index.category, entry.externalId);
-        details.push({ ...detailResource, kind: "detail", category, externalId: entry.externalId, normalized, indexMetadata: entry.metadata });
+        details.push({
+          ...detailResource,
+          kind: "detail",
+          category,
+          externalId: entry.externalId,
+          normalized,
+          indexMetadata: entry.metadata,
+          indexSource: {
+            url: indexResource.sourceUrl,
+            fingerprintSha256: indexResource.sha256,
+            rawBlobPath: indexResource.blobPath,
+            fetchedAt: indexResource.fetchedAt,
+            cardFingerprintSha256: entry.cardFingerprintSha256,
+          },
+        });
       } catch (error) {
         failures.push(failure(category, entry.externalId, entry.sourceUrl, "detail", "parse", error, detailResource));
       }

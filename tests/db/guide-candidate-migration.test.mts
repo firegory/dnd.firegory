@@ -13,17 +13,11 @@ test("guide review candidates use a registered additive enum migration", () => {
   assert.doesNotMatch(sql, /(?:INSERT|UPDATE|DELETE)\s+(?:INTO\s+|FROM\s+)?compendium_(?:versions|revisions)\b/i);
 });
 
-test("guide migration remains ordered after simulated #79 and #86 merges", () => {
-  const mergedOrder = [
-    ...MIGRATION_FILENAMES.slice(0, -1),
-    "0014_compendium_entry_editor.sql",
-    "0015_spells_vertical_slice.sql",
-    filename,
-  ];
-  assert.deepEqual(mergedOrder.slice(-3), [
+test("merged registry orders #79, #86, then the guide migration", () => {
+  assert.deepEqual(MIGRATION_FILENAMES.slice(-3), [
     "0014_compendium_entry_editor.sql",
     "0015_spells_vertical_slice.sql",
     "0016_compendium_guide_candidate_type.sql",
   ]);
-  assert.deepEqual(mergedOrder, [...mergedOrder].sort());
+  assert.deepEqual(MIGRATION_FILENAMES, [...MIGRATION_FILENAMES].sort());
 });

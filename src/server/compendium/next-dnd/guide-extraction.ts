@@ -101,6 +101,8 @@ export function snapshotGuideReviewBatch(candidate: SnapshotGuideReviewCandidate
       occurrenceIndex: 0,
       locator: candidate.source.url,
       fingerprintSha256: candidate.source.sha256,
+      rawBlobPath: candidate.source.blobPath,
+      sourceFetchedAt: candidate.source.fetchedAt,
     }],
     candidates: [{
       occurrenceIndex: 0,

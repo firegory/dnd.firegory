@@ -30,6 +30,8 @@ describe("collected article guide extraction", () => {
     assert.equal(batch.candidates[0].entryType, "guide");
     assert.equal(batch.candidates[0].candidateKey, "en-starter");
     assert.equal(batch.occurrences[0].fingerprintSha256, collected.blobSha256);
+    assert.equal(batch.occurrences[0].rawBlobPath, `blobs/${collected.blobSha256}.html`);
+    assert.equal(batch.occurrences[0].sourceFetchedAt, "2026-08-06T12:00:00.000Z");
     assert.equal(JSON.stringify(batch).includes("contentHtml"), false);
     assert.equal(JSON.stringify(batch).includes("<script>"), false);
     assert.deepEqual(classifyCandidatePublication(candidate, {
