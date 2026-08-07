@@ -24,6 +24,19 @@ export class SpellValidationError extends Error {
   }
 }
 
+const STABLE_CLASS_ID = /^class:[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
+
+export function normalizeSpellClasses(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new SpellValidationError("Spell classes must be a list of stable class IDs.");
+  }
+  const classes = value.map((item) => item.normalize("NFC").trim());
+  if (classes.some((item) => !STABLE_CLASS_ID.test(item))) {
+    throw new SpellValidationError("Spell classes must use lowercase stable IDs such as class:17.");
+  }
+  return [...new Set(classes)];
+}
+
 export function validateSpellProjection(value: unknown): SpellProjection {
   if (!isRecord(value)) throw new SpellValidationError("Spell projection must be an object.");
   if (!Number.isSafeInteger(value.level) || Number(value.level) < 0 || Number(value.level) > 9) {
@@ -38,14 +51,11 @@ export function validateSpellProjection(value: unknown): SpellProjection {
   if (typeof value.ritual !== "boolean" || typeof value.concentration !== "boolean") {
     throw new SpellValidationError("Spell ritual and concentration flags must be boolean.");
   }
-  if (!Array.isArray(value.classes) || value.classes.some((item) => typeof item !== "string" || !item.trim())) {
-    throw new SpellValidationError("Spell classes must be nonblank strings.");
-  }
   const castingTime = String(value.castingTime).trim();
   const range = String(value.range).trim();
   const duration = String(value.duration).trim();
   const components = String(value.components).trim();
-  const classes = [...new Set(value.classes.map((item) => String(item).normalize("NFC").trim()))];
+  const classes = normalizeSpellClasses(value.classes);
   return {
     level: Number(value.level), school: value.school as SpellSchool,
     ritual: value.ritual, concentration: value.concentration,

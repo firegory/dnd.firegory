@@ -1,7 +1,7 @@
 import type { QueryResultRow } from "pg";
 
 import { withTransaction } from "../db/client.ts";
-import { validateSpellProjection, type SpellProjection } from "./spell-schema.ts";
+import { normalizeSpellClasses, SpellValidationError, validateSpellProjection, type SpellProjection } from "./spell-schema.ts";
 
 export const COMPENDIUM_ENTRY_TYPES = [
   "spell", "creature", "item", "class", "feature", "species", "background", "feat", "equipment",
@@ -29,7 +29,7 @@ export type CitationInput = Readonly<{
 type ExtensionData = Readonly<Record<string, unknown>>;
 type ProjectionBase = Readonly<{ extensionData?: ExtensionData }>;
 export type ProjectionInput =
-  | (ProjectionBase & Omit<SpellProjection, "classes" | "concentration" | "ritual"> & Readonly<{ type: "spell"; classes?: readonly string[]; concentration?: boolean; ritual?: boolean }>)
+  | (ProjectionBase & Omit<SpellProjection, "concentration" | "ritual"> & Readonly<{ type: "spell"; concentration?: boolean; ritual?: boolean }>)
   | (ProjectionBase & Readonly<{ type: "creature"; size: "tiny" | "small" | "medium" | "large" | "huge" | "gargantuan"; creatureType: string; alignment?: string | null; armorClass: number; hitPoints: number; challengeRating: number; speed: string }>)
   | (ProjectionBase & Readonly<{ type: "item"; category: "armor" | "potion" | "ring" | "rod" | "scroll" | "staff" | "wand" | "weapon" | "wondrous" | "other"; rarity: "common" | "uncommon" | "rare" | "very_rare" | "legendary" | "artifact" | "varies"; requiresAttunement?: boolean }>)
   | (ProjectionBase & Readonly<{ type: "class"; hitDie: 6 | 8 | 10 | 12; primaryAbility: string; spellcastingAbility?: string | null }>)
@@ -330,7 +330,9 @@ function validateProjection(projection: ProjectionInput): void {
     case "spell":
       integerRange(projection.level, 0, 9, "spell.level");
       enumValue(projection.school, ["abjuration", "conjuration", "divination", "enchantment", "evocation", "illusion", "necromancy", "transmutation"], "spell.school");
-      validateSpellProjection({ ...projection, classes: projection.classes ?? [], concentration: projection.concentration ?? false, ritual: projection.ritual ?? false }); return;
+      try { validateSpellProjection({ ...projection, concentration: projection.concentration ?? false, ritual: projection.ritual ?? false }); }
+      catch (error) { if (error instanceof SpellValidationError) throw new CompendiumValidationError(error.message); throw error; }
+      return;
     case "creature":
       enumValue(projection.size, ["tiny", "small", "medium", "large", "huge", "gargantuan"], "creature.size");
       integerRange(projection.armorClass, 0, 50, "creature.armorClass"); integerRange(projection.hitPoints, 1, 2147483647, "creature.hitPoints"); challengeRating(projection.challengeRating); requireText(projection.creatureType, "creature.creatureType"); requireText(projection.speed, "creature.speed"); optionalText(projection.alignment, "creature.alignment"); return;
@@ -368,7 +370,7 @@ async function insertCitation(client: DbClient, revisionId: string, versionId: s
 async function insertProjection(client: DbClient, revisionId: string, projection: ProjectionInput): Promise<void> {
   const extension = json(projection.extensionData);
   switch (projection.type) {
-    case "spell": await client.query("INSERT INTO compendium_spells (revision_id, level, school, casting_time, range_text, duration, components, concentration, ritual, classes, extension_data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)", [revisionId, projection.level, projection.school, projection.castingTime.trim(), projection.range.trim(), projection.duration.trim(), projection.components.trim(), projection.concentration ?? false, projection.ritual ?? false, projection.classes ?? [], extension]); return;
+    case "spell": await client.query("INSERT INTO compendium_spells (revision_id, level, school, casting_time, range_text, duration, components, concentration, ritual, classes, extension_data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)", [revisionId, projection.level, projection.school, projection.castingTime.trim(), projection.range.trim(), projection.duration.trim(), projection.components.trim(), projection.concentration ?? false, projection.ritual ?? false, normalizeSpellClasses(projection.classes), extension]); return;
     case "creature": await client.query("INSERT INTO compendium_creatures (revision_id, size, creature_type, alignment, armor_class, hit_points, challenge_rating, speed, extension_data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)", [revisionId, projection.size, projection.creatureType.trim(), projection.alignment?.trim() || null, projection.armorClass, projection.hitPoints, projection.challengeRating, projection.speed.trim(), extension]); return;
     case "item": await client.query("INSERT INTO compendium_items (revision_id, category, rarity, requires_attunement, extension_data) VALUES ($1,$2,$3,$4,$5::jsonb)", [revisionId, projection.category, projection.rarity, projection.requiresAttunement ?? false, extension]); return;
     case "class": await client.query("INSERT INTO compendium_classes (revision_id, hit_die, primary_ability, spellcasting_ability, extension_data) VALUES ($1,$2,$3,$4,$5::jsonb)", [revisionId, projection.hitDie, projection.primaryAbility.trim(), projection.spellcastingAbility?.trim() || null, extension]); return;

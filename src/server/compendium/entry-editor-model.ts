@@ -9,6 +9,7 @@ import {
   type CreateCompendiumDraftInput,
   type ProjectionInput,
 } from "./service.ts";
+import { normalizeSpellClasses } from "./spell-schema.ts";
 
 export type EditorBlock =
   | Readonly<{ type: "heading" | "paragraph"; text: string }>
@@ -38,7 +39,7 @@ export type EditorCorrectionInput = Pick<EditorEntryInput, "title" | "summary" |
 const ROOT_KEYS = ["aliases", "blocks", "canonicalKey", "citations", "edition", "entryType", "fileId", "language", "projection", "reason", "slug", "sourceId", "summary", "title"];
 const CORRECTION_KEYS = ["basedOnRevisionId", "blocks", "citations", "projection", "reason", "summary", "title"];
 const PROJECTION_KEYS: Readonly<Record<CompendiumEntryType, readonly string[]>> = {
-  spell: ["castingTime", "components", "concentration", "duration", "level", "range", "ritual", "school", "type"],
+  spell: ["castingTime", "classes", "components", "concentration", "duration", "level", "range", "ritual", "school", "type"],
   creature: ["alignment", "armorClass", "challengeRating", "creatureType", "hitPoints", "size", "speed", "type"],
   item: ["category", "rarity", "requiresAttunement", "type"],
   class: ["hitDie", "primaryAbility", "spellcastingAbility", "type"],
@@ -126,6 +127,10 @@ function parseProjection(value: unknown, entryType: CompendiumEntryType): Projec
   if (projection.type !== entryType) fail("Projection type must match entry type.");
   for (const [key, item] of Object.entries(projection)) {
     if (typeof item === "string" && /<\s*\/?\s*[a-z][^>]*>/i.test(item)) fail(`projection.${key} cannot contain HTML markup.`);
+  }
+  if (entryType === "spell") {
+    try { return { ...projection, classes: normalizeSpellClasses(projection.classes) } as ProjectionInput; }
+    catch (error) { if (error instanceof Error) fail(error.message); throw error; }
   }
   return projection as ProjectionInput;
 }

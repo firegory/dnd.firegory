@@ -39,6 +39,7 @@ const draft: CreateCompendiumDraftInput = {
     range: "120 feet",
     duration: "Instantaneous",
     components: "V, S",
+    classes: [],
   },
   citations: [{
     chunkId: ids.chunk,
@@ -67,6 +68,10 @@ test("draft validator rejects normalized slug/alias conflicts", () => {
 });
 
 test("projection validators enforce ranges and matching types", () => {
+  assert.throws(
+    () => validateDraft({ ...draft, projection: { ...draft.projection, classes: undefined as never } }),
+    /classes must be a list/i,
+  );
   assert.throws(
     () => validateDraft({ ...draft, projection: { ...draft.projection, level: 10 } }),
     /spell\.level must be an integer between 0 and 9/,
