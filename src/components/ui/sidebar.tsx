@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 
 import {
@@ -32,13 +32,13 @@ function Brand({ onNavigate }: { onNavigate?: (event: MouseEvent<HTMLAnchorEleme
 
 function Navigation({ userRole, onNavigate }: { userRole?: AppLayoutRole; onNavigate?: (event: MouseEvent<HTMLAnchorElement>, href: string) => void }) {
   const pathname = usePathname();
-  const { t } = useUiLanguage();
+  const { language, t } = useUiLanguage();
 
   return (
     <nav className="shell-navigation" aria-label={t("primaryNavigation")}>
       <p>{t("nav")}</p>
       <ul>
-        {getNavigationItems(userRole).map((item) => {
+        {getNavigationItems(userRole, language).map((item) => {
           const active = isNavigationItemActive(pathname, item.href);
           return (
             <li key={item.href}>
@@ -61,6 +61,15 @@ function Navigation({ userRole, onNavigate }: { userRole?: AppLayoutRole; onNavi
 
 function LanguageToggle() {
   const { language, setLanguage, t } = useUiLanguage();
+  const pathname = usePathname();
+  const router = useRouter();
+
+  function changeLanguage(value: UiLanguage) {
+    setLanguage(value);
+    if (/^\/(?:ru|en)\/compendium(?:\/|$)/.test(pathname)) {
+      router.replace(pathname.replace(/^\/(?:ru|en)/, `/${value}`));
+    }
+  }
 
   return (
     <div className="sidebar-language">
@@ -71,7 +80,7 @@ function LanguageToggle() {
           { value: "ru", label: "RU" },
           { value: "en", label: "EN" },
         ]}
-        onChange={(value) => setLanguage(value as UiLanguage)}
+        onChange={(value) => changeLanguage(value as UiLanguage)}
       />
     </div>
   );

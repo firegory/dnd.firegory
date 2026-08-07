@@ -33,6 +33,8 @@ export type CompendiumListEntry = Readonly<{
   source: PublicSource;
 }>;
 
+export type CompendiumEntryTypeCount = Readonly<{ entryType: CompendiumEntryType; count: number }>;
+
 export type PublicSource = Readonly<{
   id: string;
   title: string;
@@ -158,6 +160,21 @@ export class CompendiumReadService {
       boundary.params,
     );
     return Number(result.rows[0]?.count ?? 0);
+  }
+
+  async listEntryTypeCounts(user: RetrievalUser, selection: RetrievalSelection = {}): Promise<readonly CompendiumEntryTypeCount[]> {
+    const boundary = buildBoundary(user, selection);
+    const result = await this.db.query<{ entry_type: CompendiumEntryType; count: string } & QueryResultRow>(
+      `${boundary.sql}, selected_versions AS (
+         SELECT * FROM accessible_versions WHERE source_rank = 1
+       )
+       SELECT entry_type, count(*)::text AS count
+       FROM selected_versions
+       GROUP BY entry_type
+       ORDER BY entry_type`,
+      boundary.params,
+    );
+    return result.rows.map((row) => ({ entryType: row.entry_type, count: Number(row.count) }));
   }
 
   async getEntry(user: RetrievalUser, identifier: string, selection: RetrievalSelection = {}): Promise<CompendiumEntryDetail> {

@@ -7,15 +7,17 @@ describe("compendium navigation", () => {
   it("keeps search and settings reachable for every authenticated role", () => {
     for (const role of [undefined, "user", "premium", "admin"] as const) {
       const routes = getNavigationItems(role).map((item) => item.href);
+      assert.ok(routes.includes("/ru/compendium"));
       assert.ok(routes.includes("/search"));
       assert.ok(routes.includes("/settings"));
     }
+    assert.equal(getNavigationItems("user", "en")[0].href, "/en/compendium");
   });
 
   it("adds all existing administration routes only for administrators", () => {
     assert.deepEqual(
       getNavigationItems("admin").map((item) => item.href),
-      ["/search", "/settings", "/admin/sources", "/admin/ingestion", "/admin/compendium/imports", "/admin/users"],
+      ["/ru/compendium", "/search", "/settings", "/admin/sources", "/admin/ingestion", "/admin/compendium/imports", "/admin/users"],
     );
     assert.equal(getNavigationItems("user").some((item) => item.href.startsWith("/admin")), false);
   });
