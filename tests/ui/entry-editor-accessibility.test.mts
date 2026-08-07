@@ -38,3 +38,12 @@ test("cancel is local-only and evidence has preview and exact code-point spans",
   assert.match(source,/if\(mutationCurrent\(\)\)await loadDetail\(mutationSelection/);
   assert.match(selectionSource,/mutationEpoch !== input\.currentEpoch/);
 });
+
+test("cancel during save or publication cannot reload or report a false cancellation",()=>{
+  const cancelBody=/function cancel\(\)\{[^}]*\}/.exec(source)?.[0]??"";
+  const guardIndex=cancelBody.indexOf("if(busy||mutationInFlight.current)return");
+  assert.notEqual(guardIndex,-1);
+  assert.ok(guardIndex<cancelBody.indexOf("loadDetail(selected)"));
+  assert.ok(guardIndex<cancelBody.indexOf("setNotice(c.cancelled)"));
+  assert.match(source,/<button type="button" disabled=\{busy\} onClick=\{cancel\}/);
+});
