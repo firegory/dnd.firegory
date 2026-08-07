@@ -16,7 +16,9 @@ test("parses the current 411-spell window.LIST shape without a browser", () => {
     title: "Метка охотника",
     titleEn: "Hunter's Mark",
     metadata: parsed.entries[0].metadata,
+    cardFingerprintSha256: parsed.entries[0].cardFingerprintSha256,
   });
+  assert.match(parsed.entries[0].cardFingerprintSha256, /^[0-9a-f]{64}$/);
   assert.equal(parsed.entries[0].metadata.filter_source instanceof Array, true);
 });
 

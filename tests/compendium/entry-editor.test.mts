@@ -74,6 +74,48 @@ test("canonical editor projection retains multi-file source metadata losslessly"
   assert.equal(revision.source.shared,true);
 });
 
+test("editor loads and preserves multiple spell classes in an unchanged correction", async () => {
+  const projection = { level:1,school:"abjuration",casting_time:"Reaction",range_text:"Self",duration:"1 round",components:"V, S",concentration:false,ritual:false,classes:["class:17","class:3"],extension_data:{} };
+  const client={async query(sql:string){
+    if(sql.includes("FROM compendium_versions v JOIN compendium_entries"))return {rows:[{version_id:versionId,entry_id:versionId,canonical_key:"shield",entry_type:"spell",edition:"5e",language:"en",source_id:versionId,file_id:revisionId,active_revision_id:revisionId,editor_head_revision_id:revisionId,version_lifecycle:"published",slug:"shield",aliases:[],canonical_revision_id:null,publication_status:"unpublished",publication_action:null}]};
+    if(sql.includes("FROM compendium_revisions"))return {rows:[{id:revisionId,revision_number:1,title:"Shield",summary:null,body:"Body",extension_data:{editor:{blocks:[{type:"paragraph",text:"Body"}]}},projection,citations:[],based_on_revision_id:null,created_by:"admin",change_reason:"Create",created_at:"2026-01-01T00:00:00.000Z",lifecycle:"draft"}]};
+    return {rows:[]};
+  }};
+  let saved:Record<string,unknown>|null=null;
+  const compendium={async createRevision(_versionId:string,input:Record<string,unknown>){saved=input;return revisionId;}};
+  const service=new EntryEditorService((async(callback)=>(callback(client as never))) as never,compendium as never,{} as never,async()=>null);
+  const loaded=await service.get(admin,versionId);
+  assert.deepEqual(loaded.revisions[0].projection.classes,["class:17","class:3"]);
+  const base=loaded.revisions[0];
+  const {level,school,castingTime,range,duration,components,concentration,ritual,classes}=base.projection;
+  await service.correct(admin,versionId,{basedOnRevisionId:revisionId,title:base.title,summary:base.summary,blocks:base.blocks,projection:{type:"spell",level,school,castingTime,range,duration,components,concentration,ritual,classes},citations:[{chunkId:versionId,generationId:revisionId,kind:"block",fieldPath:null,blockOrder:0,quote:"Body",quoteSpanStart:0,quoteSpanEnd:4}],reason:"No field changes."});
+  assert.deepEqual((saved?.projection as Record<string,unknown>).classes,["class:17","class:3"]);
+});
+
+test("spell revision storage writes the explicit normalized class list", async () => {
+  let storedClasses:unknown;
+  const nextRevision="10000000-0000-4000-8000-000000000003";
+  const service=new CompendiumService(async(callback)=>callback({async query(sql:string,values:readonly unknown[]=[]){
+    if(sql.includes("FROM compendium_versions WHERE"))return {rows:[{entry_type:"spell",lifecycle:"published",source_id:versionId,file_id:revisionId,active_revision_id:revisionId,editor_head_revision_id:revisionId}]};
+    if(sql.includes("coalesce(max(revision_number)"))return {rows:[{revision_number:2}]};
+    if(sql.includes("INSERT INTO compendium_revisions"))return {rows:[{id:nextRevision}]};
+    if(sql.includes("INSERT INTO compendium_spells"))storedClasses=values[9];
+    return {rows:[],rowCount:1};
+  }} as never));
+  await service.createRevision(versionId,{title:"Shield",body:"Body",projection:{type:"spell",level:1,school:"abjuration",castingTime:"Reaction",range:"Self",duration:"1 round",components:"V, S",concentration:false,ritual:false,classes:[" class:17 ","class:3","class:17"]},basedOnRevisionId:revisionId});
+  assert.deepEqual(storedClasses,["class:17","class:3"]);
+});
+
+test("published editor spell projection emits classes as a canonical string list", async () => {
+  const client={async query(sql:string){if(sql.includes("FROM sources"))return {rows:[sourceRow]};if(sql.includes("FROM files"))return {rows:fileRows};return {rows:[]};}};
+  const spellEntry={...editorEntry,entryType:"spell"};
+  const spellRevision={...editorRevision,projection:{level:1,school:"abjuration",castingTime:"Reaction",range:"Self",duration:"1 round",components:"V, S",concentration:false,ritual:false,classes:["class:17","class:3"]}};
+  const canonical=await buildEditorCanonicalRevision(client as never,admin,spellEntry as never,spellRevision as never);
+  const classes=canonical.entry.typedFields.find((field)=>field.key==="classes");
+  assert.deepEqual(classes,{key:"classes",label:"classes",type:"stringList",value:["class:17","class:3"]});
+  assert.equal(canonical.entry.typedFields.find((field)=>field.key==="school")?.type,"string");
+});
+
 test("canonical editor projection rejects pageless citations before publication persistence", async () => {
   const client={async query(sql:string){if(sql.includes("FROM sources"))return {rows:[sourceRow]};if(sql.includes("FROM files"))return {rows:fileRows};return {rows:[]};}};
   await assert.rejects(buildEditorCanonicalRevision(client as never,admin,editorEntry as never,{...editorRevision,citations:[{...editorRevision.citations[0],page:null}]} as never),/positive source page/);

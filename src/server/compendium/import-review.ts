@@ -17,6 +17,8 @@ import {
   CandidateProjectionError,
   classifyCandidatePublication,
   projectExtractedCandidate,
+  projectSnapshotSpellCandidate,
+  type SnapshotSpellEvidence,
   type CandidatePublicationCapability,
 } from "./candidate-publication.ts";
 import type { CompendiumEntryType } from "./service.ts";
@@ -106,6 +108,15 @@ type CandidateRow = QueryResultRow & Readonly<{
   previous_created_at: Date | string | null;
   previous_occurrence_id: string | null;
   previous_locator: string | null;
+  previous_fingerprint_sha256: string | null;
+  previous_raw_blob_path: string | null;
+  previous_source_fetched_at: Date | string | null;
+  previous_index_locator: string | null;
+  previous_index_fingerprint_sha256: string | null;
+  previous_raw_index_blob_path: string | null;
+  previous_index_source_fetched_at: Date | string | null;
+  previous_index_card_fingerprint_sha256: string | null;
+  previous_metadata_evidence_text: string | null;
   previous_chunk_id: string | null;
   previous_page_number: number | null;
   previous_chunk_index: number | null;
@@ -116,6 +127,16 @@ type CandidateRow = QueryResultRow & Readonly<{
   previous_publication_status: ReviewPublicationStatus | null;
   invalid_reason: string | null;
   locator: string | null;
+  occurrence_fingerprint_sha256: string | null;
+  occurrence_raw_blob_path: string | null;
+  occurrence_source_fetched_at: Date | string | null;
+  occurrence_index_locator: string | null;
+  occurrence_index_fingerprint_sha256: string | null;
+  occurrence_raw_index_blob_path: string | null;
+  occurrence_index_source_fetched_at: Date | string | null;
+  occurrence_index_card_fingerprint_sha256: string | null;
+  occurrence_metadata_evidence_text: string | null;
+  file_checksum_sha256: string;
   chunk_id: string | null;
   page_number: number | null;
   chunk_index: number | null;
@@ -299,7 +320,13 @@ export class CompendiumImportReviewService {
     const prepared = await this.transaction(async (client) => {
       const rows = await client.query<CandidateRow>(candidateSelect("AND candidate.id = ANY($2::uuid[]) ORDER BY candidate.id FOR UPDATE OF candidate"), [runId, ids]);
       if (rows.rows.length !== ids.length) throw new ImportReviewError("One or more candidates were not found in this run.", 404);
-      const capabilities = new Map(rows.rows.map((row) => [row.id, candidateCapability(row)]));
+      const publicationContents = new Map(rows.rows.map((row) => {
+        const resolved = input.action === "merge" ? input.resolvedContents?.[row.id] ?? input.resolvedContent : null;
+        return [row.id, input.action === "merge" && isRecord(resolved) ? lockCollectorSpellMerge(row, resolved) : row.content] as const;
+      }));
+      const capabilities = new Map(rows.rows.map((row) => [row.id, input.action === "merge" && isSnapshotSpellContent(row.content)
+        ? classifyCandidatePublication(publicationContents.get(row.id), capabilityContext(row, currentEvidence(row)))
+        : candidateCapability(row)]));
       if (input.action !== "reject") {
         for (const row of rows.rows) {
           const capability = capabilities.get(row.id)!;
@@ -339,7 +366,7 @@ export class CompendiumImportReviewService {
         }
         const decision = decisionFor(input.action, currentDecision);
         assertDecisionAllowed(row.diff_status, decision);
-        const resolved = input.action === "merge" ? input.resolvedContents?.[row.id] ?? input.resolvedContent : row.resolved_content;
+        const resolved = input.action === "merge" ? publicationContents.get(row.id) : row.resolved_content;
         if (decision === "merged" && !isRecord(resolved)) throw new ImportReviewError("Merge requires a resolved content object.");
         const shouldPublish = ["approved", "merged", "unpublish"].includes(decision);
         const entryId = shouldPublish ? requiredCandidateEntryId(row) : null;
@@ -431,10 +458,29 @@ function candidateSelect(suffix: string): string {
                  previous.generation_id AS previous_generation_id, previous.candidate_key AS previous_candidate_key,
                  previous.entry_type AS previous_entry_type, previous.created_at AS previous_created_at,
                  candidate.invalid_reason, candidate.created_at, run.status AS run_status,
-                 occurrence.locator, occurrence.chunk_id, chunk.page_number, chunk.chunk_index,
+                  occurrence.locator, occurrence.fingerprint_sha256 AS occurrence_fingerprint_sha256,
+                  occurrence.raw_blob_path AS occurrence_raw_blob_path,
+                   occurrence.source_fetched_at AS occurrence_source_fetched_at,
+                   occurrence.index_locator AS occurrence_index_locator,
+                   occurrence.index_fingerprint_sha256 AS occurrence_index_fingerprint_sha256,
+                   occurrence.raw_index_blob_path AS occurrence_raw_index_blob_path,
+                   occurrence.index_source_fetched_at AS occurrence_index_source_fetched_at,
+                   occurrence.index_card_fingerprint_sha256 AS occurrence_index_card_fingerprint_sha256,
+                   occurrence.metadata_evidence_text AS occurrence_metadata_evidence_text,
+                  source_file.checksum_sha256 AS file_checksum_sha256,
+                  occurrence.chunk_id, chunk.page_number, chunk.chunk_index,
                  chunk.section_heading, chunk.quote_text,
-                 previous.occurrence_id AS previous_occurrence_id, previous_occurrence.locator AS previous_locator,
-                 previous_occurrence.chunk_id AS previous_chunk_id,
+                  previous.occurrence_id AS previous_occurrence_id, previous_occurrence.locator AS previous_locator,
+                  previous_occurrence.fingerprint_sha256 AS previous_fingerprint_sha256,
+                  previous_occurrence.raw_blob_path AS previous_raw_blob_path,
+                   previous_occurrence.source_fetched_at AS previous_source_fetched_at,
+                   previous_occurrence.index_locator AS previous_index_locator,
+                   previous_occurrence.index_fingerprint_sha256 AS previous_index_fingerprint_sha256,
+                   previous_occurrence.raw_index_blob_path AS previous_raw_index_blob_path,
+                   previous_occurrence.index_source_fetched_at AS previous_index_source_fetched_at,
+                   previous_occurrence.index_card_fingerprint_sha256 AS previous_index_card_fingerprint_sha256,
+                   previous_occurrence.metadata_evidence_text AS previous_metadata_evidence_text,
+                  previous_occurrence.chunk_id AS previous_chunk_id,
                  previous_chunk.page_number AS previous_page_number, previous_chunk.chunk_index AS previous_chunk_index,
                  previous_chunk.section_heading AS previous_section_heading, previous_chunk.quote_text AS previous_quote_text,
                  previous_review.decision AS previous_decision,
@@ -443,10 +489,11 @@ function candidateSelect(suffix: string): string {
                  review.decision, review.resolved_content, review.publication_status,
                  review.publication_attempt, review.idempotency_key, review.last_error,
                  review.expected_active_revision_id, review.expected_active_revision_captured,
-                 review.reviewed_by, review.reviewed_at
+                  review.reviewed_by, review.reviewed_at
           FROM compendium_import_candidates candidate
           JOIN compendium_import_runs run ON run.id = candidate.import_run_id
           JOIN sources source ON source.id = candidate.source_id
+          JOIN files source_file ON source_file.id = candidate.file_id AND source_file.source_id = candidate.source_id
           LEFT JOIN compendium_import_candidates previous ON previous.id = candidate.previous_candidate_id
           LEFT JOIN compendium_import_occurrences occurrence ON occurrence.id = candidate.occurrence_id
           LEFT JOIN chunks chunk ON chunk.id = occurrence.chunk_id
@@ -460,7 +507,8 @@ function candidateSelect(suffix: string): string {
 async function buildRevision(client: DbClient, candidate: CandidateRow, content: Record<string, unknown>): Promise<CanonicalRevision> {
   const sourceResult = await client.query<QueryResultRow & Record<string, unknown>>(
     `SELECT source.*, coalesce(jsonb_agg(jsonb_build_object(
-              'fileId', file.id::text, 'path', 'sources/' || source.canonical_source_id || '/files/' || file.id || '.pdf',
+               'fileId', file.id::text, 'path', 'sources/' || source.canonical_source_id || '/files/' || file.id ||
+                 CASE WHEN file.mime_type = 'application/pdf' THEN '.pdf' ELSE '.snapshot' END,
               'mediaType', file.mime_type, 'contentHash', 'sha256:' || file.checksum_sha256
             ) ORDER BY file.id) FILTER (WHERE file.id IS NOT NULL), '[]'::jsonb) AS canonical_files
      FROM sources source LEFT JOIN files file ON file.source_id = source.id AND file.deleted_at IS NULL
@@ -485,6 +533,22 @@ async function buildRevision(client: DbClient, candidate: CandidateRow, content:
     },
     ...(row.license ? { license: String(row.license) } : {}), files: row.canonical_files as ContentSource["files"],
   };
+  if (isSnapshotSpellContent(content)) {
+    const evidence = currentSnapshotEvidence(candidate);
+    if (!evidence) throw new ImportReviewError("Collector spell has no complete persisted occurrence and database file evidence.", 409);
+    try {
+      return projectSnapshotSpellCandidate(content, {
+        candidateKey: candidate.candidate_key,
+        createdAt: iso(candidate.created_at),
+        source,
+        fileId: candidate.file_id,
+        evidence,
+      });
+    } catch (error) {
+      if (error instanceof CandidateProjectionError) throw new ImportReviewError(error.message);
+      throw error;
+    }
+  }
   if (!candidate.entry_type || !candidate.generation_id || !candidate.chunk_id || candidate.chunk_index === null || !candidate.quote_text) {
     throw new ImportReviewError("Publishable extracted candidates require typed source, generation, and chunk provenance.");
   }
@@ -521,19 +585,30 @@ async function buildRevision(client: DbClient, candidate: CandidateRow, content:
 async function buildPreviousRevision(client: DbClient, row: CandidateRow): Promise<CanonicalRevision> {
   const evidence = previousEvidence(row);
   const content = previousPublishedContent(row);
-  if (!evidence || !content || !row.previous_created_at || !row.previous_candidate_key || !row.previous_entry_type) {
+  const collector = isSnapshotSpellContent(content ?? {});
+  if ((!evidence && !collector) || !content || !row.previous_created_at || !row.previous_candidate_key || !row.previous_entry_type) {
     throw new ImportReviewError("Missing candidate has no complete previous publication evidence.", 409);
   }
   return buildRevision(client, {
     ...row,
     candidate_key: row.previous_candidate_key,
     entry_type: row.previous_entry_type,
-    generation_id: evidence.generationId,
-    chunk_id: evidence.chunkId,
-    chunk_index: evidence.chunkIndex,
-    page_number: evidence.page,
-    section_heading: evidence.sectionHeading,
-    quote_text: evidence.quoteText,
+    generation_id: evidence?.generationId ?? row.previous_generation_id,
+    chunk_id: evidence?.chunkId ?? null,
+    chunk_index: evidence?.chunkIndex ?? null,
+    page_number: evidence?.page ?? null,
+    section_heading: evidence?.sectionHeading ?? null,
+    quote_text: evidence?.quoteText ?? null,
+    locator: row.previous_locator,
+    occurrence_fingerprint_sha256: row.previous_fingerprint_sha256,
+    occurrence_raw_blob_path: row.previous_raw_blob_path,
+    occurrence_source_fetched_at: row.previous_source_fetched_at,
+    occurrence_index_locator: row.previous_index_locator,
+    occurrence_index_fingerprint_sha256: row.previous_index_fingerprint_sha256,
+    occurrence_raw_index_blob_path: row.previous_raw_index_blob_path,
+    occurrence_index_source_fetched_at: row.previous_index_source_fetched_at,
+    occurrence_index_card_fingerprint_sha256: row.previous_index_card_fingerprint_sha256,
+    occurrence_metadata_evidence_text: row.previous_metadata_evidence_text,
     created_at: row.previous_created_at,
   }, content);
 }
@@ -581,6 +656,7 @@ function capabilityContext(row: CandidateRow, evidence: ReturnType<typeof curren
     chunk: evidence
       ? { id: evidence.chunkId, chunkIndex: evidence.chunkIndex, pageNumber: evidence.page, sectionHeading: evidence.sectionHeading, quoteText: evidence.quoteText }
       : null,
+    snapshotEvidence: row.diff_status === "missing" ? previousSnapshotEvidence(row) : currentSnapshotEvidence(row),
   };
 }
 
@@ -601,8 +677,10 @@ function previousEvidence(row: CandidateRow) {
 }
 
 function previousChainError(row: CandidateRow): string | null {
-  if (row.occurrence_id !== null || !row.previous_candidate_id || !row.previous_occurrence_id || !previousEvidence(row)) {
-    return "Missing candidate has no complete previous occurrence and chunk evidence chain.";
+  const collector = isSnapshotSpellContent(previousPublishedContent(row) ?? row.previous_content ?? {});
+  if (row.occurrence_id !== null || !row.previous_candidate_id || !row.previous_occurrence_id
+      || (collector ? !previousSnapshotEvidence(row) : !previousEvidence(row))) {
+    return `Missing candidate has no complete previous occurrence and ${collector ? "collector" : "chunk"} evidence chain.`;
   }
   if (row.previous_source_id !== row.source_id || row.previous_file_id !== row.file_id
       || row.previous_entry_type !== row.entry_type || row.previous_candidate_key !== row.candidate_key) {
@@ -612,6 +690,55 @@ function previousChainError(row: CandidateRow): string | null {
     return "Missing candidate content must retain the immutable previous candidate payload.";
   }
   return null;
+}
+
+function currentSnapshotEvidence(row: CandidateRow): SnapshotSpellEvidence | null {
+  return snapshotEvidence(row.locator, row.occurrence_fingerprint_sha256, row.occurrence_raw_blob_path,
+    row.occurrence_source_fetched_at, row.file_checksum_sha256, row.occurrence_index_locator,
+    row.occurrence_index_fingerprint_sha256, row.occurrence_raw_index_blob_path, row.occurrence_index_source_fetched_at,
+    row.occurrence_index_card_fingerprint_sha256, row.occurrence_metadata_evidence_text);
+}
+
+function previousSnapshotEvidence(row: CandidateRow): SnapshotSpellEvidence | null {
+  return snapshotEvidence(row.previous_locator, row.previous_fingerprint_sha256, row.previous_raw_blob_path,
+    row.previous_source_fetched_at, row.file_checksum_sha256, row.previous_index_locator,
+    row.previous_index_fingerprint_sha256, row.previous_raw_index_blob_path, row.previous_index_source_fetched_at,
+    row.previous_index_card_fingerprint_sha256, row.previous_metadata_evidence_text);
+}
+
+function snapshotEvidence(
+  sourceUrl: string | null,
+  fingerprintSha256: string | null,
+  rawBlobPath: string | null,
+  fetchedAt: Date | string | null,
+  fileChecksumSha256: string | null,
+  indexUrl: string | null,
+  indexFingerprintSha256: string | null,
+  rawIndexBlobPath: string | null,
+  indexFetchedAt: Date | string | null,
+  indexCardFingerprintSha256: string | null,
+  metadataEvidenceText: string | null,
+): SnapshotSpellEvidence | null {
+  if (!sourceUrl || !fingerprintSha256 || !rawBlobPath || !fetchedAt || !fileChecksumSha256 || !indexUrl
+      || !indexFingerprintSha256 || !rawIndexBlobPath || !indexFetchedAt || !indexCardFingerprintSha256
+      || !metadataEvidenceText || rawBlobPath !== `blobs/${fingerprintSha256}.html`
+      || rawIndexBlobPath !== `blobs/${indexFingerprintSha256}.html`) return null;
+  return {
+    sourceUrl, fingerprintSha256, rawBlobPath, fetchedAt: iso(fetchedAt), fileChecksumSha256,
+    indexUrl, indexFingerprintSha256, rawIndexBlobPath, indexFetchedAt: iso(indexFetchedAt),
+    indexCardFingerprintSha256, metadataEvidenceText,
+  };
+}
+
+function lockCollectorSpellMerge(row: CandidateRow, resolved: Record<string, unknown>): Record<string, unknown> {
+  if (!isSnapshotSpellContent(row.content)) return resolved;
+  if (!isSnapshotSpellContent(resolved)) throw new ImportReviewError("Collector spell merge must retain the snapshot candidate envelope.", 409);
+  for (const field of ["schemaVersion", "kind", "externalId", "sourceUrl", "sha256", "parserVersion", "title", "aliases", "body", "sourceVersion"] as const) {
+    if (JSON.stringify(resolved[field]) !== JSON.stringify(row.content[field])) {
+      throw new ImportReviewError(`Collector spell merge cannot modify immutable ${field} evidence.`, 409);
+    }
+  }
+  return resolved;
 }
 
 function previousPublishedContent(row: CandidateRow): Record<string, unknown> | null {
@@ -695,6 +822,7 @@ function boundedInteger(value: number | undefined, fallback: number, minimum: nu
 }
 function requireUuid(value: string, name: string): void { if (!UUID.test(value)) throw new ImportReviewError(`${name} must be a UUID.`); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function isSnapshotSpellContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotSpellCandidate" && value.schemaVersion === 1; }
 function number(value: unknown): number { return Number(value ?? 0); }
 function iso(value: unknown): string { return value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString(); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message.slice(0, 4000) : "Publication failed."; }

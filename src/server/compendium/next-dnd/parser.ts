@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import * as cheerio from "cheerio";
 
 import type { CompendiumEntryType } from "../service.ts";
@@ -25,6 +27,7 @@ export type NextDndIndexEntry = Readonly<{
   title: string;
   titleEn: string | null;
   metadata: Readonly<Record<string, unknown>>;
+  cardFingerprintSha256: string;
 }>;
 
 export type NextDndIndex = Readonly<{
@@ -153,7 +156,23 @@ function parseListCard(value: unknown, index: number, indexUrl: string, category
     title: card.title.trim(),
     titleEn: typeof card.title_en === "string" && card.title_en.trim() ? card.title_en.trim() : null,
     metadata: value,
+    cardFingerprintSha256: nextDndCardFingerprint(value),
   };
+}
+
+export function nextDndCardFingerprint(value: Readonly<Record<string, unknown>>): string {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
+  }
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) throw new Error("window.LIST card is not JSON serializable.");
+  return encoded;
 }
 
 function extractAssignedObject(html: string, variable: string): string {

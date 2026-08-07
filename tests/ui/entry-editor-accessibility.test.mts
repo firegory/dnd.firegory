@@ -15,6 +15,9 @@ test("entry editor exposes responsive, localized, accessible structured controls
   assert.match(source,/sm:grid-cols-2/);
   assert.match(source,/lg:grid-cols-2/);
   assert.doesNotMatch(source,/dangerouslySetInnerHTML/);
+  assert.match(source,/key:"classes"[^}]*kind:"stringList"/);
+  assert.match(source,/Array\.isArray\(value\)\?value\.join\(", "\)/);
+  assert.match(source,/field\.kind==="stringList"[^;]*parseStringList\(raw\)/);
 });
 
 test("cancel is local-only and evidence has preview and exact code-point spans",()=>{

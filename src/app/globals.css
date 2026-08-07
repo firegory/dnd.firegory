@@ -299,6 +299,239 @@
   .table-scroll table {
     min-width: max-content;
   }
+
+  .spell-page {
+    display: grid;
+    gap: 24px;
+  }
+
+  .spell-heading h1,
+  .spell-detail h1 {
+    margin: 0;
+    color: #6f211f;
+    font-size: clamp(2.2rem, 6vw, 4.5rem);
+    line-height: 0.95;
+  }
+
+  .spell-heading > p:last-child {
+    max-width: 58ch;
+    color: var(--color-text-secondary);
+  }
+
+  .spell-kicker,
+  .spell-detail header p {
+    margin: 0 0 6px;
+    color: #8a312d;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+
+  .spell-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px 22px;
+    padding: 22px;
+    border: 1px solid var(--color-border);
+    background: rgba(255, 248, 224, 0.55);
+    box-shadow: 4px 4px 0 rgba(84, 54, 27, 0.12);
+  }
+
+  .spell-filters > label,
+  .spell-filters legend {
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .spell-filters input[type="text"],
+  .spell-filters input:not([type]),
+  .spell-filters select {
+    display: block;
+    width: 100%;
+    min-height: 42px;
+    margin-top: 7px;
+    padding: 8px 10px;
+    border: 1px solid var(--color-border);
+    background: #fff9e9;
+    color: var(--color-text-primary);
+  }
+
+  .spell-filters fieldset {
+    min-width: 0;
+    margin: 0;
+    padding: 12px;
+    border: 1px solid var(--color-border-light);
+  }
+
+  .spell-filter-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 7px;
+    margin-top: 8px;
+  }
+
+  .spell-filter-grid.schools {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .spell-filter-grid label,
+  .spell-boolean-filters label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+  }
+
+  .spell-boolean-filters,
+  .spell-filter-actions {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+  }
+
+  .spell-filter-actions {
+    justify-content: flex-end;
+  }
+
+  .spell-filter-actions button,
+  .spell-next {
+    padding: 10px 16px;
+    border: 1px solid #6f211f;
+    background: #6f211f;
+    color: #fff8df;
+    font-weight: 800;
+    text-decoration: none;
+  }
+
+  .spell-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .spell-list > li {
+    padding: 16px;
+    border-top: 3px double #7c302b;
+    border-bottom: 1px solid var(--color-border);
+    background: rgba(255, 248, 224, 0.4);
+    break-inside: avoid;
+  }
+
+  .spell-list > li > a {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .spell-list-main {
+    display: grid;
+    flex: 1;
+  }
+
+  .spell-list-main strong {
+    color: #6f211f;
+    font-family: var(--font-display);
+    font-size: 19px;
+  }
+
+  .spell-list-main small,
+  .spell-list footer {
+    color: var(--color-text-muted);
+  }
+
+  .spell-level-badge {
+    display: grid;
+    width: 40px;
+    height: 40px;
+    flex: 0 0 auto;
+    place-items: center;
+    border: 1px solid #7c302b;
+    border-radius: 50%;
+    color: #6f211f;
+    font-family: var(--font-display);
+    font-size: 20px;
+    font-weight: 800;
+  }
+
+  .spell-list-flags {
+    max-width: 13rem;
+    color: #6f211f;
+    font-weight: 900;
+    letter-spacing: 0.12em;
+  }
+
+  .spell-list p {
+    margin: 12px 0;
+    line-height: 1.45;
+  }
+
+  .spell-next {
+    justify-self: end;
+  }
+
+  .spell-detail {
+    max-width: 800px;
+    margin-inline: auto;
+  }
+
+  .spell-detail > header {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    margin: 28px 0;
+    padding-bottom: 18px;
+    border-bottom: 4px double #7c302b;
+  }
+
+  .spell-facts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0;
+    border: 1px solid var(--color-border);
+  }
+
+  .spell-facts div {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--color-border-light);
+  }
+
+  .spell-facts dt {
+    color: #6f211f;
+    font-size: 11px;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .spell-facts dd {
+    margin: 3px 0 0;
+  }
+
+  .spell-detail section {
+    margin-top: 26px;
+  }
+
+  .spell-body {
+    font-family: var(--font-display);
+    font-size: 18px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+  }
+
+  .spell-citations blockquote {
+    margin: 12px 0;
+    padding: 12px 16px;
+    border-left: 3px solid #7c302b;
+    background: rgba(255, 248, 224, 0.5);
+  }
 }
 
 @media (max-width: 61.999rem) {
@@ -415,6 +648,22 @@
   .app-content .rounded-xl {
     border-radius: 8px;
   }
+
+  .spell-filters,
+  .spell-list,
+  .spell-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .spell-filter-grid.schools {
+    grid-template-columns: 1fr;
+  }
+
+  .spell-boolean-filters,
+  .spell-filter-actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 @media print {
@@ -477,6 +726,25 @@
   .app-content button:not(.print-content),
   .print-action {
     display: none !important;
+  }
+
+  .spell-list {
+    display: block;
+  }
+
+  .spell-list > li {
+    margin-bottom: 8pt;
+    border-color: #444;
+    background: transparent;
+  }
+
+  .spell-detail {
+    max-width: none;
+  }
+
+  .spell-detail section,
+  .spell-citations blockquote {
+    break-inside: avoid;
   }
 
   .app-content .print-content {

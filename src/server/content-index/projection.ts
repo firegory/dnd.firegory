@@ -11,20 +11,24 @@ export const CONTENT_INDEX_PROJECTOR_VERSION = 3 as const;
 type Citation = Readonly<{
   citationId: string;
   fileId: string;
-  page: number;
+  page: number | null;
   section: string;
   quote: string;
-  startOffset: number;
-  endOffset: number;
+  startOffset: number | null;
+  endOffset: number | null;
+  fieldPath?: string;
+  sourceUrl?: string;
 }>;
 
 export type IndexedCitation = Readonly<{
   citationId: string;
-  page: number;
+  page: number | null;
   section: string;
   quote: string;
-  startOffset: number;
-  endOffset: number;
+  startOffset: number | null;
+  endOffset: number | null;
+  fieldPath?: string;
+  sourceUrl?: string;
 }>;
 
 type Section = Readonly<{
@@ -122,7 +126,8 @@ export function projectCanonicalRevisions(
     for (const section of sections) {
       const boundaries = new Set([section.startOffset, section.endOffset]);
       for (const citation of citations) {
-        if (citation.startOffset < section.endOffset && citation.endOffset > section.startOffset) {
+        if (citation.startOffset !== null && citation.endOffset !== null
+            && citation.startOffset < section.endOffset && citation.endOffset > section.startOffset) {
           boundaries.add(Math.max(section.startOffset, citation.startOffset));
           boundaries.add(Math.min(section.endOffset, citation.endOffset));
         }
@@ -132,13 +137,13 @@ export function projectCanonicalRevisions(
         const segmentStart = orderedBoundaries[segmentIndex];
         const segmentEnd = orderedBoundaries[segmentIndex + 1];
         const segmentText = String(revision.text.plain).slice(segmentStart, segmentEnd);
-        const segmentCitations = citations.filter((candidate) =>
-          candidate.startOffset <= segmentStart && candidate.endOffset >= segmentEnd
-        );
+        const segmentCitations = citations.filter((candidate) => candidate.startOffset === null
+          || candidate.endOffset === null
+          || (candidate.startOffset <= segmentStart && candidate.endOffset >= segmentEnd));
         const citation = segmentCitations[0];
         const startIndex = fileChunkIndexes.get(fileKey) ?? 0;
         const projected = chunkPage({
-          pageNumber: citation?.page ?? primaryCitation.page,
+          pageNumber: citation?.page ?? primaryCitation.page ?? 1,
           text: segmentText,
           sectionHeading: citation?.section ?? section.heading,
         }, startIndex);
@@ -186,7 +191,8 @@ export function projectCanonicalRevisions(
       generationId,
       documentId,
       pages: [...Map.groupBy(
-        citations.filter((citation) => citation.fileId === file.fileId),
+        citations.filter((citation): citation is Citation & { page: number; startOffset: number; endOffset: number } =>
+          citation.fileId === file.fileId && citation.page !== null && citation.startOffset !== null && citation.endOffset !== null),
         (citation) => citation.page,
       )].sort(([left], [right]) => left - right).map(([pageNumber, pageCitations]) => ({
         pageNumber,
@@ -227,6 +233,8 @@ function indexedCitation(citation: Citation): IndexedCitation {
     quote: citation.quote,
     startOffset: citation.startOffset,
     endOffset: citation.endOffset,
+    ...(citation.fieldPath ? { fieldPath: citation.fieldPath } : {}),
+    ...(citation.sourceUrl ? { sourceUrl: citation.sourceUrl } : {}),
   };
 }
 
@@ -237,6 +245,7 @@ function contentProjectionHash(value: JsonValue): string {
 function assertUnambiguousCitations(revisionId: string, citations: readonly Citation[]): void {
   for (const [index, left] of citations.entries()) {
     for (const right of citations.slice(index + 1)) {
+      if (left.startOffset === null || left.endOffset === null || right.startOffset === null || right.endOffset === null) continue;
       const overlaps = left.startOffset < right.endOffset && right.startOffset < left.endOffset;
       if (overlaps && (left.page !== right.page || left.section !== right.section)) {
         throw new Error(`Revision ${revisionId} has overlapping citations with ambiguous page or section provenance`);

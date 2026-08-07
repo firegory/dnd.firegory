@@ -13,6 +13,7 @@ export const MIGRATION_FILENAMES = [
   // 0012 remains reserved by parallel compendium work.
   "0013_compendium_import_review.sql",
   "0014_compendium_entry_editor.sql",
+  "0015_spells_vertical_slice.sql",
 ] as const;
 
 export type MigrationFilename = (typeof MIGRATION_FILENAMES)[number];

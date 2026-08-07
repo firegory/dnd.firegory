@@ -37,9 +37,12 @@ type Citation = Readonly<{
   citationId: string;
   sourceId: string;
   fileId: string;
+  page: number | null;
   quote: string;
-  startOffset: number;
-  endOffset: number;
+  startOffset: number | null;
+  endOffset: number | null;
+  fieldPath?: string;
+  sourceUrl?: string;
 }>;
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
@@ -111,16 +114,39 @@ export function assertCanonicalRevision(document: unknown): asserts document is 
   if (coveredUntil !== plain.length) throw new ContentIntegrityError("Sections do not cover all of text.plain.");
 
   const fileIds = new Set(document.source.files.map((file) => file.fileId));
+  if (document.sourceVersion) {
+    if (normalizeCanonicalHttpUrl(document.sourceVersion.url) !== document.sourceVersion.url) {
+      throw new ContentIntegrityError("Canonical source version URL must use normalized HTTPS spelling.");
+    }
+    if (document.sourceVersion.rawBlobPath !== `blobs/${document.sourceVersion.fingerprintSha256}.html`) {
+      throw new ContentIntegrityError("Canonical source version raw blob path must match its fingerprint.");
+    }
+    if (!document.source.files.some((file) => file.contentHash === `sha256:${document.sourceVersion!.fileChecksumSha256}`)) {
+      throw new ContentIntegrityError("Canonical source version file checksum is absent from its source boundary.");
+    }
+    if (normalizeCanonicalHttpUrl(document.sourceVersion.index.url) !== document.sourceVersion.index.url
+        || document.sourceVersion.index.rawBlobPath !== `blobs/${document.sourceVersion.index.fingerprintSha256}.html`) {
+      throw new ContentIntegrityError("Canonical source version index evidence is invalid.");
+    }
+  }
   for (const citation of citations) {
-    assertSpan(citation.startOffset, citation.endOffset, plain.length, `Citation ${citation.citationId}`);
     if (citation.sourceId !== document.source.sourceId) {
       throw new ContentIntegrityError(`Citation ${citation.citationId} references a different source.`);
     }
     if (!fileIds.has(citation.fileId)) {
       throw new ContentIntegrityError(`Citation ${citation.citationId} references an unknown source file.`);
     }
-    if (plain.slice(citation.startOffset, citation.endOffset) !== citation.quote) {
-      throw new ContentIntegrityError(`Citation ${citation.citationId} quote does not match text.plain.`);
+    if (citation.startOffset === null || citation.endOffset === null) {
+      if (citation.startOffset !== null || citation.endOffset !== null || citation.page !== null
+          || !citation.fieldPath || !citation.sourceUrl || !document.sourceVersion
+          || ![document.sourceVersion.url, document.sourceVersion.index.url].includes(citation.sourceUrl)) {
+        throw new ContentIntegrityError(`External citation ${citation.citationId} has incomplete source-version evidence.`);
+      }
+    } else {
+      assertSpan(citation.startOffset, citation.endOffset, plain.length, `Citation ${citation.citationId}`);
+      if (plain.slice(citation.startOffset, citation.endOffset) !== citation.quote) {
+        throw new ContentIntegrityError(`Citation ${citation.citationId} quote does not match text.plain.`);
+      }
     }
   }
 }
