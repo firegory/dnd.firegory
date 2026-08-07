@@ -18,7 +18,9 @@
     "corpus-export": "node --experimental-strip-types scripts/corpus-export.mts",
     "agent-gateway": "node --experimental-strip-types scripts/agent-gateway.mts",
     "agent-healthcheck": "node --experimental-strip-types scripts/agent-healthcheck.mts",
-    "agent-secret-hash": "node --experimental-strip-types scripts/agent-secret-hash.mts"
+    "agent-secret-hash": "node --experimental-strip-types scripts/agent-secret-hash.mts",
+    "production:config": "node scripts/validate-production-compose.mjs",
+    "production:smoke": "./scripts/production-smoke.sh"
   },
   "dependencies": {
     "ajv": "^8.20.0",
@@ -39,7 +41,8 @@
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.2.6",
     "tailwindcss": "^4.3.0",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "yaml": "^2.9.0"
   },
   "overrides": {
     "postcss": "^8.5.10"
