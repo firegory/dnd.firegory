@@ -93,6 +93,9 @@ test("inaccessible UUIDs, slugs, and aliases have the same not-found result", as
   assert.match(statements[0], /citation\.revision_id = av\.revision_id/);
   assert.match(statements[0], /citation\.source_id = av\.source_id/);
   assert.match(statements[0], /citation\.file_id = av\.file_id/);
+  assert.match(statements[0], /LEFT JOIN chunks evidence ON evidence\.id = citation\.chunk_id/);
+  assert.match(statements[0], /'page', evidence\.page_number/);
+  assert.match(statements[0], /'section', evidence\.section_heading/);
 });
 
 test("relation visibility fails closed across provenance states and every role", () => {
@@ -168,6 +171,7 @@ test("public source lookup is SQL-filtered and omits administrative metadata", a
         publisher: "Publisher",
         release_year: 2024,
         publication_revision: null,
+        external_origin_url: "https://example.test/open-rules",
         attribution: "Open Rules",
         license: "CC-BY",
         access_tier: "personal",
@@ -184,6 +188,7 @@ test("public source lookup is SQL-filtered and omits administrative metadata", a
   assert.equal("accessTier" in source, false);
   assert.equal("ownerUserId" in source, false);
   assert.equal("metadata" in source, false);
+  assert.equal(source.publication.originUrl, "https://example.test/open-rules");
 });
 
 test("citation cards expose admin source links only in the admin branch", async () => {
@@ -193,11 +198,15 @@ test("citation cards expose admin source links only in the admin branch", async 
 });
 
 test("both citation preview lookup paths reuse the centralized source predicate", async () => {
-  const source = await readFile(new URL("../../src/server/citations/preview.ts", import.meta.url), "utf8");
+  const [source, route] = await Promise.all([
+    readFile(new URL("../../src/server/citations/preview.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../src/app/api/citations/preview/route.ts", import.meta.url), "utf8"),
+  ]);
   assert.equal((source.match(/buildRetrievalAuthorizationFilter\(user\)/g) ?? []).length, 2);
   assert.equal((source.match(/buildSourceAccessSql\(filter\)/g) ?? []).length, 2);
   assert.match(source, /getAuthorizedCitationPreviewFile[\s\S]*WHERE \$\{accessFilter\.sql\}/);
   assert.match(source, /lookupChunkBbox[\s\S]*AND \$\{accessFilter\.sql\}/);
+  assert.equal((route.match(/hasPageFallback\(url\).*handlePagePreview\(url, user\)/g) ?? []).length, 2);
 });
 
 type Provenance = Readonly<{ source: SourceAccessMetadata; deleted: boolean }>;

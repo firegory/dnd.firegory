@@ -6,6 +6,7 @@ import {
   PREVIEW_WIDTH_PX,
   CitationPreviewInputError,
   citationPreviewCachePath,
+  citationPreviewHref,
   parseCitationPreviewRequest,
 } from "../../src/server/citations/preview.ts";
 
@@ -18,6 +19,18 @@ test("parseCitationPreviewRequest accepts source, file, and page", () => {
   );
 
   assert.deepEqual(input, { sourceId, fileId, page: 42 });
+});
+
+test("citation links prefer cropped chunks and retain an authorized page fallback", () => {
+  assert.equal(
+    citationPreviewHref({ chunkId: "chunk", sourceId, fileId, page: 42 }),
+    `/api/citations/preview?chunkId=chunk&sourceId=${sourceId}&fileId=${fileId}&page=42`,
+  );
+  assert.equal(
+    citationPreviewHref({ chunkId: null, sourceId, fileId, page: 42 }),
+    `/api/citations/preview?sourceId=${sourceId}&fileId=${fileId}&page=42`,
+  );
+  assert.equal(citationPreviewHref({ chunkId: null, sourceId, fileId, page: null }), null);
 });
 
 test("parseCitationPreviewRequest rejects invalid identifiers and page bounds", () => {

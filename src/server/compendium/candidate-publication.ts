@@ -108,7 +108,7 @@ export function classifyCandidatePublication(value: unknown, context: CandidateC
       };
     }
   }
-  if (isCollectorSnapshotCandidate(value)) {
+  if (isCollectorSnapshotCandidate(value) || isStaticGuideReviewCandidate(value)) {
     return {
       payloadOrigin: "collector_snapshot",
       publicationCapability: "requires_extraction",
@@ -147,6 +147,21 @@ export function classifyCandidatePublication(value: unknown, context: CandidateC
       publicationBlockReason: `Extraction candidate requires repair before publication: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+}
+
+function isStaticGuideReviewCandidate(value: unknown): boolean {
+  return isRecord(value)
+    && value.schemaVersion === 1
+    && value.kind === "staticGuideReviewCandidate"
+    && typeof value.slug === "string"
+    && (value.locale === "ru" || value.locale === "en")
+    && isRecord(value.source)
+    && Array.isArray(value.blocks)
+    && value.blocks.length > 0
+    && isRecord(value.review)
+    && value.review.workflow === "#76"
+    && value.review.status === "pending"
+    && !("contentHtml" in value);
 }
 
 export function projectSnapshotSpellCandidate(value: unknown, context: Readonly<{

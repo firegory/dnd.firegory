@@ -1,5 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server";
 
+import { validatedRedirectPath } from "./server/http/redirect-path";
+import { uiLocaleForPathname } from "./server/http/ui-locale";
+
 const SESSION_COOKIE_NAME = "dnd_firegory_session";
 
 const PUBLIC_PATHS = new Set([
@@ -30,13 +33,16 @@ function isApiRoute(pathname: string): boolean {
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-dnd-ui-language", uiLocaleForPathname(pathname));
+  requestHeaders.set("x-dnd-request-path", validatedRedirectPath(`${pathname}${request.nextUrl.search}`));
 
   if (isPublic(pathname)) {
-    return NextResponse.next();
+    return NextResponse.next({ request: { headers: requestHeaders } });
   }
 
   if (isWebhook(pathname)) {
-    return NextResponse.next();
+    return NextResponse.next({ request: { headers: requestHeaders } });
   }
 
   const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
@@ -53,11 +59,11 @@ export function middleware(request: NextRequest) {
 
   if (!sessionToken) {
     const loginUrl = new URL("/login", request.url);
-    loginUrl.searchParams.set("next", pathname);
+    loginUrl.searchParams.set("next", validatedRedirectPath(`${pathname}${request.nextUrl.search}`));
     return NextResponse.redirect(loginUrl);
   }
 
-  return NextResponse.next();
+  return NextResponse.next({ request: { headers: requestHeaders } });
 }
 
 export const config = {

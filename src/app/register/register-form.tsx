@@ -5,12 +5,13 @@ import { useActionState } from "react";
 import { useUiLanguage } from "../../components/ui/i18n";
 import { registerAction } from "../../server/auth/actions";
 
-export function RegisterForm() {
+export function RegisterForm({ nextPath }: { nextPath: string }) {
   const { t } = useUiLanguage();
   const [state, action, pending] = useActionState(registerAction, {});
 
   return (
     <form action={action} className="space-y-4">
+      <input type="hidden" name="next" value={nextPath} />
       <div className="flex flex-col gap-1.5">
         <label htmlFor="reg-email" className="text-xs font-semibold uppercase tracking-wide text-text-muted">{t("email")}</label>
         <input id="reg-email" name="email" type="email" autoComplete="email" required className="rounded-xl border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none transition-colors placeholder:text-text-muted focus:border-accent focus:ring-2 focus:ring-accent/20" />

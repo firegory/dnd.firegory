@@ -11,6 +11,9 @@ The repository has no browser automation dependency or browser binary. Native-di
 - [x] Successful navigation transfers focus to the destination `main` landmark after its pathname is active.
 - [x] Active-route matching does not incorrectly match similarly prefixed paths.
 - [x] No image, icon, font, or texture assets were added. Texture and symbols are original CSS/HTML primitives.
+- [x] Beginner guide blocks expose source attribution and expandable citations; print forces citation details visible.
+- [x] Landing categories and direct category/entry queries use the centralized source authorization boundary.
+- [x] Guide links and direct route content use the same role predicate, with RU/EN deep links covered by tests.
 
 ## Manual Browser Checks Pending
 
@@ -21,6 +24,7 @@ The repository has no browser automation dependency or browser binary. Native-di
 - [ ] Users and processing-jobs tables scroll by keyboard on screen without clipping columns or actions.
 - [ ] Print preview hides shell chrome, forms, buttons, and action columns; wide tables wrap into the printable width while citation text remains visible.
 - [ ] Parchment and dark-shell text meet WCAG AA contrast in browser tooling.
+- [ ] Landing, starter, basics, and character-creation pages are checked in RU and EN at desktop, 375px mobile, 200% zoom, and print preview.
 
 ## Print Strategy
 

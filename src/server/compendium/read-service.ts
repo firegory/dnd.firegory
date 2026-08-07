@@ -33,6 +33,8 @@ export type CompendiumListEntry = Readonly<{
   source: PublicSource;
 }>;
 
+export type CompendiumEntryTypeCount = Readonly<{ entryType: CompendiumEntryType; count: number }>;
+
 export type PublicSource = Readonly<{
   id: string;
   title: string;
@@ -46,6 +48,7 @@ export type PublicSource = Readonly<{
     releaseYear: number | null;
     revision: string | null;
     attribution: string | null;
+    originUrl: string | null;
   }>;
   license: string | null;
 }>;
@@ -101,6 +104,7 @@ type EntryRow = QueryResultRow & Readonly<{
   release_year: number | null;
   publication_revision: string | null;
   attribution: string | null;
+  external_origin_url: string | null;
   license: string | null;
   relations: readonly Readonly<Record<string, unknown>>[];
   sources: readonly Readonly<Record<string, unknown>>[];
@@ -158,6 +162,21 @@ export class CompendiumReadService {
       boundary.params,
     );
     return Number(result.rows[0]?.count ?? 0);
+  }
+
+  async listEntryTypeCounts(user: RetrievalUser, selection: RetrievalSelection = {}): Promise<readonly CompendiumEntryTypeCount[]> {
+    const boundary = buildBoundary(user, selection);
+    const result = await this.db.query<{ entry_type: CompendiumEntryType; count: string } & QueryResultRow>(
+      `${boundary.sql}, selected_versions AS (
+         SELECT * FROM accessible_versions WHERE source_rank = 1
+       )
+       SELECT entry_type, count(*)::text AS count
+       FROM selected_versions
+       GROUP BY entry_type
+       ORDER BY entry_type`,
+      boundary.params,
+    );
+    return result.rows.map((row) => ({ entryType: row.entry_type, count: Number(row.count) }));
   }
 
   async getEntry(user: RetrievalUser, identifier: string, selection: RetrievalSelection = {}): Promise<CompendiumEntryDetail> {
@@ -221,13 +240,19 @@ export class CompendiumReadService {
              'kind', citation.kind,
              'fieldPath', citation.field_path,
              'blockOrder', citation.block_order,
-             'quote', citation.quote,
-             'chunkId', citation.chunk_id,
-             'fileId', citation.file_id,
-             'sourceId', citation.source_id
-           ) ORDER BY citation.kind, citation.field_path, citation.block_order)
-           FROM compendium_citations citation
-           WHERE citation.version_id = av.version_id
+              'quote', citation.quote,
+              'chunkId', citation.chunk_id,
+              'fileId', citation.file_id,
+              'sourceId', citation.source_id,
+              'page', evidence.page_number,
+              'section', evidence.section_heading
+            ) ORDER BY citation.kind, citation.field_path, citation.block_order)
+            FROM compendium_citations citation
+            LEFT JOIN chunks evidence ON evidence.id = citation.chunk_id
+              AND evidence.source_id = citation.source_id
+              AND evidence.file_id = citation.file_id
+              AND evidence.generation_id = citation.generation_id
+            WHERE citation.version_id = av.version_id
              AND citation.revision_id = av.revision_id
              AND citation.source_id = av.source_id
              AND citation.file_id = av.file_id
@@ -269,8 +294,8 @@ export class CompendiumReadService {
     const params = [...access.params, sourceId];
     const result = await this.db.query<SourceRow & QueryResultRow>(
       `SELECT s.id, s.title, s.category, s.edition, s.language,
-              s.publication_code, s.publication_title, s.publisher, s.release_year,
-              s.publication_revision, s.attribution, s.license
+               s.publication_code, s.publication_title, s.publisher, s.release_year,
+               s.publication_revision, s.external_origin_url, s.attribution, s.license
        FROM sources s
        WHERE ${access.sql}
          AND s.deleted_at IS NULL
@@ -295,6 +320,7 @@ type SourceRow = Readonly<{
   release_year: number | null;
   publication_revision: string | null;
   attribution: string | null;
+  external_origin_url: string | null;
   license: string | null;
 }>;
 
@@ -313,7 +339,7 @@ function buildBoundary(
         r.id AS revision_id, r.title, r.summary,${includeDetailFields ? " r.body, r.extension_data," : ""}
         s.title AS source_title, s.category AS source_category, s.source_priority,
         s.publication_code, s.publication_title, s.publisher, s.release_year,
-        s.publication_revision, s.attribution, s.license,
+        s.publication_revision, s.external_origin_url, s.attribution, s.license,
         slug.name AS slug,
         row_number() OVER (
           PARTITION BY e.id, v.language
@@ -352,7 +378,7 @@ function entrySelect(includeDetailFields: boolean): string {
     av.title, av.summary,${includeDetailFields ? " av.body, av.extension_data," : ""}
     av.source_id, av.source_title, av.source_category,
     av.publication_code, av.publication_title, av.publisher, av.release_year,
-    av.publication_revision, av.attribution, av.license`;
+    av.publication_revision, av.external_origin_url, av.attribution, av.license`;
 }
 
 function accessibleRelationEvidence(relationAlias: string): string {
@@ -423,6 +449,7 @@ function mapListEntry(row: EntryRow): CompendiumListEntry {
       publisher: row.publisher,
       release_year: row.release_year,
       publication_revision: row.publication_revision,
+      external_origin_url: row.external_origin_url,
       attribution: row.attribution,
       license: row.license,
     }),
@@ -456,6 +483,7 @@ function mapPublicSource(row: SourceRow): PublicSource {
       releaseYear: row.release_year,
       revision: row.publication_revision,
       attribution: row.attribution,
+      originUrl: row.external_origin_url ?? null,
     },
     license: row.license,
   };

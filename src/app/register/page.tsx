@@ -3,11 +3,14 @@ import { redirect } from "next/navigation";
 
 import { T } from "../../components/ui/i18n";
 import { getCurrentUser } from "../../server/auth/session";
+import { validatedRedirectPath } from "../../server/http/redirect-path";
 import { RegisterForm } from "./register-form";
 
-export default async function RegisterPage() {
+export default async function RegisterPage({ searchParams }: { searchParams: Promise<{ next?: string | string[] }> }) {
+  const rawNext = (await searchParams).next;
+  const nextPath = validatedRedirectPath(Array.isArray(rawNext) ? rawNext[0] : rawNext);
   const user = await getCurrentUser();
-  if (user) redirect("/");
+  if (user) redirect(nextPath);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-primary px-4">
@@ -18,11 +21,11 @@ export default async function RegisterPage() {
           <p className="mt-1 text-sm text-text-muted"><T k="registerLede" /></p>
         </div>
         <section className="rounded-2xl border border-border bg-surface p-6" aria-labelledby="register-title">
-          <RegisterForm />
+          <RegisterForm nextPath={nextPath} />
         </section>
         <p className="text-center text-sm text-text-muted">
           <T k="alreadyHaveAccount" />{" "}
-          <Link href="/login" className="font-medium text-accent hover:underline">
+          <Link href={`/login?next=${encodeURIComponent(nextPath)}`} className="font-medium text-accent hover:underline">
             <T k="signIn" />
           </Link>
         </p>

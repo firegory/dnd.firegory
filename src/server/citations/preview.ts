@@ -38,6 +38,21 @@ export type CitationPreviewFile = Readonly<{
   artifactsRoot: string | null;
 }>;
 
+export function citationPreviewHref(input: Readonly<{
+  chunkId: string | null;
+  sourceId: string | null;
+  fileId: string | null;
+  page: number | null;
+}>): string | null {
+  const pageQuery = input.sourceId && input.fileId && input.page
+    ? `sourceId=${encodeURIComponent(input.sourceId)}&fileId=${encodeURIComponent(input.fileId)}&page=${input.page}`
+    : null;
+  if (input.chunkId) {
+    return `/api/citations/preview?chunkId=${encodeURIComponent(input.chunkId)}${pageQuery ? `&${pageQuery}` : ""}`;
+  }
+  return pageQuery ? `/api/citations/preview?${pageQuery}` : null;
+}
+
 export function parseCitationPreviewRequest(url: URL): CitationPreviewRequest {
   const sourceId = url.searchParams.get("sourceId")?.trim() ?? "";
   const fileId = url.searchParams.get("fileId")?.trim() ?? "";

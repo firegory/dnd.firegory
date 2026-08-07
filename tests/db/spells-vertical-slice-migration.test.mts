@@ -7,7 +7,8 @@ import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 const sql = await readFile("migrations/0015_spells_vertical_slice.sql", "utf8");
 
 test("0015 registers the additive typed spell projection migration", () => {
-  assert.equal(MIGRATION_FILENAMES.at(-1), "0015_spells_vertical_slice.sql");
+  const spellIndex = MIGRATION_FILENAMES.indexOf("0015_spells_vertical_slice.sql");
+  assert.equal(MIGRATION_FILENAMES[spellIndex + 1], "0016_compendium_guide_candidate_type.sql");
   assert.match(sql, /ALTER TABLE compendium_spells[\s\S]*ADD COLUMN IF NOT EXISTS classes text\[\]/);
   assert.match(sql, /compendium_spells_classes_valid/);
   assert.match(sql, /USING gin \(classes\)/);

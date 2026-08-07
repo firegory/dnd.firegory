@@ -1,9 +1,10 @@
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { query } from "../db/client";
 import { createSessionToken, hashSessionToken, sessionExpiresAt } from "./session-token";
 import type { AuthUser, SessionUser } from "./types";
+import { validatedRedirectPath } from "../http/redirect-path";
 
 export const SESSION_COOKIE_NAME = "dnd_firegory_session";
 
@@ -72,7 +73,10 @@ export async function getCurrentUser(): Promise<SessionUser | null> {
 
 export async function requireUser(): Promise<SessionUser> {
   const user = await getCurrentUser();
-  if (!user) redirect("/login");
+  if (!user) {
+    const nextPath = validatedRedirectPath((await headers()).get("x-dnd-request-path"));
+    redirect(`/login?next=${encodeURIComponent(nextPath)}`);
+  }
   return user;
 }
 

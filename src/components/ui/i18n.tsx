@@ -11,6 +11,7 @@ const STORAGE_KEY = "dnd.firegory.uiLanguage";
 const translations = {
   ru: {
     nav: "Навигация",
+    compendium: "Справочник",
     search: "Поиск",
     spells: "Заклинания",
     spellCatalog: "Каталог заклинаний",
@@ -277,6 +278,7 @@ const translations = {
   },
   en: {
     nav: "Navigation",
+    compendium: "Compendium",
     search: "Search",
     spells: "Spells",
     spellCatalog: "Spell catalog",

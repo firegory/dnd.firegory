@@ -12,6 +12,7 @@ import {
   revokeSession,
   setSessionCookie,
 } from "./session";
+import { validatedRedirectPath } from "../http/redirect-path";
 
 export type AuthActionState = Readonly<{ error?: string }>;
 
@@ -19,6 +20,7 @@ export async function registerAction(
   _state: AuthActionState,
   formData: FormData,
 ): Promise<AuthActionState> {
+  const nextPath = validatedRedirectPath(formData.get("next"));
   try {
     const user = await registerUser({
       email: String(formData.get("email") ?? ""),
@@ -31,13 +33,14 @@ export async function registerAction(
     return { error: toMessage(error) };
   }
 
-  redirect("/");
+  redirect(nextPath);
 }
 
 export async function loginAction(
   _state: AuthActionState,
   formData: FormData,
 ): Promise<AuthActionState> {
+  const nextPath = validatedRedirectPath(formData.get("next"));
   try {
     const user = await authenticateUser(
       String(formData.get("email") ?? ""),
@@ -54,7 +57,7 @@ export async function loginAction(
     return { error: toMessage(error) };
   }
 
-  redirect("/");
+  redirect(nextPath);
 }
 
 export async function logoutAction(): Promise<void> {
