@@ -237,3 +237,19 @@ test("relations reject cross-edition targets", async () => {
     (error: unknown) => error instanceof CompendiumValidationError && /cannot cross editions/.test(error.message),
   );
 });
+
+test("hierarchy writes reject missing, draft, or stale exact-corpus parent revisions", async () => {
+  const statements:string[]=[];
+  const service=new CompendiumService(async(callback)=>callback({async query(sql:string){statements.push(sql);
+    if(sql.includes("FROM files f JOIN sources"))return{rows:[{source_id:ids.source,edition:"5.5e",language:"en"}]} as never;
+    if(sql.includes("INSERT INTO compendium_entries"))return{rows:[{id:ids.entry}]} as never;
+    if(sql.includes("INSERT INTO compendium_versions"))return{rows:[{id:ids.version,active_revision_id:ids.revision}]} as never;
+    if(sql.includes("INSERT INTO compendium_revisions"))return{rows:[{id:ids.revision}]} as never;
+    if(sql.includes("INSERT INTO compendium_class_parent_links"))return{rows:[],rowCount:0} as never;
+    return{rows:[],rowCount:1} as never;
+  }}));
+  await assert.rejects(service.createDraft({...draft,canonicalKey:"champion",entryType:"class",slug:"champion",aliases:[],title:"Champion",body:"Champion rules.",citations:[],projection:{type:"class",kind:"subclass",hitDie:10,primaryAbility:"Strength",spellcastingAbility:null,parentClassIds:["class-17"],progressionColumns:[],progressionRows:[],features:[],crossLinks:[]}}),/source version class-17 was not found/);
+  const parentSql=statements.find((sql)=>sql.includes("INSERT INTO compendium_class_parent_links"))!;
+  assert.match(parentSql,/target\.source_id=owner\.source_id/);assert.match(parentSql,/target\.language=owner\.language/);
+  assert.match(parentSql,/target\.lifecycle='published'/);assert.match(parentSql,/target_revision\.lifecycle='published'/);
+});

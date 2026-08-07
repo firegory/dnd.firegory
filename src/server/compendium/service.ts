@@ -340,7 +340,7 @@ function validateProjection(projection: ProjectionInput): void {
     case "creature":
       enumValue(projection.size, ["tiny", "small", "medium", "large", "huge", "gargantuan"], "creature.size");
       integerRange(projection.armorClass, 0, 50, "creature.armorClass"); integerRange(projection.hitPoints, 1, 2147483647, "creature.hitPoints"); challengeRating(projection.challengeRating); requireText(projection.creatureType, "creature.creatureType"); requireText(projection.speed, "creature.speed"); optionalText(projection.alignment, "creature.alignment"); return;
-    case "class": try { validateClassProjection(projection); } catch (error) { if (error instanceof HierarchyValidationError) throw new CompendiumValidationError(error.message); throw error; } return;
+    case "class": try { validateClassProjection(projection, { requireCompleteBase: false }); } catch (error) { if (error instanceof HierarchyValidationError) throw new CompendiumValidationError(error.message); throw error; } return;
     case "feature": integerRange(projection.level, 1, 20, "feature.level"); requireText(projection.featureKind, "feature.featureKind"); return;
     case "species": try { validateSpeciesProjection(projection); } catch (error) { if (error instanceof HierarchyValidationError) throw new CompendiumValidationError(error.message); throw error; } return;
     case "background": requireText(projection.abilityScores, "background.abilityScores"); requireText(projection.skillProficiencies, "background.skillProficiencies"); return;
@@ -387,7 +387,7 @@ async function insertProjection(client: DbClient, revisionId: string, projection
 }
 
 async function insertClassProjection(client: DbClient, revisionId: string, projection: Extract<ProjectionInput, { type: "class" }>, extension: string): Promise<void> {
-  const normalized = validateClassProjection(projection);
+  const normalized = validateClassProjection(projection, { requireCompleteBase: false });
   await client.query("INSERT INTO compendium_classes (revision_id, class_kind, hit_die, primary_ability, spellcasting_ability, extension_data) VALUES ($1,$2,$3,$4,$5,$6::jsonb)",
     [revisionId, normalized.kind, normalized.hitDie, normalized.primaryAbility, normalized.spellcastingAbility, hierarchyExtension(extension, normalized)]);
   for (const [position, parentId] of normalized.parentClassIds.entries()) {
@@ -432,7 +432,8 @@ async function insertResolvedRevisionLink(client: DbClient, table: string, child
     JOIN compendium_versions owner ON owner.id=owner_revision.version_id
     JOIN compendium_entries entry ON entry.entry_type=$4 AND entry.edition=owner.edition AND entry.canonical_key=$2
     JOIN compendium_versions target ON target.entry_id=entry.id AND target.language=owner.language AND target.source_id=owner.source_id
-    WHERE owner_revision.id=$1`, [revisionId, key, position, type]);
+    JOIN compendium_revisions target_revision ON target_revision.id=target.active_revision_id AND target_revision.version_id=target.id
+    WHERE owner_revision.id=$1 AND target.lifecycle='published' AND target_revision.lifecycle='published'`, [revisionId, key, position, type]);
   if (!result.rowCount) throw new CompendiumValidationError(`Related ${type} source version ${canonicalId} was not found.`);
 }
 
@@ -442,16 +443,20 @@ async function insertResolvedFeatureLink(client: DbClient, revisionId: string, f
     JOIN compendium_versions owner ON owner.id=owner_revision.version_id
     JOIN compendium_entries entry ON entry.entry_type='feature' AND entry.edition=owner.edition AND entry.canonical_key=$2
     JOIN compendium_versions target ON target.entry_id=entry.id AND target.language=owner.language AND target.source_id=owner.source_id
-    WHERE owner_revision.id=$1`, [revisionId, feature.canonicalId.slice("feature-".length), feature.level, feature.anchor, position]);
+    JOIN compendium_revisions target_revision ON target_revision.id=target.active_revision_id AND target_revision.version_id=target.id
+    WHERE owner_revision.id=$1 AND target.lifecycle='published' AND target_revision.lifecycle='published'`, [revisionId, feature.canonicalId.slice("feature-".length), feature.level, feature.anchor, position]);
   if (!result.rowCount) throw new CompendiumValidationError(`Feature source version ${feature.canonicalId} was not found.`);
 }
 
 async function insertCrossLinks(client: DbClient, revisionId: string, canonicalIds: readonly string[]): Promise<void> {
   for (const [position, canonicalId] of canonicalIds.entries()) {
     const separator = canonicalId.indexOf("-");
-    const result = await client.query(`INSERT INTO compendium_option_cross_links (source_revision_id,target_entry_id,position)
-      SELECT $1,entry.id,$4 FROM compendium_revisions owner_revision JOIN compendium_versions owner ON owner.id=owner_revision.version_id
-      JOIN compendium_entries entry ON entry.entry_type=$2 AND entry.canonical_key=$3 AND entry.edition=owner.edition WHERE owner_revision.id=$1`,
+    const result = await client.query(`INSERT INTO compendium_option_cross_links (source_revision_id,target_revision_id,target_version_id,target_entry_id,position)
+      SELECT $1,target_revision.id,target.id,entry.id,$4 FROM compendium_revisions owner_revision JOIN compendium_versions owner ON owner.id=owner_revision.version_id
+      JOIN compendium_entries entry ON entry.entry_type=$2 AND entry.canonical_key=$3 AND entry.edition=owner.edition
+      JOIN compendium_versions target ON target.entry_id=entry.id AND target.source_id=owner.source_id AND target.language=owner.language AND target.lifecycle='published'
+      JOIN compendium_revisions target_revision ON target_revision.id=target.active_revision_id AND target_revision.version_id=target.id AND target_revision.lifecycle='published'
+      WHERE owner_revision.id=$1`,
       [revisionId, canonicalId.slice(0, separator), canonicalId.slice(separator + 1), position]);
     if (!result.rowCount) throw new CompendiumValidationError(`Cross-link target ${canonicalId} was not found.`);
   }

@@ -9,7 +9,8 @@ import { ContentMetadataNotFoundError, ContentMetadataService, ContentMetadataVa
 import { withTransaction } from "../db/client.ts";
 import { blocksToBody, editorExtension, parseEditorCorrectionInput, parseEditorEntryInput } from "./entry-editor-model.ts";
 import { CompendiumService, type CompendiumEntryType } from "./service.ts";
-import { hierarchyTypedValue } from "./hierarchy-schema.ts";
+import { hierarchyTypedValue, validateClassProjection, validateSpeciesProjection, HierarchyValidationError } from "./hierarchy-schema.ts";
+import { canonicalEntryId } from "./identity.ts";
 
 type DbClient = Readonly<{ query<T extends QueryResultRow = QueryResultRow>(sql: string, values?: readonly unknown[]): Promise<{ rows: T[]; rowCount?: number | null }> }>;
 type TransactionRunner = <T>(callback: (client: DbClient) => Promise<T>) => Promise<T>;
@@ -212,7 +213,7 @@ async function defaultActiveCanonical(versionId: string, transaction: Transactio
   return resolved.manifest.entries.find((item) => item.entryId === editorCanonicalEntryId(identity.entry_type, identity.canonical_key))?.revisionId ?? null;
 }
 
-export function editorCanonicalEntryId(entryType: CompendiumEntryType, canonicalKey: string): string { return `${entryType}-${canonicalKey}`; }
+export function editorCanonicalEntryId(entryType: CompendiumEntryType, canonicalKey: string): string { return canonicalEntryId(entryType, canonicalKey); }
 
 export function editorSubmissionErrorStatus(error: unknown): { status: "pending" } {
   if (error instanceof PublicationEnqueueAmbiguousError) return { status: "pending" };
@@ -220,6 +221,13 @@ export function editorSubmissionErrorStatus(error: unknown): { status: "pending"
 }
 
 export async function buildEditorCanonicalRevision(client: DbClient, admin: AdminContext, entry: EditorEntry, revision: EditorRevision): Promise<CanonicalRevision> {
+  try {
+    if (entry.entryType === "class") validateClassProjection(revision.projection);
+    if (entry.entryType === "species") validateSpeciesProjection(revision.projection);
+  } catch (error) {
+    if (error instanceof HierarchyValidationError) throw new EntryEditorError(error.message, 409);
+    throw error;
+  }
   let source;
   try {
     const metadata = new ContentMetadataService(client as never);

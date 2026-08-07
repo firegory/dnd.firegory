@@ -1,4 +1,4 @@
-import { stableCandidateKey } from "../candidate-parsers.ts";
+import { collectorCanonicalEntryId } from "../identity.ts";
 import { validateClassProjection, validateSpeciesProjection, type ClassProjection, type SpeciesProjection } from "../hierarchy-schema.ts";
 import type { SnapshotDetail } from "./collector.ts";
 
@@ -49,11 +49,12 @@ export function hierarchyMetadataEvidence(attributes: ClassProjection | SpeciesP
 }
 
 function classAttributes(metadata: Readonly<Record<string, unknown>>): ClassProjection {
-  const kind = metadata.kind === "subclass" || metadata.parent_class_ids ? "subclass" : "class";
+  const rawParents=metadata.parentClassIds??metadata.parent_class_ids;
+  const kind = metadata.kind === "subclass" || (Array.isArray(rawParents) ? rawParents.length > 0 : rawParents != null) ? "subclass" : "class";
   return validateClassProjection({
     kind, hitDie: die(metadata.hitDie ?? metadata.hit_die), primaryAbility: required(metadata.primaryAbility ?? metadata.primary_ability, "primary ability"),
     spellcastingAbility: optional(metadata.spellcastingAbility ?? metadata.spellcasting_ability),
-    parentClassIds: canonicalIds(metadata.parentClassIds ?? metadata.parent_class_ids, "class"),
+    parentClassIds: canonicalIds(rawParents, "class"),
     progressionColumns: metadata.progressionColumns ?? metadata.progression_columns ?? [],
     progressionRows: metadata.progressionRows ?? metadata.progression_rows ?? [], features: metadata.features ?? [],
     crossLinks: canonicalIds(metadata.crossLinks ?? metadata.cross_links, undefined),
@@ -74,7 +75,7 @@ function canonicalIds(value: unknown, type: "class" | "species" | undefined): st
     const text = String(item).normalize("NFC").trim();
     if (/^(?:class|species|feature)-/.test(text)) return text;
     if (!type) throw new Error(`Cross-link ${text} must use a canonical type-qualified ID.`);
-    return `${type}-${stableCandidateKey(text)}`;
+    return collectorCanonicalEntryId(type, text);
   });
 }
 function die(value: unknown): number { const match = String(value).match(/(?:d)?(6|8|10|12)/i); if (!match) throw new Error("Class hit die is missing."); return Number(match[1]); }

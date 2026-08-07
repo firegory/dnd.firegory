@@ -11,13 +11,14 @@ export type OptionType = "class" | "species";
 export type OptionListOptions = RetrievalSelection & Readonly<{ kind?: "class" | "subclass" | "species" | "variant"; query?: string; limit?: number }>;
 export type OptionVersionSelection = RetrievalSelection & Readonly<{ sourceId?: string; revisionId?: string }>;
 export type OptionCitation = Readonly<{ id: string; quote: string; section: string; page: number | null; fieldPath: string | null; previewUrl: string | null; sourceUrl: string | null; sourceDetailUrl: string }>;
+export type OptionResolvedRelation = Readonly<{ targetId:string; targetRevisionId:string; targetSourceId:string; relationKind:"parent"|"feature"|"cross_link"; targetKind:string; anchor:string|null }>;
 type Common = Readonly<{ id: string; revisionId: string; title: string; aliases: readonly string[]; summary: string; edition: string; language: string; source: Readonly<{ id: string; title: string; code: string | null; revision: string | null }> }>;
 export type ClassListEntry = Common & ClassProjection;
 export type SpeciesListEntry = Common & SpeciesProjection;
 export type OptionListEntry = ClassListEntry | SpeciesListEntry;
-export type OptionDetail = OptionListEntry & Readonly<{ body: string; citations: readonly OptionCitation[]; accessibleCrossLinks: readonly string[]; sourceVersions: readonly Readonly<{ sourceId: string; title: string; code: string | null; revision: string | null; revisionId: string }>[] }>;
+export type OptionDetail = OptionListEntry & Readonly<{ body: string; citations: readonly OptionCitation[]; accessibleCrossLinks: readonly string[]; relations:readonly OptionResolvedRelation[]; sourceVersions: readonly Readonly<{ sourceId: string; title: string; code: string | null; revision: string | null; revisionId: string }>[] }>;
 
-type Row = QueryResultRow & Record<string, unknown> & { entry_id: string; revision_id: string; name: string; typed_fields: unknown; aliases: unknown; plain_text: string; canonical_payload: Record<string, unknown>; source_id: string; file_id: string; mime_type: string; source_title: string; edition: string; language: string; publication_code: string | null; publication_revision: string | null; source_versions: unknown; accessible_ids: unknown };
+type Row = QueryResultRow & Record<string, unknown> & { entry_id: string; revision_id: string; name: string; typed_fields: unknown; aliases: unknown; plain_text: string; canonical_payload: Record<string, unknown>; source_id: string; file_id: string; mime_type: string; source_title: string; edition: string; language: string; publication_code: string | null; publication_revision: string | null; source_versions: unknown; relations: unknown };
 const database: Queryable = { query };
 
 export class OptionReadService {
@@ -60,7 +61,16 @@ function boundarySql(type: OptionType, user: RetrievalUser, selection: OptionVer
     WHERE ${access.sql} AND s.deleted_at IS NULL AND f.deleted_at IS NULL AND n.lifecycle='active'
   ), option_versions AS MATERIALIZED (SELECT * FROM accessible_entries n JOIN LATERAL (SELECT n.attributes) fields ON true WHERE ${typePredicate}),
   selected_options AS MATERIALIZED (SELECT option_version.*,
-    (SELECT jsonb_agg(entry_id) FROM accessible_entries WHERE source_rank=1) AS accessible_ids,
+    (SELECT jsonb_agg(jsonb_build_object('targetId',target.entry_id,'targetRevisionId',target.revision_id,
+      'targetSourceId',target.source_id,'relationKind',relation.relation_kind,'targetKind',relation.target_kind,'anchor',relation.anchor)
+      ORDER BY relation.relation_kind,relation.position)
+     FROM nfs_index_option_relations relation JOIN accessible_entries target
+       ON target.repository_id=relation.repository_id AND target.entry_id=relation.target_entry_id
+      AND target.revision_id=relation.target_revision_id AND target.source_id=relation.target_source_id AND target.lifecycle='active'
+     WHERE relation.repository_id=option_version.repository_id AND relation.source_entry_id=option_version.entry_id
+       AND relation.source_revision_id=option_version.revision_id AND relation.source_id=option_version.source_id
+       AND relation.edition=option_version.edition AND relation.language=option_version.language
+       AND relation.target_lifecycle='active') AS relations,
     (SELECT jsonb_agg(jsonb_build_object('sourceId',v.source_id,'title',v.source_title,'code',v.publication_code,'revision',v.publication_revision,'revisionId',v.revision_id) ORDER BY v.source_priority DESC,v.revision_id) FROM option_versions v WHERE v.entry_id=option_version.entry_id) AS source_versions
     FROM option_versions option_version WHERE ${exact.join(" AND ")})` };
 }
@@ -78,20 +88,21 @@ function validate(type: OptionType, options: OptionListOptions): void {
 }
 function mapList(type: OptionType, row: Row): OptionListEntry {
   const common = { id: String(row.entry_id), revisionId: String(row.revision_id), title: String(row.name), aliases: strings(row.aliases), summary: firstSentence(String(row.plain_text)), edition: String(row.edition), language: String(row.language), source: { id: String(row.source_id), title: String(row.source_title), code: row.publication_code == null ? null : String(row.publication_code), revision: row.publication_revision == null ? null : String(row.publication_revision) } };
-  const allowed=new Set(strings(row.accessible_ids));
-  if(type==="class"){const projection=classProjectionFromTypedFields(row.typed_fields);return{...common,...projection,parentClassIds:projection.parentClassIds.filter((id)=>allowed.has(id)),features:projection.features.filter((feature)=>allowed.has(feature.canonicalId)),crossLinks:projection.crossLinks.filter((id)=>allowed.has(id))};}
-  const projection=speciesProjectionFromTypedFields(row.typed_fields);return{...common,...projection,parentSpeciesIds:projection.parentSpeciesIds.filter((id)=>allowed.has(id)),crossLinks:projection.crossLinks.filter((id)=>allowed.has(id))};
+  const relations=resolvedRelations(row.relations);const targets=(kind:OptionResolvedRelation["relationKind"])=>new Set(relations.filter((relation)=>relation.relationKind===kind).map((relation)=>relation.targetId));
+  if(type==="class"){const projection=classProjectionFromTypedFields(row.typed_fields);return{...common,...projection,parentClassIds:projection.parentClassIds.filter((id)=>targets("parent").has(id)),features:projection.features.filter((feature)=>targets("feature").has(feature.canonicalId)),crossLinks:projection.crossLinks.filter((id)=>targets("cross_link").has(id))};}
+  const projection=speciesProjectionFromTypedFields(row.typed_fields);return{...common,...projection,parentSpeciesIds:projection.parentSpeciesIds.filter((id)=>targets("parent").has(id)),crossLinks:projection.crossLinks.filter((id)=>targets("cross_link").has(id))};
 }
 function mapDetail(type: OptionType, row: Row): OptionDetail {
-  const base = mapList(type, row); const payload = row.canonical_payload; const allowed = new Set(strings(row.accessible_ids));
+  const base = mapList(type, row); const payload = row.canonical_payload; const relations=resolvedRelations(row.relations);
   const citations = Array.isArray(payload.citations) ? payload.citations.flatMap((item, index) => {
     if (!record(item) || typeof item.quote !== "string") return []; const page = Number.isSafeInteger(item.page) ? Number(item.page) : null;
     return [{ id: typeof item.citationId === "string" ? item.citationId : `citation-${index+1}`, quote: item.quote, section: typeof item.section === "string" ? item.section : base.title, page,
       fieldPath: typeof item.fieldPath === "string" ? item.fieldPath : null, previewUrl: row.mime_type === "application/pdf" && page ? `/api/citations/preview?sourceId=${encodeURIComponent(String(row.source_id))}&fileId=${encodeURIComponent(String(row.file_id))}&page=${page}` : null,
       sourceUrl: typeof item.sourceUrl === "string" && item.sourceUrl.startsWith("https://") ? item.sourceUrl : null, sourceDetailUrl: `/api/sources/${encodeURIComponent(String(row.source_id))}` }];
   }) : [];
-  return { ...base, body: String(row.plain_text), citations, accessibleCrossLinks: base.crossLinks.filter((id) => allowed.has(id)), sourceVersions: sourceVersions(row.source_versions) };
+  return { ...base, body: String(row.plain_text), citations, accessibleCrossLinks: base.crossLinks, relations, sourceVersions: sourceVersions(row.source_versions) };
 }
+function resolvedRelations(value:unknown):OptionResolvedRelation[]{return Array.isArray(value)?value.flatMap((item)=>record(item)&&typeof item.targetId==="string"&&typeof item.targetRevisionId==="string"&&typeof item.targetSourceId==="string"&&["parent","feature","cross_link"].includes(String(item.relationKind))?[{targetId:item.targetId,targetRevisionId:item.targetRevisionId,targetSourceId:item.targetSourceId,relationKind:String(item.relationKind) as OptionResolvedRelation["relationKind"],targetKind:typeof item.targetKind==="string"?item.targetKind:"other",anchor:typeof item.anchor==="string"?item.anchor:null}]:[]):[];}
 function sourceVersions(value: unknown): OptionDetail["sourceVersions"] { return Array.isArray(value) ? value.flatMap((item) => record(item) && typeof item.sourceId === "string" && typeof item.title === "string" && typeof item.revisionId === "string" ? [{ sourceId:item.sourceId,title:item.title,code:typeof item.code==="string"?item.code:null,revision:typeof item.revision==="string"?item.revision:null,revisionId:item.revisionId }] : []) : []; }
 function strings(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }
 function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

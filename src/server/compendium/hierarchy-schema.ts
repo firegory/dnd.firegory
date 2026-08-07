@@ -28,8 +28,9 @@ export class HierarchyValidationError extends Error {}
 
 const STABLE = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
 const CANONICAL = /^(?:spell|creature|item|class|feature|species|background|feat|equipment)-[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
+const RESERVED_ANCHOR = /^(?:progression|level-(?:[1-9]|1[0-9]|20)|section(?:-|$))/;
 
-export function validateClassProjection(value: unknown): ClassProjection {
+export function validateClassProjection(value: unknown, options: Readonly<{ requireCompleteBase?: boolean }> = {}): ClassProjection {
   if (!record(value)) fail("Class projection must be an object.");
   const kind = value.kind ?? "class";
   if (kind !== "class" && kind !== "subclass") fail("Class kind must be class or subclass.");
@@ -54,13 +55,13 @@ export function validateClassProjection(value: unknown): ClassProjection {
   });
   unique(progressionRows.map(({ level }) => String(level)), "progression levels");
   if (progressionRows.length > 0 && progressionColumns.length === 0) fail("A progression requires at least one column.");
-  if (kind === "class" && progressionRows.length > 0 && (progressionRows.length !== 20 || progressionRows.some((row, index) => row.level !== index + 1))) {
+  if (kind === "class" && (options.requireCompleteBase ?? true) && (progressionRows.length !== 20 || progressionRows.some((row, index) => row.level !== index + 1))) {
     fail("A base class progression must contain ordered levels 1 through 20 exactly once.");
   }
   const features = objectList(value.features ?? [], "features").map((feature, index) => ({
     canonicalId: canonical(feature.canonicalId, `features[${index}].canonicalId`, "feature-"),
     title: text(feature.title, `features[${index}].title`), body: text(feature.body, `features[${index}].body`), level: integer(feature.level, 1, 20, `features[${index}].level`),
-    anchor: stable(feature.anchor, `features[${index}].anchor`),
+    anchor: anchor(feature.anchor, `features[${index}].anchor`),
   }));
   unique(features.map(({ canonicalId }) => canonicalId), "class feature IDs");
   unique(features.map(({ anchor }) => anchor), "class feature anchors");
@@ -79,7 +80,7 @@ export function validateSpeciesProjection(value: unknown): SpeciesProjection {
   if (kind === "variant" && !parentSpeciesIds.length) fail("A species variant requires at least one parent species.");
   const traits = objectList(value.traits ?? [], "traits").map((trait, index) => ({
     key: stable(trait.key, `traits[${index}].key`), title: text(trait.title, `traits[${index}].title`),
-    body: text(trait.body, `traits[${index}].body`), anchor: stable(trait.anchor, `traits[${index}].anchor`),
+    body: text(trait.body, `traits[${index}].body`), anchor: anchor(trait.anchor, `traits[${index}].anchor`),
     overrides: trait.overrides == null ? null : stable(trait.overrides, `traits[${index}].overrides`),
   }));
   unique(traits.map(({ key }) => key), "species trait keys"); unique(traits.map(({ anchor }) => anchor), "species trait anchors");
@@ -120,6 +121,7 @@ function objectList(value: unknown, field: string): Record<string, unknown>[] { 
 function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function text(value: unknown, field: string): string { if (typeof value !== "string" || !value.trim()) fail(`${field} is required.`); return value.normalize("NFC").trim(); }
 function stable(value: unknown, field: string): string { const result = text(value, field); if (!STABLE.test(result)) fail(`${field} must be a stable lowercase ID.`); return result; }
+function anchor(value: unknown, field: string): string { const result = stable(value, field); if (RESERVED_ANCHOR.test(result)) fail(`${field} uses a reserved page anchor.`); return result; }
 function canonical(value: unknown, field: string, prefix: string): string { const result = text(value, field); if (!result.startsWith(prefix) || !CANONICAL.test(result)) fail(`${field} is invalid.`); return result; }
 function integer(value: unknown, min: number, max: number, field: string): number { if (!Number.isSafeInteger(value) || Number(value) < min || Number(value) > max) fail(`${field} must be an integer from ${min} to ${max}.`); return Number(value); }
 function unique(values: readonly string[], field: string): void { if (new Set(values).size !== values.length) fail(`${field} must be unique.`); }

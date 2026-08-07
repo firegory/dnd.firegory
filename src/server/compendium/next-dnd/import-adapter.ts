@@ -3,6 +3,7 @@ import { NEXT_DND_CATEGORIES, nextDndCardFingerprint } from "./parser.ts";
 import type { NextDndSnapshotManifest, SnapshotDetail } from "./collector.ts";
 import { SPELL_SCHOOLS, type SpellSchool } from "../spell-schema.ts";
 import { hierarchyCandidate, hierarchyMetadataEvidence } from "./hierarchy-import.ts";
+import { collectorCandidateKey } from "../identity.ts";
 
 type ImportRunAdapterTarget = Pick<CompendiumImportRunService, "addDiagnostic" | "failRun" | "recordOccurrences" | "computeCandidateDiff">;
 
@@ -80,7 +81,7 @@ function isCompleteManifest(manifest: NextDndSnapshotManifest): boolean {
 function candidate(detail: SnapshotDetail, occurrenceIndex: number): ImportCandidateInput {
   return {
     occurrenceIndex,
-    candidateKey: `${detail.category}-${detail.externalId}`,
+    candidateKey: collectorCandidateKey(detail.category, NEXT_DND_CATEGORIES[detail.category].entryType, detail.externalId),
     entryType: NEXT_DND_CATEGORIES[detail.category].entryType,
     content: detail.category === "spells" ? spellCandidate(detail)
       : detail.category === "class" || detail.category === "species" ? hierarchyCandidate(detail) : {

@@ -1,5 +1,4 @@
 import {
-  CandidateValidationError,
   makeCitation,
   parseMoneyToCp,
   parseWeights,
@@ -10,6 +9,8 @@ import {
   type ExtractionMethod,
 } from "./candidate-schema.ts";
 import type { CompendiumEntryType, CompendiumLanguage } from "./service.ts";
+import { stableCandidateKey } from "./identity.ts";
+export { stableCandidateKey } from "./identity.ts";
 
 export type ParsedCandidate = Readonly<{ wire: CandidateWire; method: ExtractionMethod }>;
 
@@ -284,19 +285,6 @@ function spellDescriptor(text: string): Readonly<{ level: number; school: string
   if (!Number.isInteger(level) || level < 0 || level > 9) return null;
   return { level, school, ritual: /ritual|ритуал/i.test(text) };
 }
-
-export function stableCandidateKey(value: string): string {
-  const transliterated = value.normalize("NFKD").replace(/\p{M}+/gu, "").toLocaleLowerCase("und").replace(/[а-яё]/g, (letter) => CYRILLIC[letter] ?? "");
-  const key = transliterated.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 128).replace(/-+$/g, "");
-  if (!key) throw new CandidateValidationError(`Unable to form a stable candidate key from ${value}.`);
-  return key;
-}
-
-const CYRILLIC: Readonly<Record<string, string>> = {
-  а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ё: "e", ж: "zh", з: "z", и: "i", й: "i", к: "k", л: "l", м: "m",
-  н: "n", о: "o", п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f", х: "kh", ц: "ts", ч: "ch", ш: "sh", щ: "shch",
-  ъ: "", ы: "y", ь: "", э: "e", ю: "yu", я: "ya",
-};
 
 function cells(line: string): string[] {
   return line.replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());

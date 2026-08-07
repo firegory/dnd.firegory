@@ -53,7 +53,7 @@ test("projection and manifest identities are stable and content-derived", async 
   assert.match(hash, /^sha256:[0-9a-f]{64}$/);
   assert.equal(hash, projectionHash(resolved.manifest.repositoryId, projected));
   assert.match(entryProjectionHash(projected[0]), /^sha256:[0-9a-f]{64}$/);
-  assert.equal(CONTENT_INDEX_PROJECTOR_VERSION, 3);
+  assert.equal(CONTENT_INDEX_PROJECTOR_VERSION, 4);
   const changedSize = structuredClone(projected);
   (changedSize[0].file as { byteSize: number }).byteSize++;
   assert.notEqual(hash, projectionHash(resolved.manifest.repositoryId, changedSize));

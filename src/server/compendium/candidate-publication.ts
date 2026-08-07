@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import {
   createCanonicalRevision,
   type CanonicalRevision,
@@ -21,6 +19,7 @@ import { validateSpellProjection } from "./spell-schema.ts";
 import { hierarchyTypedValue } from "./hierarchy-schema.ts";
 import { validateClassProjection, validateSpeciesProjection } from "./hierarchy-schema.ts";
 import type { SnapshotHierarchyCandidate } from "./next-dnd/hierarchy-import.ts";
+import { canonicalEntryId, collectorCandidateKey, CompendiumIdentityError } from "./identity.ts";
 import { spellDetailEvidence, type SnapshotSpellCandidate } from "./next-dnd/import-adapter.ts";
 import { NEXT_DND_PARSER_VERSION } from "./next-dnd/parser.ts";
 
@@ -90,13 +89,9 @@ export class CandidateProjectionError extends Error {
 }
 
 export function canonicalCandidateEntryId(entryType: string, candidateKey: string): string {
-  if (!(entryType in CANONICAL_ENTRY_TYPES) || !STABLE_ID.test(candidateKey)) {
-    throw new CandidateProjectionError("Canonical candidate identity requires a supported entry type and stable candidate key.");
-  }
-  const value = `${entryType}-${candidateKey}`;
-  if (value.length <= 128) return value;
-  const suffix = createHash("sha256").update(`${entryType}\0${candidateKey}`).digest("hex").slice(0, 16);
-  return `${entryType}-${candidateKey.slice(0, 128 - entryType.length - suffix.length - 2)}-${suffix}`;
+  if (!(entryType in CANONICAL_ENTRY_TYPES)) throw new CandidateProjectionError("Canonical candidate identity requires a supported entry type.");
+  try { return canonicalEntryId(entryType, candidateKey); }
+  catch (error) { if (error instanceof CompendiumIdentityError) throw new CandidateProjectionError(error.message); throw error; }
 }
 
 export function classifyCandidatePublication(value: unknown, context: CandidateCapabilityContext): CandidatePublicationCapability {
@@ -408,7 +403,7 @@ function isSnapshotHierarchyCandidate(value: unknown): value is Record<string, u
 
 function validateSnapshotHierarchyCandidate(value: unknown, candidateKey: string, entryType: string | null, evidence: SnapshotSpellEvidence | null): SnapshotHierarchyCandidate {
   if (!isSnapshotHierarchyCandidate(value) || (entryType !== "class" && entryType !== "species") || value.entryType !== entryType) throw new CandidateProjectionError("Collector candidate is not a typed class or species hierarchy.");
-  if (candidateKey !== `${entryType}-${value.externalId}` || typeof value.externalId !== "string" || !value.externalId.trim()) throw new CandidateProjectionError("Collector hierarchy identity does not match its review row.");
+  if (typeof value.externalId !== "string" || candidateKey !== collectorCandidateKey(entryType, entryType, value.externalId)) throw new CandidateProjectionError("Collector hierarchy identity does not match its review row.");
   if (typeof value.title !== "string" || !value.title.trim() || typeof value.body !== "string" || !value.body.trim() || !Array.isArray(value.aliases)) throw new CandidateProjectionError("Collector hierarchy text is incomplete.");
   if (!evidence || value.sourceUrl !== evidence.sourceUrl || value.sha256 !== evidence.fingerprintSha256 || value.parserVersion !== NEXT_DND_PARSER_VERSION || !isRecord(value.sourceVersion)
       || value.sourceVersion.url !== evidence.sourceUrl || value.sourceVersion.sha256 !== evidence.fingerprintSha256
