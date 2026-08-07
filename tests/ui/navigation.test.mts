@@ -18,7 +18,7 @@ describe("compendium navigation", () => {
   it("adds all existing administration routes only for administrators", () => {
     assert.deepEqual(
       getNavigationItems("admin").map((item) => item.href),
-      ["/ru/compendium", "/search", "/spells", "/settings", "/admin/sources", "/admin/ingestion", "/admin/compendium/imports", "/admin/compendium/entries", "/admin/users"],
+      ["/ru/compendium", "/search", "/spells", "/classes", "/species", "/settings", "/admin/sources", "/admin/ingestion", "/admin/compendium/imports", "/admin/compendium/entries", "/admin/users"],
     );
     assert.equal(getNavigationItems("user").some((item) => item.href.startsWith("/admin")), false);
   });

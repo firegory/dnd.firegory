@@ -2,6 +2,7 @@ import type { CompendiumImportRunService, ImportCandidateInput, ImportOccurrence
 import { NEXT_DND_CATEGORIES, nextDndCardFingerprint } from "./parser.ts";
 import type { NextDndSnapshotManifest, SnapshotDetail } from "./collector.ts";
 import { SPELL_SCHOOLS, type SpellSchool } from "../spell-schema.ts";
+import { hierarchyCandidate, hierarchyMetadataEvidence } from "./hierarchy-import.ts";
 
 type ImportRunAdapterTarget = Pick<CompendiumImportRunService, "addDiagnostic" | "failRun" | "recordOccurrences" | "computeCandidateDiff">;
 
@@ -23,7 +24,8 @@ export function nextDndImportBatch(manifest: NextDndSnapshotManifest): Readonly<
       rawIndexBlobPath: detail.indexSource.rawBlobPath,
       indexSourceFetchedAt: detail.indexSource.fetchedAt,
       indexCardFingerprintSha256: detail.indexSource.cardFingerprintSha256,
-      metadataEvidenceText: detail.category === "spells" ? spellMetadataEvidence(detail.indexMetadata) : null,
+      metadataEvidenceText: detail.category === "spells" ? spellMetadataEvidence(detail.indexMetadata)
+        : detail.category === "class" || detail.category === "species" ? hierarchyMetadataEvidence(hierarchyCandidate(detail).attributes) : null,
     })),
     candidates: details.map((detail, occurrenceIndex) => candidate(detail, occurrenceIndex)),
   };
@@ -80,7 +82,8 @@ function candidate(detail: SnapshotDetail, occurrenceIndex: number): ImportCandi
     occurrenceIndex,
     candidateKey: `${detail.category}-${detail.externalId}`,
     entryType: NEXT_DND_CATEGORIES[detail.category].entryType,
-    content: detail.category === "spells" ? spellCandidate(detail) : {
+    content: detail.category === "spells" ? spellCandidate(detail)
+      : detail.category === "class" || detail.category === "species" ? hierarchyCandidate(detail) : {
       externalId: detail.externalId,
       sourceUrl: detail.sourceUrl,
       sha256: detail.sha256,

@@ -45,6 +45,8 @@ export function parseDeterministicChunk(chunk: EvidenceChunk, language: Compendi
   return parseSpell(chunk, language)
     ?? parseCreature(chunk, language)
     ?? parseEquipmentTable(chunk, language)
+    ?? parseClassProgression(chunk)
+    ?? parseSpeciesHierarchy(chunk)
     ?? parseFeatureSection(chunk, language)
     ?? [];
 }
@@ -53,6 +55,8 @@ export function classifyChunkType(text: string): CompendiumEntryType | null {
   if (/^(?:Casting Time|Время накладывания|Время сотворения)\s*:/im.test(text)) return "spell";
   if (/^(?:Armor Class|Класс Доспеха)\s*:?[ \t]*\d/im.test(text) && /^(?:Hit Points|Хиты)\s*:?[ \t]*\d/im.test(text)) return "creature";
   if (/\|[^\n]*(?:Cost|Стоимость)[^\n]*\|/i.test(text)) return "equipment";
+  if (/\|[^\n]*(?:Level|Уровень)[^\n]*(?:Features|Умения)[^\n]*\|/i.test(text) && /(?:Hit Die|Кость хитов)\s*:/i.test(text)) return "class";
+  if (/^(?:Species|Вид|Раса)(?: Variant| Вариант)?\s*$/im.test(text) && /^(?:Size|Размер)\s*:/im.test(text)) return "species";
   if (/(?:\d+(?:st|nd|rd|th)-Level .* Feature|Умение .* \d+(?:-го|-й) уровня)/i.test(text)) return "feature";
   return null;
 }
@@ -199,6 +203,28 @@ function parseFeatureSection(chunk: EvidenceChunk, language: CompendiumLanguage)
   const citations = baseCitations(chunk, title, body, lines[descriptorIndex].text, Object.keys(attributes));
   return [validated({ entryType: "feature", candidateKey: stableCandidateKey(title), title, body, attributes, citations }, chunk, "section-parser")];
 }
+
+function parseClassProgression(chunk: EvidenceChunk): readonly ParsedCandidate[] | null {
+  const lines=chunk.quoteText.split(/\r?\n/).map((line)=>line.trim()).filter(Boolean);const classIndex=lines.findIndex((line)=>/^(?:Class|Класс|Subclass|Подкласс)$/i.test(line));if(classIndex<1)return null;
+  const label=(en:string,ru:string)=>findValue(lines,new RegExp(`^(?:${en}|${ru})\\s*:\\s*(.+)$`,"i"));const hit=label("Hit Die","Кость хитов")?.match(/d?(6|8|10|12)/i);const primary=label("Primary Ability","Основная характеристика");if(!hit||!primary)return null;
+  const spell=label("Spellcasting Ability","Заклинательная характеристика");const parentText=label("Parent Classes","Родительские классы");
+  const headerIndex=lines.findIndex((line)=>line.includes("|")&&/(?:Level|Уровень)/i.test(line)&&/(?:Features|Умения)/i.test(line));if(headerIndex<0)return null;const header=cells(lines[headerIndex]);const levelIndex=header.findIndex((cell)=>/^(?:Level|Уровень)$/i.test(cell));if(levelIndex<0)return null;
+  const progressionColumns=header.filter((_,index)=>index!==levelIndex).map((heading)=>({key:stableCandidateKey(heading),heading}));const progressionRows=[] as Array<{level:number;cells:Record<string,string>}>;
+  for(const line of lines.slice(headerIndex+1)){if(/^\|?\s*:?-{3}/.test(line))continue;if(!line.includes("|"))break;const row=cells(line);const level=Number(row[levelIndex]);if(!Number.isSafeInteger(level)||level<1||level>20)break;const values=row.filter((_,index)=>index!==levelIndex);progressionRows.push({level,cells:Object.fromEntries(progressionColumns.map((column,index)=>[column.key,values[index]]))});}
+  if(progressionRows.length!==20||progressionRows.some((row,index)=>row.level!==index+1))return null;const title=lines[classIndex-1];const attributes={kind:/subclass|подкласс/i.test(lines[classIndex])?"subclass":"class",hitDie:Number(hit[1]),primaryAbility:primary,spellcastingAbility:spell&&!/^(?:none|нет|-|—)$/i.test(spell)?spell:null,parentClassIds:parentText?parentText.split(",").map((item)=>item.trim()):[],progressionColumns,progressionRows,features:[],crossLinks:[]};
+  const citations=baseCitations(chunk,title,chunk.quoteText,lines[classIndex],Object.keys(attributes));for(const key of Object.keys(attributes))replaceCitation(citations,`$.attributes.${key}`,chunk,chunk.quoteText);
+  return [validated({entryType:"class",candidateKey:stableCandidateKey(title),title,body:chunk.quoteText,attributes,citations},chunk,"table-parser")];
+}
+
+function parseSpeciesHierarchy(chunk: EvidenceChunk): readonly ParsedCandidate[] | null {
+  const lines=chunk.quoteText.split(/\r?\n/).map((line)=>line.trim()).filter(Boolean);const typeIndex=lines.findIndex((line)=>/^(?:Species|Вид|Раса)(?: Variant| Вариант)?$/i.test(line));if(typeIndex<1)return null;
+  const sizeText=findValue(lines,/^(?:Size|Размер)\s*:\s*(.+)$/i);const speedText=findValue(lines,/^(?:Speed|Скорость)\s*:\s*(\d+)/i);if(!sizeText||!speedText)return null;const size=sizes[sizeText.toLocaleLowerCase("und")];if(!size)return null;
+  const parent=findValue(lines,/^(?:Parent Species|Родительский вид)\s*:\s*(.+)$/i);const traits=lines.filter((line)=>/^(?:Trait|Черта)\s*:/i.test(line)).map((line)=>{const parts=line.replace(/^(?:Trait|Черта)\s*:\s*/i,"").split("|").map((part)=>part.trim());return {key:stableCandidateKey(parts[0]),title:parts[1]||parts[0],body:parts[2]||parts[1],anchor:stableCandidateKey(parts[0]),...(parts[3]?{overrides:stableCandidateKey(parts[3])}:{})};});
+  const title=lines[typeIndex-1];const attributes={kind:/variant|вариант/i.test(lines[typeIndex])?"variant":"species",size,speed:Number(speedText),parentSpeciesIds:parent?parent.split(",").map((item)=>item.trim()):[],traits,crossLinks:[]};const citations=baseCitations(chunk,title,chunk.quoteText,lines[typeIndex],Object.keys(attributes));for(const key of Object.keys(attributes))replaceCitation(citations,`$.attributes.${key}`,chunk,chunk.quoteText);
+  return [validated({entryType:"species",candidateKey:stableCandidateKey(title),title,body:chunk.quoteText,attributes,citations},chunk,"section-parser")];
+}
+
+function findValue(lines:readonly string[],pattern:RegExp):string|null{for(const line of lines){const match=line.match(pattern);if(match?.[1]?.trim())return match[1].trim();}return null;}
 
 function validated(wire: CandidateWire, chunk: EvidenceChunk, method: ExtractionMethod): ParsedCandidate {
   return { wire: validateCandidateWire(wire, [chunk]), method };

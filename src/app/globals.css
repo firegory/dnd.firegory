@@ -350,6 +350,100 @@
     gap: 24px;
   }
 
+  .option-page {
+    display: grid;
+    gap: 24px;
+  }
+
+  .option-heading h1,
+  .option-detail h1 {
+    margin: 4px 0 10px;
+    color: #315747;
+    font-size: clamp(2.2rem, 6vw, 4.5rem);
+    line-height: .95;
+  }
+
+  .option-heading > p,
+  .option-detail > header p {
+    margin: 0;
+    color: #52715f;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+  }
+
+  .option-filters {
+    display: grid;
+    grid-template-columns: minmax(12rem, 2fr) minmax(10rem, 1fr) auto;
+    align-items: end;
+    gap: 12px;
+    padding: 18px;
+    border: 1px solid var(--color-border);
+    background: color-mix(in srgb, var(--color-surface) 86%, #dce8dc);
+  }
+
+  .option-filters label {
+    display: grid;
+    gap: 5px;
+    font-size: .78rem;
+    font-weight: 800;
+  }
+
+  .option-filters input,
+  .option-filters select,
+  .option-filters button {
+    min-height: 42px;
+    padding: 8px 10px;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    background: var(--color-surface);
+  }
+
+  .option-filters button {
+    border-color: #315747;
+    background: #315747;
+    color: white;
+    font-weight: 800;
+  }
+
+  .option-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .option-list a {
+    display: block;
+    height: 100%;
+    padding: 20px;
+    border: 1px solid var(--color-border);
+    background: var(--color-surface);
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .option-list h2 { margin: 4px 0 10px; }
+  .option-list small { color: #52715f; font-weight: 800; text-transform: uppercase; }
+  .option-list footer { color: var(--color-text-secondary); font-size: .78rem; }
+  .option-detail { display: grid; max-width: 72rem; gap: 22px; }
+  .option-detail section { scroll-margin-top: 24px; }
+  .option-facts { display: flex; flex-wrap: wrap; gap: 12px; }
+  .option-facts div { min-width: 12rem; padding: 12px; border-left: 3px solid #52715f; background: #edf1e9; }
+  .option-facts dt { color: var(--color-text-secondary); font-size: .72rem; font-weight: 800; text-transform: uppercase; }
+  .option-facts dd { margin: 4px 0 0; font-weight: 700; }
+  .progression-table { width: 100%; border-collapse: collapse; }
+  .progression-table th, .progression-table td { padding: 9px 12px; border: 1px solid var(--color-border); text-align: left; }
+  .progression-table thead { background: #315747; color: white; }
+  .progression-table tbody tr:nth-child(even) { background: #edf1e9; }
+  .option-anchor { padding: 10px 0; border-bottom: 1px solid var(--color-border); scroll-margin-top: 24px; }
+  .option-anchor h3 { margin: 0; }
+  .option-anchor h3 a { color: inherit; text-decoration-color: #52715f; }
+  .option-detail blockquote { margin: 12px 0; padding: 12px 18px; border-left: 3px solid #52715f; background: #edf1e9; }
+
   .spell-heading h1,
   .spell-detail h1 {
     margin: 0;
@@ -1055,6 +1149,11 @@
     grid-template-columns: 1fr;
   }
 
+  .option-filters,
+  .option-list {
+    grid-template-columns: 1fr;
+  }
+
   .spell-filter-grid.schools {
     grid-template-columns: 1fr;
   }
@@ -1144,6 +1243,16 @@
 
   .spell-detail section,
   .spell-citations blockquote {
+    break-inside: avoid;
+  }
+
+  .progression-table thead {
+    display: table-header-group;
+  }
+
+  .progression-table tr,
+  .option-detail section,
+  .option-detail blockquote {
     break-inside: avoid;
   }
 
