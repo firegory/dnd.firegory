@@ -7,6 +7,7 @@ import test from "node:test";
 import { CursorCodec } from "../../src/server/agent/cursor.ts";
 import { createAgentGatewayServer } from "../../src/server/agent/http-server.ts";
 import type { AgentProtocol } from "../../src/server/agent/protocol.ts";
+import { copyInstructions, parseDockerfile, requireDockerStage } from "../helper/dockerfile.mts";
 
 const secret = "security-test-cursor-secret-at-least-32-bytes";
 
@@ -36,11 +37,12 @@ test("gateway database and container defaults are bounded and non-root", async (
   assert.match(database, /statement_timeout:/);
   assert.match(database, /query_timeout:/);
   assert.match(database, /max: positiveInteger/);
-  const dockerfile = await readFile(new URL("../../Dockerfile", import.meta.url), "utf8");
-  assert.match(dockerfile, /FROM node:22-bookworm-slim AS agent-gateway/);
-  assert.match(dockerfile, /npm ci --omit=dev/);
-  assert.match(dockerfile, /USER node/);
-  assert.match(dockerfile, /AGENT_GATEWAY_HOST=127\.0\.0\.1/);
+  const dockerfile = parseDockerfile(await readFile(new URL("../../Dockerfile", import.meta.url), "utf8"));
+  const gateway = requireDockerStage(dockerfile, "agent-gateway");
+  assert.match(dockerfile.instructions.find((instruction) => instruction.keyword === "ARG" && instruction.value.startsWith("NODE_IMAGE="))?.value ?? "", /^NODE_IMAGE=node:\d+\.\d+\.\d+-bookworm-slim$/);
+  assert.ok(copyInstructions(gateway).some((copy) => copy.options.from === "agent-dependencies" && copy.sources.includes("/app/node_modules")));
+  assert.equal(gateway.instructions.filter((instruction) => instruction.keyword === "USER").at(-1)?.value, "10001:10001");
+  assert.ok(gateway.instructions.some((instruction) => instruction.keyword === "ENV" && instruction.value.includes("AGENT_GATEWAY_HOST=127.0.0.1")));
 });
 
 test("transport rejects GET bodies before protocol dispatch and caps streaming request bodies", async () => {

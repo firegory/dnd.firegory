@@ -4,9 +4,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parse } from "yaml";
 
+import nextConfig from "../../next.config.ts";
+import { copiesWholeBuildContext, copyInstructions, parseDockerfile, requireDockerStage, type DockerfileStage } from "../helper/dockerfile.mts";
+
 const compose = await readFile(new URL("../../compose.production.yml", import.meta.url), "utf8");
 const developmentCompose = await readFile(new URL("../../docker-compose.yml", import.meta.url), "utf8");
-const dockerfile = await readFile(new URL("../../Dockerfile", import.meta.url), "utf8");
+const dockerfile = parseDockerfile(await readFile(new URL("../../Dockerfile", import.meta.url), "utf8"));
 const dockerignore = await readFile(new URL("../../.dockerignore", import.meta.url), "utf8");
 const entrypoint = await readFile(new URL("../../docker/entrypoint.prod.sh", import.meta.url), "utf8");
 const redisEntrypoint = await readFile(new URL("../../docker/redis-entrypoint.sh", import.meta.url), "utf8");
@@ -42,6 +45,10 @@ function canonicalMount(service: Service) {
   ));
 }
 
+function finalInstruction(stage: DockerfileStage, keyword: string): string | undefined {
+  return stage.instructions.filter((instruction) => instruction.keyword === keyword).at(-1)?.value;
+}
+
 test("production images are pinned, standalone, and use compatible identities", () => {
   assert.equal(production.services.app.build?.target, "app-production");
   assert.equal(production.services.worker.build?.target, "worker-production");
@@ -50,11 +57,61 @@ test("production images are pinned, standalone, and use compatible identities", 
   assert.equal(production.services.worker.user, production.services.app.user);
   assert.equal(production.services.gateway.user, "${GATEWAY_UID:-10001}:${GATEWAY_GID:-10001}");
   assert.doesNotMatch(compose, /WORKER_(?:UID|GID)/);
-  assert.match(dockerfile, /ARG NODE_IMAGE=node:\d+\.\d+\.\d+-bookworm-slim/);
-  assert.match(dockerfile, /ARG REDIS_IMAGE=redis:7\.4\.5-alpine/);
+  const args = dockerfile.instructions.filter((instruction) => instruction.keyword === "ARG").map((instruction) => instruction.value);
+  assert.ok(args.some((value) => /^NODE_IMAGE=node:\d+\.\d+\.\d+-bookworm-slim$/.test(value)));
+  assert.ok(args.includes("REDIS_IMAGE=redis:7.4.5-alpine"));
   assert.equal(production.services.postgres.image, "pgvector/pgvector:0.8.1-pg16");
-  assert.match(dockerfile, /\.next\/standalone/);
-  assert.match(dockerfile, /CMD \["node", "server\.js"\]/);
+  assert.deepEqual(JSON.parse(finalInstruction(requireDockerStage(dockerfile, "app-production"), "CMD") ?? "null"), ["node", "server.js"]);
+});
+
+test("production Docker stages preserve dependency and runtime boundaries", () => {
+  for (const name of ["agent-dependencies", "agent-gateway", "production-dependencies", "production-build", "production-base", "app-production"]) {
+    assert.equal(requireDockerStage(dockerfile, name).base, "${NODE_IMAGE}");
+  }
+  assert.equal(requireDockerStage(dockerfile, "migration-production").base, "production-base");
+  assert.equal(requireDockerStage(dockerfile, "worker-production").base, "production-base");
+
+  const app = requireDockerStage(dockerfile, "app-production");
+  const worker = requireDockerStage(dockerfile, "worker-production");
+  const gateway = requireDockerStage(dockerfile, "agent-gateway");
+  assert.equal(finalInstruction(app, "USER"), "10001:10001");
+  assert.equal(finalInstruction(worker, "USER"), "10001:10001");
+  assert.equal(finalInstruction(gateway, "USER"), "10001:10001");
+
+  const productionDependencies = requireDockerStage(dockerfile, "production-dependencies");
+  const productionBase = requireDockerStage(dockerfile, "production-base");
+  const agentDependencies = requireDockerStage(dockerfile, "agent-dependencies");
+  assert.ok(productionDependencies.instructions.some((instruction) => instruction.keyword === "RUN" && instruction.value.startsWith("npm ci --omit=dev")));
+  assert.ok(agentDependencies.instructions.some((instruction) => instruction.keyword === "RUN" && instruction.value.startsWith("npm ci --omit=dev")));
+  assert.ok(copyInstructions(productionBase).some((copy) => copy.options.from === "production-dependencies" && copy.sources.includes("/app/node_modules")));
+  assert.ok(copyInstructions(gateway).some((copy) => copy.options.from === "agent-dependencies" && copy.sources.includes("/app/node_modules")));
+  assert.equal(copyInstructions(productionDependencies).some(copiesWholeBuildContext), false);
+  assert.equal(copyInstructions(agentDependencies).some(copiesWholeBuildContext), false);
+
+  const workerRuns = worker.instructions.filter((instruction) => instruction.keyword === "RUN").map((instruction) => instruction.value).join(" ");
+  assert.ok(["ocrmypdf", "tesseract-ocr", "tesseract-ocr-eng", "tesseract-ocr-rus"].every((dependency) => workerRuns.split(/\s+/).includes(dependency)));
+  for (const stage of [app, gateway, productionBase, productionDependencies, agentDependencies]) {
+    const runTokens = stage.instructions.filter((instruction) => instruction.keyword === "RUN").flatMap((instruction) => instruction.value.split(/\s+/));
+    assert.equal(runTokens.some((token) => token === "ocrmypdf" || token.startsWith("tesseract-ocr")), false, stage.name);
+  }
+
+  assert.equal(nextConfig.output, "standalone");
+  assert.deepEqual(copyInstructions(app), [
+    { keyword: "COPY", options: { from: "production-build", chown: "10001:10001" }, sources: ["/app/.next/standalone"], destination: "./" },
+    { keyword: "COPY", options: { from: "production-build", chown: "10001:10001" }, sources: ["/app/.next/static"], destination: "./.next/static" },
+    { keyword: "COPY", options: { chown: "10001:10001" }, sources: ["docker/entrypoint.prod.sh"], destination: "./docker/entrypoint.prod.sh" },
+    { keyword: "COPY", options: { chown: "10001:10001" }, sources: ["scripts/app-healthcheck.mjs"], destination: "./scripts/app-healthcheck.mjs" },
+  ]);
+  assert.deepEqual(copyInstructions(gateway), [
+    { keyword: "COPY", options: { from: "agent-dependencies" }, sources: ["/app/node_modules"], destination: "./node_modules" },
+    { keyword: "COPY", options: {}, sources: ["package.json"], destination: "./" },
+    { keyword: "COPY", options: {}, sources: ["scripts/agent-gateway.mts", "scripts/agent-healthcheck.mts"], destination: "./scripts/" },
+    { keyword: "COPY", options: {}, sources: ["src/server/agent"], destination: "./src/server/agent" },
+    { keyword: "COPY", options: {}, sources: ["src/server/access"], destination: "./src/server/access" },
+    { keyword: "COPY", options: {}, sources: ["src/server/auth/types.ts", "src/server/auth/session-token.ts"], destination: "./src/server/auth/" },
+    { keyword: "COPY", options: {}, sources: ["docker/entrypoint.prod.sh"], destination: "./docker/entrypoint.prod.sh" },
+  ]);
+  assert.equal([...copyInstructions(app), ...copyInstructions(gateway)].some(copiesWholeBuildContext), false);
 });
 
 test("canonical host bind access is read-only except for the worker", () => {
