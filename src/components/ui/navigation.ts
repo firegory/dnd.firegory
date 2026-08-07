@@ -2,11 +2,12 @@ export type AppLayoutRole = "user" | "premium" | "admin";
 
 export type NavigationItem = {
   href: string;
-  labelKey: "search" | "settings" | "sources" | "upload" | "users" | "importReview";
+  labelKey: "search" | "spells" | "settings" | "sources" | "upload" | "users" | "importReview";
 };
 
 const BASE_NAV_ITEMS: readonly NavigationItem[] = [
   { href: "/search", labelKey: "search" },
+  { href: "/spells", labelKey: "spells" },
   { href: "/settings", labelKey: "settings" },
 ];
 

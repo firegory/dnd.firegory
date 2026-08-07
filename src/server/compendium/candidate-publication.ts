@@ -17,6 +17,8 @@ import {
   type ExtractionBoundary,
 } from "./candidate-schema.ts";
 import type { CompendiumEntryType } from "./service.ts";
+import { validateSpellProjection } from "./spell-schema.ts";
+import type { SnapshotSpellCandidate } from "./next-dnd/import-adapter.ts";
 
 export type CandidatePublicationContext = Readonly<{
   candidateKey: string;
@@ -79,6 +81,17 @@ export function canonicalCandidateEntryId(entryType: string, candidateKey: strin
 }
 
 export function classifyCandidatePublication(value: unknown, context: CandidateCapabilityContext): CandidatePublicationCapability {
+  if (isSnapshotSpellCandidate(value)) {
+    try {
+      validateSnapshotSpellCandidate(value, context.candidateKey, context.entryType);
+      return { payloadOrigin: "collector_snapshot", publicationCapability: "publishable", publicationBlockReason: null };
+    } catch (error) {
+      return {
+        payloadOrigin: "collector_snapshot", publicationCapability: "requires_extraction",
+        publicationBlockReason: `Collector spell requires review repair: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
   if (isCollectorSnapshotCandidate(value)) {
     return {
       payloadOrigin: "collector_snapshot",
@@ -118,6 +131,49 @@ export function classifyCandidatePublication(value: unknown, context: CandidateC
       publicationBlockReason: `Extraction candidate requires repair before publication: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+}
+
+export function projectSnapshotSpellCandidate(value: unknown, context: Readonly<{
+  candidateKey: string;
+  createdAt: string;
+  source: ContentSource;
+  fileId: string;
+}>): CanonicalRevision {
+  const candidate = validateSnapshotSpellCandidate(value, context.candidateKey, "spell");
+  if (!context.source.files.some((file) => file.fileId === context.fileId)) {
+    throw new CandidateProjectionError("Collector snapshot file is absent from the canonical source record.");
+  }
+  const projection = validateSpellProjection(candidate.attributes);
+  const plain = candidate.body;
+  const revision = createCanonicalRevision({
+    schemaVersion: 1,
+    kind: "canonicalRevision",
+    entryId: canonicalCandidateEntryId("spell", context.candidateKey),
+    createdAt: context.createdAt,
+    source: context.source,
+    entry: {
+      entryType: "spell",
+      name: candidate.title,
+      aliases: candidate.aliases,
+      typedFields: Object.entries(projection).map(([key, fieldValue]) => typedField(key, fieldValue)),
+    },
+    text: {
+      plain,
+      sections: [{ sectionId: "spell-rules", heading: candidate.title, text: plain, startOffset: 0, endOffset: plain.length }],
+    },
+    citations: [{
+      citationId: "collector-snapshot",
+      sourceId: context.source.sourceId,
+      fileId: context.fileId,
+      page: 1,
+      section: `${candidate.title} [${candidate.sourceVersion.url}]`,
+      quote: plain,
+      startOffset: 0,
+      endOffset: plain.length,
+    }],
+  });
+  assertCanonicalRevision(revision);
+  return revision;
 }
 
 export function projectExtractedCandidate(value: unknown, context: CandidatePublicationContext): CanonicalRevision {
@@ -236,6 +292,44 @@ function isCollectorSnapshotCandidate(value: unknown): boolean {
     && typeof value.title === "string" && Boolean(value.title.trim())
     && typeof value.contentHtml === "string" && typeof value.contentText === "string"
     && isRecord(value.indexMetadata);
+}
+
+function isSnapshotSpellCandidate(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && value.kind === "snapshotSpellCandidate" && value.schemaVersion === 1;
+}
+
+function validateSnapshotSpellCandidate(value: unknown, candidateKey: string, entryType: string | null): SnapshotSpellCandidate {
+  if (!isSnapshotSpellCandidate(value) || entryType !== "spell") throw new CandidateProjectionError("Collector candidate is not a typed spell.");
+  if (!hasExactKeys(value, ["aliases", "attributes", "body", "citations", "externalId", "extraction", "kind", "parserVersion", "schemaVersion", "sha256", "sourceUrl", "sourceVersion", "title"])) {
+    throw new CandidateProjectionError("Collector spell shape is unsupported.");
+  }
+  if (candidateKey !== `spells-${value.externalId}` || typeof value.externalId !== "string" || !/^\d+$/.test(value.externalId)) {
+    throw new CandidateProjectionError("Collector spell identity does not match its immutable review row.");
+  }
+  if (typeof value.title !== "string" || !value.title.trim() || typeof value.body !== "string" || !value.body.trim()) {
+    throw new CandidateProjectionError("Collector spell title and body are required.");
+  }
+  if (!Array.isArray(value.aliases) || value.aliases.some((alias) => typeof alias !== "string" || !alias.trim())) {
+    throw new CandidateProjectionError("Collector spell aliases are invalid.");
+  }
+  if (typeof value.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.sha256)
+      || typeof value.sourceUrl !== "string" || !/^https:\/\/next\.dnd\.su\//.test(value.sourceUrl)) {
+    throw new CandidateProjectionError("Collector spell source identity is invalid.");
+  }
+  if (!isRecord(value.sourceVersion) || value.sourceVersion.url !== value.sourceUrl || value.sourceVersion.sha256 !== value.sha256
+      || typeof value.sourceVersion.fetchedAt !== "string" || !Number.isFinite(Date.parse(value.sourceVersion.fetchedAt))) {
+    throw new CandidateProjectionError("Collector spell source version is invalid.");
+  }
+  if (!isRecord(value.extraction) || value.extraction.status !== "ready" || !Array.isArray(value.extraction.missingFields)
+      || value.extraction.missingFields.length !== 0) {
+    throw new CandidateProjectionError("Typed collector extraction is incomplete.");
+  }
+  validateSpellProjection(value.attributes);
+  if (!Array.isArray(value.citations) || !value.citations.some((citation) => isRecord(citation)
+      && citation.fieldPath === "$.body" && citation.quote === value.body && citation.sourceUrl === value.sourceUrl)) {
+    throw new CandidateProjectionError("Collector spell body lacks immutable snapshot evidence.");
+  }
+  return value as unknown as SnapshotSpellCandidate;
 }
 
 function typedField(key: string, value: unknown): Readonly<Record<string, JsonValue>> {

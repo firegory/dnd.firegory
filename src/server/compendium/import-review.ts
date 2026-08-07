@@ -17,6 +17,7 @@ import {
   CandidateProjectionError,
   classifyCandidatePublication,
   projectExtractedCandidate,
+  projectSnapshotSpellCandidate,
   type CandidatePublicationCapability,
 } from "./candidate-publication.ts";
 import type { CompendiumEntryType } from "./service.ts";
@@ -460,7 +461,8 @@ function candidateSelect(suffix: string): string {
 async function buildRevision(client: DbClient, candidate: CandidateRow, content: Record<string, unknown>): Promise<CanonicalRevision> {
   const sourceResult = await client.query<QueryResultRow & Record<string, unknown>>(
     `SELECT source.*, coalesce(jsonb_agg(jsonb_build_object(
-              'fileId', file.id::text, 'path', 'sources/' || source.canonical_source_id || '/files/' || file.id || '.pdf',
+               'fileId', file.id::text, 'path', 'sources/' || source.canonical_source_id || '/files/' || file.id ||
+                 CASE WHEN file.mime_type = 'application/pdf' THEN '.pdf' ELSE '.snapshot' END,
               'mediaType', file.mime_type, 'contentHash', 'sha256:' || file.checksum_sha256
             ) ORDER BY file.id) FILTER (WHERE file.id IS NOT NULL), '[]'::jsonb) AS canonical_files
      FROM sources source LEFT JOIN files file ON file.source_id = source.id AND file.deleted_at IS NULL
@@ -485,6 +487,19 @@ async function buildRevision(client: DbClient, candidate: CandidateRow, content:
     },
     ...(row.license ? { license: String(row.license) } : {}), files: row.canonical_files as ContentSource["files"],
   };
+  if (isSnapshotSpellContent(content)) {
+    try {
+      return projectSnapshotSpellCandidate(content, {
+        candidateKey: candidate.candidate_key,
+        createdAt: iso(candidate.created_at),
+        source,
+        fileId: candidate.file_id,
+      });
+    } catch (error) {
+      if (error instanceof CandidateProjectionError) throw new ImportReviewError(error.message);
+      throw error;
+    }
+  }
   if (!candidate.entry_type || !candidate.generation_id || !candidate.chunk_id || candidate.chunk_index === null || !candidate.quote_text) {
     throw new ImportReviewError("Publishable extracted candidates require typed source, generation, and chunk provenance.");
   }
@@ -695,6 +710,7 @@ function boundedInteger(value: number | undefined, fallback: number, minimum: nu
 }
 function requireUuid(value: string, name: string): void { if (!UUID.test(value)) throw new ImportReviewError(`${name} must be a UUID.`); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function isSnapshotSpellContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotSpellCandidate" && value.schemaVersion === 1; }
 function number(value: unknown): number { return Number(value ?? 0); }
 function iso(value: unknown): string { return value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString(); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message.slice(0, 4000) : "Publication failed."; }

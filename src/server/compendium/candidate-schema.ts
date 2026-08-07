@@ -86,6 +86,7 @@ const attributesByType = {
       school: { enum: ["abjuration", "conjuration", "divination", "enchantment", "evocation", "illusion", "necromancy", "transmutation"] },
       castingTime: stringField, range: stringField, duration: stringField, components: stringField,
       concentration: { type: "boolean" }, ritual: { type: "boolean" },
+      classes: { type: "array", items: stringField, uniqueItems: true },
     },
   },
   creature: {
