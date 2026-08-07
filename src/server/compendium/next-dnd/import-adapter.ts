@@ -2,7 +2,7 @@ import type { CompendiumImportRunService, ImportCandidateInput, ImportOccurrence
 import { NEXT_DND_CATEGORIES, nextDndCardFingerprint } from "./parser.ts";
 import type { NextDndSnapshotManifest, SnapshotDetail } from "./collector.ts";
 import { SPELL_SCHOOLS, type SpellSchool } from "../spell-schema.ts";
-import { FLAT_ENTRY_TYPES, projectionAttributes, validateFlatProjection, type FlatEntryType, type FlatProjection } from "../flat-schema.ts";
+import { canonicalFlatAttributes, FLAT_ENTRY_TYPES, projectionAttributes, validateFlatProjection, type FlatEntryType, type FlatProjection } from "../flat-schema.ts";
 import { parseMoneyToCp, parseWeights } from "../candidate-schema.ts";
 
 type ImportRunAdapterTarget = Pick<CompendiumImportRunService, "addDiagnostic" | "failRun" | "recordOccurrences" | "computeCandidateDiff">;
@@ -120,7 +120,7 @@ export function flatCandidate(detail: SnapshotDetail): SnapshotFlatCandidate {
     throw new Error("Snapshot flat metadata does not match the exact collected window.LIST card fingerprint.");
   }
   const projection = flatProjection(detail);
-  const attributes = projectionAttributes(projection);
+  const attributes = canonicalFlatAttributes(projection.type, projection);
   const metadataEvidenceText = flatMetadataEvidence(attributes);
   const aliases = typeof detail.indexMetadata.title_en === "string" && detail.indexMetadata.title_en.trim()
     ? [detail.indexMetadata.title_en.normalize("NFC").trim()] : [];
@@ -155,7 +155,11 @@ export function flatMetadataEvidence(attributes: Readonly<Record<string, unknown
 function flatProjection(detail: SnapshotDetail): FlatProjection {
   const metadata = detail.indexMetadata;
   const explicit = record(metadata.typed_fields ?? metadata.attributes);
-  const value = (key: string) => explicit[key] ?? metadata[key];
+  const explicitValue = (...keys: readonly string[]) => {
+    const key = keys.find((candidate) => Object.hasOwn(explicit, candidate));
+    return key ? { present: true, value: explicit[key] } : { present: false, value: keys.map((candidate) => metadata[candidate]).find((item) => item !== undefined) };
+  };
+  const value = (...keys: readonly string[]) => explicitValue(...keys).value;
   const labelled = (labels: readonly string[]) => labelledValue(detail.normalized.contentText, labels);
   const type = NEXT_DND_CATEGORIES[detail.category].entryType as FlatEntryType;
   if (type === "feat") return validateFlatProjection(type, {
@@ -163,8 +167,8 @@ function flatProjection(detail: SnapshotDetail): FlatProjection {
       origin: "origin", general: "general", "fighting style": "fighting_style", fighting_style: "fighting_style", "epic boon": "epic_boon", epic_boon: "epic_boon",
       происхождение: "origin", общая: "general", "боевой стиль": "fighting_style", "эпический дар": "epic_boon",
     }, "general"),
-    prerequisiteLevel: integer(value("prerequisiteLevel") ?? value("prerequisite_level"), 1, 20),
-    prerequisiteText: nullableString(value("prerequisiteText") ?? value("prerequisite_text") ?? labelled(["Prerequisite", "Требование"])),
+    prerequisiteLevel: integer(value("prerequisiteLevel", "prerequisite_level"), 1, 20),
+    prerequisiteText: nullableString(explicitValue("prerequisiteText", "prerequisite_text").present ? value("prerequisiteText", "prerequisite_text") : labelled(["Prerequisite", "Требование"])),
     repeatable: Boolean(value("repeatable")) || /(?:repeatable|повторяем)/iu.test(detail.normalized.contentText),
   });
   if (type === "background") return validateFlatProjection(type, {
@@ -181,8 +185,8 @@ function flatProjection(detail: SnapshotDetail): FlatProjection {
       "adventuring gear": "adventuring_gear", adventuring_gear: "adventuring_gear", ammunition: "ammunition", armor: "armor", focus: "focus", mount: "mount", tool: "tool", vehicle: "vehicle", weapon: "weapon", other: "other",
       снаряжение: "adventuring_gear", боеприпасы: "ammunition", доспехи: "armor", фокусировка: "focus", транспорт: "vehicle", оружие: "weapon",
     }, "other"),
-    costCp: integer(value("costCp") ?? value("cost_cp"), 0, 2_147_483_647) ?? parseMoneyToCp(String(value("cost") ?? labelled(["Cost", "Стоимость", "Цена"]) ?? ""))[0] ?? null,
-    weightLb: finiteNumber(value("weightLb") ?? value("weight_lb")) ?? parseWeights(String(value("weight") ?? labelled(["Weight", "Вес"]) ?? ""))[0] ?? null,
+    costCp: explicitValue("costCp", "cost_cp").present ? integer(value("costCp", "cost_cp"), 0, 2_147_483_647) : parseMoneyToCp(String(value("cost") ?? labelled(["Cost", "Стоимость", "Цена"]) ?? ""))[0] ?? null,
+    weightLb: explicitValue("weightLb", "weight_lb").present ? finiteNumber(value("weightLb", "weight_lb")) : parseWeights(String(value("weight") ?? labelled(["Weight", "Вес"]) ?? ""))[0] ?? null,
   });
   return validateFlatProjection("glossary", {
     category: nullableString(value("category") ?? metadata.item_prefix_title) ?? "rules",

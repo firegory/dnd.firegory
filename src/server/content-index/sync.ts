@@ -476,20 +476,22 @@ async function upsertFileIndexRows(
       );
     }
     await client.query(
-      `INSERT INTO nfs_index_entries
-         (id, repository_id, entry_id, revision_id, content_hash, entry_type, name, aliases,
-          typed_fields, plain_text, canonical_payload, source_id, file_id, generation_id, document_id,
-          lifecycle, retired_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,$13,$14,$15,'active',NULL)
+       `INSERT INTO nfs_index_entries
+          (id, repository_id, entry_id, revision_id, content_hash, entry_type, name, aliases,
+           typed_fields, plain_text, canonical_payload, source_id, file_id, generation_id, document_id,
+           edition, language, lifecycle, retired_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,$13,$14,$15,$16,$17,'active',NULL)
        ON CONFLICT (repository_id, entry_id) DO UPDATE SET revision_id=EXCLUDED.revision_id,
          content_hash=EXCLUDED.content_hash, entry_type=EXCLUDED.entry_type, name=EXCLUDED.name,
          aliases=EXCLUDED.aliases, typed_fields=EXCLUDED.typed_fields, plain_text=EXCLUDED.plain_text,
-         canonical_payload=EXCLUDED.canonical_payload, source_id=EXCLUDED.source_id,
-         file_id=EXCLUDED.file_id, generation_id=EXCLUDED.generation_id,
-         document_id=EXCLUDED.document_id, lifecycle='active', retired_at=NULL, indexed_at=now()`,
+          canonical_payload=EXCLUDED.canonical_payload, source_id=EXCLUDED.source_id,
+          file_id=EXCLUDED.file_id, generation_id=EXCLUDED.generation_id,
+          document_id=EXCLUDED.document_id, edition=EXCLUDED.edition, language=EXCLUDED.language,
+          lifecycle='active', retired_at=NULL, indexed_at=now()`,
       [row.id, row.repository_id, row.entry_id, row.revision_id, row.content_hash, row.entry_type,
         row.name, JSON.stringify(row.aliases), JSON.stringify(row.typed_fields), row.plain_text,
-        JSON.stringify(row.canonical_payload), row.source_id, row.file_id, row.generation_id, row.document_id],
+        JSON.stringify(row.canonical_payload), row.source_id, row.file_id, row.generation_id, row.document_id,
+        row.edition, row.language],
     );
   }
 }
@@ -500,6 +502,7 @@ export function nfsIndexEntryRow(repositoryId: string, entry: IndexedEntryProjec
     content_hash: entry.contentHash, entry_type: entry.entryType, name: entry.name, aliases: entry.aliases,
     typed_fields: entry.typedFields, plain_text: entry.plainText, canonical_payload: entry.canonicalPayload,
     source_id: entry.sourceUuid, file_id: entry.fileUuid, generation_id: entry.generationId, document_id: entry.documentId,
+    edition: entry.source.edition, language: entry.source.language,
   } as const;
 }
 

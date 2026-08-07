@@ -18,7 +18,7 @@ import {
 } from "./candidate-schema.ts";
 import type { CompendiumEntryType } from "./service.ts";
 import { validateSpellProjection } from "./spell-schema.ts";
-import { projectionAttributes, validateFlatProjection, type FlatEntryType } from "./flat-schema.ts";
+import { canonicalFlatAttributes, validateFlatProjection, type FlatEntryType } from "./flat-schema.ts";
 import { flatMetadataEvidence, spellDetailEvidence, type SnapshotFlatCandidate, type SnapshotSpellCandidate } from "./next-dnd/import-adapter.ts";
 import { NEXT_DND_PARSER_VERSION } from "./next-dnd/parser.ts";
 
@@ -274,7 +274,7 @@ export function projectSnapshotFlatCandidate(value: unknown, context: Readonly<{
     },
     entry: {
       entryType: candidate.entryType, name: candidate.title, aliases: candidate.aliases,
-      typedFields: Object.entries(projectionAttributes(projection)).map(([key, fieldValue]) => typedField(key, fieldValue)),
+      typedFields: Object.entries(canonicalFlatAttributes(candidate.entryType, projection)).map(([key, fieldValue]) => typedField(key, fieldValue)),
     },
     text: { plain, sections: [{ sectionId: `${candidate.entryType}-rules`, heading: candidate.title, text: plain, startOffset: 0, endOffset: plain.length }] },
     citations: candidate.citations.map((citation) => ({
@@ -431,7 +431,7 @@ function validateSnapshotFlatCandidate(value: unknown, candidateKey: string, ent
     throw new CandidateProjectionError("Collector flat title, aliases, or body are invalid.");
   }
   const projection = validateFlatProjection(type, value.attributes);
-  const attributes = projectionAttributes(projection);
+  const attributes = canonicalFlatAttributes(type, projection);
   if (!evidence || typeof value.sha256 !== "string" || value.sha256 !== evidence.fingerprintSha256
       || value.sourceUrl !== evidence.sourceUrl || typeof value.sourceUrl !== "string" || !/^https:\/\/next\.dnd\.su\//.test(value.sourceUrl)
       || !isRecord(value.sourceVersion) || value.sourceVersion.url !== evidence.sourceUrl || value.sourceVersion.sha256 !== evidence.fingerprintSha256

@@ -2,6 +2,20 @@
 -- are retained; this migration only tightens their browse and publication path.
 ALTER TYPE compendium_entry_type ADD VALUE IF NOT EXISTS 'glossary';
 
+ALTER TABLE nfs_index_entries
+  ADD COLUMN IF NOT EXISTS edition source_edition,
+  ADD COLUMN IF NOT EXISTS language source_language;
+UPDATE nfs_index_entries entry SET edition = source.edition, language = source.language
+FROM sources source WHERE source.id = entry.source_id AND (entry.edition IS NULL OR entry.language IS NULL);
+ALTER TABLE nfs_index_entries ALTER COLUMN edition SET NOT NULL;
+ALTER TABLE nfs_index_entries ALTER COLUMN language SET NOT NULL;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'nfs_index_entries_source_corpus_fk') THEN
+    ALTER TABLE nfs_index_entries ADD CONSTRAINT nfs_index_entries_source_corpus_fk
+      FOREIGN KEY (source_id, edition, language) REFERENCES sources(id, edition, language);
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS compendium_glossary (
   revision_id uuid PRIMARY KEY,
   entry_type text GENERATED ALWAYS AS ('glossary') STORED,
@@ -28,6 +42,26 @@ CREATE INDEX IF NOT EXISTS compendium_glossary_filters_idx
   ON compendium_glossary (category, revision_id);
 CREATE INDEX IF NOT EXISTS compendium_glossary_related_terms_idx
   ON compendium_glossary USING gin (related_terms);
+
+CREATE OR REPLACE FUNCTION nfs_index_typed_number(fields jsonb, field_key text) RETURNS numeric
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
+  SELECT CASE WHEN jsonb_typeof(field->'value') = 'number' THEN (field->>'value')::numeric END
+  FROM jsonb_array_elements(fields) field WHERE field->>'key' = field_key LIMIT 1
+$$;
+CREATE INDEX IF NOT EXISTS nfs_index_entries_flat_browse_idx
+  ON nfs_index_entries (entry_type, edition, language, lower(name) COLLATE "C", entry_id)
+  WHERE lifecycle = 'active';
+CREATE INDEX IF NOT EXISTS nfs_index_entries_typed_fields_idx
+  ON nfs_index_entries USING gin (typed_fields jsonb_path_ops) WHERE lifecycle = 'active';
+CREATE INDEX IF NOT EXISTS nfs_index_entries_feat_level_idx
+  ON nfs_index_entries (nfs_index_typed_number(typed_fields, 'prerequisite-level'))
+  WHERE lifecycle = 'active';
+CREATE INDEX IF NOT EXISTS nfs_index_entries_equipment_cost_idx
+  ON nfs_index_entries (nfs_index_typed_number(typed_fields, 'cost-cp'))
+  WHERE lifecycle = 'active';
+CREATE INDEX IF NOT EXISTS nfs_index_entries_equipment_weight_idx
+  ON nfs_index_entries (nfs_index_typed_number(typed_fields, 'weight-lb'))
+  WHERE lifecycle = 'active';
 
 CREATE OR REPLACE FUNCTION compendium_validate_glossary_revision_type() RETURNS trigger
 LANGUAGE plpgsql AS $$

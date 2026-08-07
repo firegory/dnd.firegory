@@ -4,10 +4,11 @@ import test from "node:test";
 
 import { classifyCandidatePublication, projectSnapshotFlatCandidate } from "../../src/server/compendium/candidate-publication.ts";
 import { parseFlatListOptions, parseFlatType } from "../../src/server/compendium/flat-http.ts";
-import { FlatReadInputError, FlatReadService } from "../../src/server/compendium/flat-read-service.ts";
-import { projectionAttributes, type FlatEntryType } from "../../src/server/compendium/flat-schema.ts";
+import { FlatNotFoundError, FlatReadInputError, FlatReadService } from "../../src/server/compendium/flat-read-service.ts";
+import { compendiumEntryRoute, projectionAttributes, type FlatEntryType } from "../../src/server/compendium/flat-schema.ts";
 import { flatCandidate, flatMetadataEvidence, nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
 import { classifyChunkType } from "../../src/server/compendium/candidate-parsers.ts";
+import { nextDndCardFingerprint } from "../../src/server/compendium/next-dnd/parser.ts";
 import { projectCanonicalRevisions } from "../../src/server/content-index/projection.ts";
 import { nfsIndexEntryRow } from "../../src/server/content-index/sync.ts";
 import { flatDetailsFixture } from "../fixtures/next-dnd/flat-compendium.mts";
@@ -35,6 +36,7 @@ test("each flat collector fixture crosses review, projection, NFS index, and rea
     const [projection] = projectCanonicalRevisions("flat-fixture", [revision], [{ sourceId: source.sourceId, fileId: fileUuid, path: source.files[0].path, mediaType: source.files[0].mediaType, contentHash: source.files[0].contentHash, byteSize: 512 }]);
     assert.equal(projection.entryType, candidate.entryType); assert.equal(projection.pages.length, 0); assert.equal(projection.plainText, detail.normalized.contentText);
     const synced = nfsIndexEntryRow("flat-fixture", projection);
+    assert.equal(synced.edition, "5.5e"); assert.equal(synced.language, "ru");
     const row = { ...synced, mime_type: source.files[0].mediaType, source_title: source.title, edition: source.edition, language: source.language, publication_code: source.publication.code, publication_revision: source.publication.revision, source_priority: source.publication.sourcePriority, sort_title: synced.name.toLocaleLowerCase("und"), source_versions: [], relations: [] };
     const mapped = await new FlatReadService({ async query() { return { rows: [row] }; } }).get({ role: "user" }, candidate.entryType, synced.entry_id);
     assert.equal(mapped.entryType, candidate.entryType); assert.equal(mapped.title, detail.normalized.title); assert.deepEqual(projectionAttributes(mapped.projection), candidate.attributes); assert.equal(mapped.citations.length, candidate.citations.length);
@@ -64,6 +66,26 @@ test("forged collector provenance and field citations cannot cross review", () =
   assert.equal(flatMetadataEvidence(candidate.attributes), evidence(detail).metadataEvidenceText);
 });
 
+test("approval and NFS roundtrip omit null-only feat and equipment fields and citations", async () => {
+  for (const [fixtureIndex, typedFields, omitted] of [
+    [0, { category: "general", prerequisiteLevel: null, prerequisiteText: null, repeatable: false }, ["prerequisiteLevel", "prerequisiteText"]],
+    [3, { category: "adventuring_gear", costCp: null, weightLb: null }, ["costCp", "weightLb"]],
+  ] as const) {
+    const base = flatDetailsFixture()[fixtureIndex];
+    const indexMetadata = { ...base.indexMetadata, typed_fields: typedFields };
+    const detail = { ...base, indexMetadata, indexSource: { ...base.indexSource, cardFingerprintSha256: nextDndCardFingerprint(indexMetadata) } };
+    const candidate = flatCandidate(detail as never); const snapshotEvidence = evidence(detail as never);
+    assert.equal(classifyCandidatePublication(candidate, { candidateKey: `${detail.category}-${detail.externalId}`, entryType: candidate.entryType, sourceId: sourceUuid, fileId: fileUuid, generationId: null, edition: "5.5e", language: "ru", accessTier: "open", shared: false, ownerUserId: null, chunk: null, snapshotEvidence }).publicationCapability, "publishable");
+    for (const field of omitted) { assert.equal(Object.hasOwn(candidate.attributes, field), false); assert.equal(candidate.citations.some((citation) => citation.fieldPath === `$.attributes.${field}`), false); }
+    const revision = projectSnapshotFlatCandidate(candidate, { candidateKey: `${detail.category}-${detail.externalId}`, entryType: candidate.entryType, createdAt: detail.fetchedAt, source, fileId: fileUuid, evidence: snapshotEvidence });
+    for (const field of omitted) assert.equal(revision.entry.typedFields.some((item) => item.key === field.replace(/([A-Z])/g, "-$1").toLowerCase()), false);
+    const [projection] = projectCanonicalRevisions("flat-null-fixture", [revision], [{ sourceId: source.sourceId, fileId: fileUuid, path: source.files[0].path, mediaType: source.files[0].mediaType, contentHash: source.files[0].contentHash, byteSize: 512 }]);
+    const synced = nfsIndexEntryRow("flat-null-fixture", projection); const row = { ...synced, mime_type: source.files[0].mediaType, source_title: source.title, publication_code: source.publication.code, publication_revision: source.publication.revision, source_priority: source.publication.sourcePriority, sort_title: synced.name.toLocaleLowerCase("und"), source_versions: [], relations: [] };
+    const mapped = await new FlatReadService({ async query() { return { rows: [row] }; } }).get({ role: "user" }, candidate.entryType, synced.entry_id, { edition: "5.5e", language: "ru" });
+    for (const field of omitted) assert.equal((mapped.projection as unknown as Record<string, unknown>)[field], null);
+  }
+});
+
 test("flat URL filters restore exactly and malformed values fail closed", () => {
   assert.equal(parseFlatType("glossary"), "glossary");
   assert.deepEqual(parseFlatListOptions(new URL("https://example.test/feats?q=alert&category=general&repeatable=false&minLevel=4&maxLevel=8&language=ru")), { query: "alert", entryCategory: "general", repeatable: false, minLevel: 4, maxLevel: 8, language: "ru" });
@@ -75,14 +97,31 @@ test("flat list count, filters, relation targets, and cursor remain inside one R
   const row = { ...synced, mime_type: "application/pdf", source_title: source.title, edition: source.edition, language: source.language, publication_code: "NEXT", publication_revision: "2026", source_priority: 10, sort_title: "observant", source_versions: [], relations: [] };
   const statements: string[] = []; const db = { async query(sql: string) { statements.push(sql); return sql.includes("count(*)") ? { rows: [{ count: "2" }] } : { rows: [row, { ...row, entry_id: "feat-feats-202", name: "Second" }] }; } };
   const result = await new FlatReadService(db).list({ role: "user" }, "feat", { entryCategory: "general", repeatable: false, minLevel: 4, limit: 1 });
-  assert.equal(result.count, 2); assert.equal(result.entries.length, 1); assert.ok(result.nextCursor); assert.match(statements[0], /s\.access_tier = 'open'/); assert.match(statements[0], /ORDER BY flat\.sort_title COLLATE "C", flat\.entry_id/); assert.doesNotMatch(statements[1], /flat\.sort_title COLLATE "C"[\s\S]*>/);
+  assert.equal(result.count, 2); assert.equal(result.entries.length, 1); assert.ok(result.nextCursor);
+  assert.deepEqual(JSON.parse(Buffer.from(result.nextCursor!, "base64url").toString()), { v: 1, edition: "5.5e", language: "ru", title: "observant", id: row.entry_id });
+  assert.match(statements[0], /s\.access_tier = 'open'/); assert.match(statements[0], /PARTITION BY n\.entry_id, n\.edition, n\.language/); assert.match(statements[0], /indexed\.typed_fields @>/); assert.match(statements[0], /nfs_index_typed_number\(indexed\.typed_fields/); assert.match(statements[0], /ORDER BY indexed\.edition, indexed\.language, lower\(indexed\.name\) COLLATE "C", indexed\.entry_id/); assert.doesNotMatch(statements[1], /lower\(indexed\.name\) COLLATE "C"[\s\S]*>/);
   const detailStatements: string[] = []; await new FlatReadService({ async query(sql: string) { detailStatements.push(sql); return { rows: [row] }; } }).get({ role: "premium", userId: "33333333-3333-4333-8333-333333333333" }, "feat", row.entry_id);
-  assert.match(detailStatements[0], /compendium_import_links evidence/); assert.match(detailStatements[0], /JOIN accessible_flat_versions target/); assert.match(detailStatements[0], /s\.owner_user_id/);
+  assert.match(detailStatements[0], /compendium_import_links evidence JOIN accessible_relation_evidence authorized/); assert.match(detailStatements[0], /accessible_relation_versions AS MATERIALIZED/); assert.match(detailStatements[0], /accessible_relation_evidence AS MATERIALIZED/); assert.match(detailStatements[0], /JOIN accessible_relation_versions target/); assert.match(detailStatements[0], /CASE WHEN flat\.entry_id .* THEN 0 ELSE 1 END AS identifier_rank/); assert.match(detailStatements[0], /count\(\*\) OVER \(\) AS match_count/); assert.match(detailStatements[0], /flat\.match_count = 1/); assert.match(detailStatements[0], /s\.owner_user_id/);
+});
+
+test("relation route map covers dedicated and generic compendium targets", () => {
+  assert.equal(compendiumEntryRoute("spell", "spell-shield", "en"), "/spells/spell-shield");
+  assert.equal(compendiumEntryRoute("glossary", "glossary-cover", "ru"), "/glossary/glossary-cover");
+  for (const type of ["creature", "class", "feature", "species", "monster", "classFeature", "other"]) assert.equal(compendiumEntryRoute(type, `${type}-id`, "ru"), `/ru/compendium/entries/${type}-id`);
+});
+
+test("detail identity SQL prioritizes exact IDs and rejects ambiguous aliases", async () => {
+  let sql = "";
+  await assert.rejects(new FlatReadService({ async query(statement: string) { sql = statement; return { rows: [] }; } }).get({ role: "user" }, "glossary", "shared-alias"), FlatNotFoundError);
+  assert.match(sql, /CASE WHEN flat\.entry_id = \$\d+ THEN 0 ELSE 1 END AS identifier_rank/);
+  assert.match(sql, /min\(identifier_rank\) OVER \(\) AS best_rank/);
+  assert.match(sql, /count\(\*\) OVER \(\) AS match_count/);
+  assert.match(sql, /WHERE flat\.match_count = 1/);
 });
 
 test("all flat pages retain concrete RU/EN, mobile, print, citation, and editor contracts", async () => {
   const [list, detail, pages, css, editor, navigation] = await Promise.all([readFile("src/app/flat-compendium/flat-list.tsx", "utf8"), readFile("src/app/flat-compendium/flat-detail.tsx", "utf8"), readFile("src/app/flat-compendium/pages.tsx", "utf8"), readFile("src/app/globals.css", "utf8"), readFile("src/app/admin/compendium/entries/editor-client.tsx", "utf8"), readFile("src/components/ui/navigation.ts", "utf8")]);
   for (const type of ["feat", "background", "item", "equipment", "glossary"] as FlatEntryType[]) { assert.match(list, new RegExp(`${type}: \\[`)); assert.match(editor, new RegExp(`${type}: \\[`)); }
   for (const route of ["feats", "backgrounds", "items", "equipment", "glossary"]) assert.match(navigation, new RegExp(`href: "/${route}"`));
-  assert.match(list, /name="language"/); assert.match(list, /name="repeatable"/); assert.match(list, /name="attunement"/); assert.match(detail, /citation\.previewUrl/); assert.match(detail, /citation\.sourceUrl/); assert.match(detail, /entry\.sourceVersions/); assert.match(detail, /entry\.relations/); assert.match(pages, /FlatReadService/); assert.match(css, /@media \(max-width:39\.999rem\)[\s\S]*\.flat-filters/); assert.match(css, /@media print[\s\S]*\.flat-detail section/);
+  assert.match(list, /name="language"/); assert.match(list, /name="repeatable"/); assert.match(list, /name="attunement"/); assert.match(detail, /requiresAttunement: \["Требует настройки", "Requires attunement"\]/); assert.match(detail, /value \? "Да" : "Нет"/); assert.match(detail, /citation\.previewUrl/); assert.match(detail, /citation\.sourceUrl/); assert.match(detail, /entry\.sourceVersions/); assert.match(detail, /entry\.relations/); assert.match(pages, /FlatReadService/); assert.match(css, /@media \(max-width:39\.999rem\)[\s\S]*\.flat-filters/); assert.match(css, /@media print[\s\S]*\.flat-detail section/);
 });

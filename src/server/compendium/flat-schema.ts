@@ -1,6 +1,12 @@
 export const FLAT_ENTRY_TYPES = ["feat", "background", "item", "equipment", "glossary"] as const;
 export type FlatEntryType = (typeof FLAT_ENTRY_TYPES)[number];
 export function flatCollection(type: FlatEntryType): string { return type === "equipment" || type === "glossary" ? type : `${type}s`; }
+export function compendiumEntryRoute(type: string, id: string, language: "ru" | "en"): string {
+  const collections: Readonly<Record<string, string>> = {
+    spell: "spells", feat: "feats", background: "backgrounds", item: "items", equipment: "equipment", glossary: "glossary",
+  };
+  return collections[type] ? `/${collections[type]}/${id}` : `/${language}/compendium/entries/${id}`;
+}
 
 export const FEAT_CATEGORIES = ["origin", "general", "fighting_style", "epic_boon"] as const;
 export const ITEM_CATEGORIES = ["armor", "potion", "ring", "rod", "scroll", "staff", "wand", "weapon", "wondrous", "other"] as const;
@@ -23,8 +29,8 @@ export function validateFlatProjection(type: FlatEntryType, value: unknown): Fla
   switch (type) {
     case "feat": {
       const category = enumValue(value.category, FEAT_CATEGORIES, "feat category");
-      const prerequisiteLevel = nullableInteger(value.prerequisiteLevel, 1, 20, "feat prerequisite level");
-      const prerequisiteText = nullableText(value.prerequisiteText, "feat prerequisite text");
+      const prerequisiteLevel = nullableInteger(value.prerequisiteLevel ?? null, 1, 20, "feat prerequisite level");
+      const prerequisiteText = nullableText(value.prerequisiteText ?? null, "feat prerequisite text");
       if (typeof value.repeatable !== "boolean") throw new FlatValidationError("Feat repeatable must be boolean.");
       return { type, category, prerequisiteLevel, prerequisiteText, repeatable: value.repeatable };
     }
@@ -39,8 +45,8 @@ export function validateFlatProjection(type: FlatEntryType, value: unknown): Fla
     case "equipment":
       return {
         type, category: enumValue(value.category, EQUIPMENT_CATEGORIES, "equipment category"),
-        costCp: nullableInteger(value.costCp, 0, 2_147_483_647, "equipment cost"),
-        weightLb: nullableNumber(value.weightLb, 0, 9_999_999.999, "equipment weight"),
+        costCp: nullableInteger(value.costCp ?? null, 0, 2_147_483_647, "equipment cost"),
+        weightLb: nullableNumber(value.weightLb ?? null, 0, 9_999_999.999, "equipment weight"),
       };
     case "glossary": {
       if (!Array.isArray(value.relatedTerms) || value.relatedTerms.some((item) => typeof item !== "string" || !item.trim())) {
@@ -63,7 +69,11 @@ export function flatProjectionFromTypedFields(type: FlatEntryType, fields: unkno
 }
 
 export function projectionAttributes(projection: FlatProjection): Readonly<Record<string, unknown>> {
-  return Object.fromEntries(Object.entries(projection).filter(([key]) => key !== "type"));
+  return Object.fromEntries(Object.entries(projection).filter(([key, value]) => key !== "type" && value !== null));
+}
+
+export function canonicalFlatAttributes(type: FlatEntryType, value: unknown): Readonly<Record<string, unknown>> {
+  return projectionAttributes(validateFlatProjection(type, value));
 }
 
 function enumValue<const T extends readonly string[]>(value: unknown, allowed: T, field: string): T[number] {
