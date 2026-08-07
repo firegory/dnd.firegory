@@ -22,4 +22,8 @@ test("cancel is local-only and evidence has preview and exact code-point spans",
   assert.match(source,/quoteSpanEnd:Array\.from\(chunk\.quote\)\.length/);
   assert.match(source,/api\/citations\/preview/);
   assert.match(source,/expectedActiveRevisionId:detail\.canonicalRevisionId/);
+  assert.match(source,/detailController\.current\?\.abort\(\)/);
+  assert.match(source,/sequence!==detailSequence\.current/);
+  assert.match(source,/aria-busy=\{detailLoading\}/);
+  assert.match(source,/basedOnRevisionId:detail\.editorHeadRevisionId/);
 });

@@ -12,7 +12,8 @@ test("migration 0014 is registered, additive, and rerunnable", () => {
   assert.match(sql,/CREATE TABLE IF NOT EXISTS compendium_editor_publications/);
   assert.match(sql,/CREATE TABLE IF NOT EXISTS compendium_editor_audit/);
   assert.match(sql,/EXCEPTION WHEN duplicate_object THEN NULL/);
-  assert.doesNotMatch(sql,/DELETE FROM compendium_|UPDATE compendium_versions SET/i);
+  assert.doesNotMatch(sql,/DELETE FROM compendium_/i);
+  assert.match(sql,/UPDATE compendium_versions SET editor_head_revision_id = active_revision_id/);
 });
 
 test("migration 0014 enforces immutable audit, constrained outcomes, and version-owned revisions", () => {
@@ -22,4 +23,7 @@ test("migration 0014 enforces immutable audit, constrained outcomes, and version
   assert.match(sql,/editor audit records are immutable/);
   assert.match(sql,/FOREIGN KEY \(revision_id, version_id\)/);
   assert.match(sql,/btrim\(actor\).*btrim\(reason\)/s);
+  assert.match(sql,/based_on_revision_id IS NULL AND created_by IS NULL/);
+  assert.match(sql,/created_by IS NOT NULL AND change_reason IS NOT NULL/);
+  assert.match(sql,/compendium_versions_editor_head_fk/);
 });

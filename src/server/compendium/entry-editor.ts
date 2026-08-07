@@ -1,9 +1,11 @@
 import type { QueryResultRow } from "pg";
 
 import { assertAdminContext, type AdminContext } from "../admin/admin-context.ts";
-import { submitPublicationCommand, submitUnpublicationCommand } from "../content-storage/publication-command.ts";
-import { createCanonicalRevision, getDataRoot, type CanonicalRevision, type ContentSource, type JsonValue } from "../content-storage/repository.ts";
-import { loadResolvedRepositoryManifest } from "../content-storage/validation.ts";
+import { PublicationEnqueueAmbiguousError, submitPublicationCommand, submitUnpublicationCommand } from "../content-storage/publication-command.ts";
+import { createCanonicalRevision, getDataRoot, type CanonicalRevision, type JsonValue } from "../content-storage/repository.ts";
+import { assertCanonicalRevision, assertDeletionContractSupported, ContentIntegrityError, ContentSchemaValidationError, loadResolvedRepositoryManifest } from "../content-storage/validation.ts";
+import { contentSourceFilesFromMetadataRecords, contentSourceFromMetadataRecord } from "../content/source-projection.ts";
+import { ContentMetadataNotFoundError, ContentMetadataService, ContentMetadataValidationError } from "../content/metadata.ts";
 import { withTransaction } from "../db/client.ts";
 import { blocksToBody, editorExtension, parseEditorCorrectionInput, parseEditorEntryInput } from "./entry-editor-model.ts";
 import { CompendiumService, type CompendiumEntryType } from "./service.ts";
@@ -26,7 +28,7 @@ export type EditorPublication = Readonly<{ id: string; revisionId: string | null
 export type EditorAuditEvent = Readonly<{ id: string; revisionId: string | null; eventType: string; actor: string; reason: string; details: Record<string, unknown>; createdAt: string }>;
 export type EditorEntry = Readonly<{
   versionId: string; entryId: string; canonicalKey: string; entryType: CompendiumEntryType; edition: string; language: string;
-  sourceId: string; fileId: string; slug: string; aliases: readonly string[]; activeRevisionId: string; versionLifecycle: string;
+  sourceId: string; fileId: string; slug: string; aliases: readonly string[]; activeRevisionId: string; editorHeadRevisionId: string; versionLifecycle: string;
   canonicalRevisionId: string | null; publicationStatus: string; publicationAction: string | null;
   revisions: readonly EditorRevision[]; publications: readonly EditorPublication[]; audit: readonly EditorAuditEvent[];
 }>;
@@ -53,7 +55,7 @@ export class EntryEditorService {
     assertAdminContext(admin);
     return this.transaction(async (client) => {
       const result = await client.query<QueryResultRow & Record<string, unknown>>(`SELECT v.id AS version_id, v.entry_id, e.canonical_key, v.entry_type, v.edition, v.language, v.lifecycle AS version_lifecycle,
-        v.source_id, v.file_id, v.active_revision_id, n.name AS slug,
+        v.source_id, v.file_id, v.active_revision_id, v.editor_head_revision_id, n.name AS slug,
         coalesce(array_agg(a.name ORDER BY a.name) FILTER (WHERE a.name IS NOT NULL), '{}') AS aliases,
          p.canonical_revision_id, coalesce(p.status::text, 'unpublished') AS publication_status, p.action AS publication_action
         FROM compendium_versions v JOIN compendium_entries e ON e.id=v.entry_id
@@ -120,14 +122,27 @@ export class EntryEditorService {
     if (expectedCanonical !== null && !/^rev-[0-9a-f]{64}$/.test(expectedCanonical)) throw new EntryEditorError("Invalid active canonical revision token.");
     const actualCanonical = await this.activeCanonical(versionId, this.transaction);
     if (actualCanonical !== expectedCanonical) throw new EntryEditorError("The canonical entry changed after this editor was opened. Reload before publishing.", 409);
+    if (action === "unpublish") {
+      try { await assertDeletionContractSupported(getDataRoot()); }
+      catch (error) {
+        if (error instanceof ContentIntegrityError || error instanceof ContentSchemaValidationError) throw new EntryEditorError(error.message, 409);
+        throw error;
+      }
+    }
 
     const prepared = await this.transaction(async (client) => {
       const entry = await this.getWithClient(client, versionId, true);
       const revision = revisionId ? entry.revisions.find((item) => item.id === revisionId) : null;
       if (action === "publish" && !revision) throw new EntryEditorError("Revision does not belong to this entry.", 404);
-      if (revision?.basedOnRevisionId && revision.basedOnRevisionId !== entry.activeRevisionId) throw new EntryEditorError("This correction is stale. Both revisions were preserved; reload and reconcile before publishing.", 409);
-      if (entry.versionLifecycle === "draft" && revision && !revision.basedOnRevisionId && revision.id !== entry.activeRevisionId) throw new EntryEditorError("This draft is stale. Both revisions were preserved; reload and reconcile before publishing.", 409);
-      const canonical = revision ? await buildCanonical(client, entry, revision) : null;
+      if (revision && revision.id !== entry.editorHeadRevisionId) throw new EntryEditorError("This revision is not the latest editor revision. Reload before publishing.", 409);
+      const canonical = revision ? await buildEditorCanonicalRevision(client, admin, entry, revision) : null;
+      if (canonical) {
+        try { assertCanonicalRevision(canonical); }
+        catch (error) {
+          if (error instanceof ContentIntegrityError || error instanceof ContentSchemaValidationError) throw new EntryEditorError(error.message, 409);
+          throw error;
+        }
+      }
       const open = await client.query<QueryResultRow & Record<string, unknown>>(`SELECT idempotency_key,status,action,revision_id,expected_active_revision_id FROM compendium_editor_publications WHERE version_id=$1 AND status IN ('pending','queued') FOR UPDATE`, [versionId]);
       const existing = open.rows[0];
       if (existing) {
@@ -147,7 +162,7 @@ export class EntryEditorService {
       else await this.submitters.unpublish({ idempotencyKey: prepared.idempotencyKey, expectedActiveRevisionId: expectedCanonical, entryId: editorCanonicalEntryId(prepared.entry.entryType, prepared.entry.canonicalKey) });
       await this.transaction(async (client) => { await client.query("UPDATE compendium_editor_publications SET status='queued' WHERE idempotency_key=$1 AND status='pending'", [prepared.idempotencyKey]); });
       return { status: "queued" };
-    } catch { return { status: "pending" }; }
+    } catch (error) { return editorSubmissionErrorStatus(error); }
   }
 
   private async getWithClient(client: DbClient, versionId: string, lock = false): Promise<EditorEntry> {
@@ -155,7 +170,7 @@ export class EntryEditorService {
       const locked = await client.query("SELECT id FROM compendium_versions WHERE id=$1 FOR UPDATE", [versionId]);
       if (!locked.rows[0]) throw new EntryEditorError("Compendium entry was not found.", 404);
     }
-    const base = await client.query<QueryResultRow & Record<string, unknown>>(`SELECT v.id AS version_id,v.entry_id,e.canonical_key,v.entry_type,v.edition,v.language,v.source_id,v.file_id,v.active_revision_id,v.lifecycle AS version_lifecycle,
+    const base = await client.query<QueryResultRow & Record<string, unknown>>(`SELECT v.id AS version_id,v.entry_id,e.canonical_key,v.entry_type,v.edition,v.language,v.source_id,v.file_id,v.active_revision_id,v.editor_head_revision_id,v.lifecycle AS version_lifecycle,
       n.name AS slug,coalesce(array_agg(a.name ORDER BY a.name) FILTER (WHERE a.name IS NOT NULL),'{}') AS aliases,
       p.canonical_revision_id,coalesce(p.status::text,'unpublished') AS publication_status,p.action AS publication_action
       FROM compendium_versions v JOIN compendium_entries e ON e.id=v.entry_id JOIN compendium_names n ON n.version_id=v.id AND n.kind='slug'
@@ -165,8 +180,8 @@ export class EntryEditorService {
     const summary = base.rows[0]; if (!summary) throw new EntryEditorError("Compendium entry was not found.", 404);
     const entryType = String(summary.entry_type) as CompendiumEntryType;
     const revisions = await client.query<QueryResultRow & Record<string, unknown>>(`SELECT r.*,to_jsonb(t)-'revision_id'-'entry_type' AS projection,
-      coalesce(jsonb_agg(jsonb_build_object('chunkId',c.chunk_id,'generationId',c.generation_id,'kind',c.kind,'fieldPath',c.field_path,'blockOrder',c.block_order,'quote',c.quote,'quoteSpanStart',c.quote_span_start,'quoteSpanEnd',c.quote_span_end,'page',ch.page_number,'section',coalesce(ch.section_heading,r.title)) ORDER BY c.block_order,c.id) FILTER (WHERE c.id IS NOT NULL),'[]') AS citations
-      FROM compendium_revisions r JOIN compendium_${TYPE_TABLE[entryType]} t ON t.revision_id=r.id LEFT JOIN compendium_citations c ON c.revision_id=r.id LEFT JOIN chunks ch ON ch.id=c.chunk_id
+      coalesce(jsonb_agg(jsonb_build_object('chunkId',c.chunk_id,'generationId',c.generation_id,'kind',c.kind,'fieldPath',c.field_path,'blockOrder',c.block_order,'quote',c.quote,'quoteSpanStart',c.quote_span_start,'quoteSpanEnd',c.quote_span_end,'page',ch.page_number,'section',coalesce(ch.section_heading,r.title),'generationStatus',g.status) ORDER BY c.block_order,c.id) FILTER (WHERE c.id IS NOT NULL),'[]') AS citations
+      FROM compendium_revisions r JOIN compendium_${TYPE_TABLE[entryType]} t ON t.revision_id=r.id LEFT JOIN compendium_citations c ON c.revision_id=r.id LEFT JOIN chunks ch ON ch.id=c.chunk_id AND ch.generation_id=c.generation_id AND ch.file_id=c.file_id AND ch.source_id=c.source_id LEFT JOIN ingestion_generations g ON g.id=c.generation_id AND g.file_id=c.file_id AND g.source_id=c.source_id
       WHERE r.version_id=$1 GROUP BY r.id,t.revision_id ORDER BY r.revision_number DESC`, [versionId]);
     const publications = await client.query<QueryResultRow & Record<string, unknown>>(`SELECT * FROM compendium_editor_publications WHERE version_id=$1 ORDER BY created_at DESC,id DESC`, [versionId]);
     const auditEvents = await client.query<QueryResultRow & Record<string, unknown>>(`SELECT * FROM compendium_editor_audit WHERE version_id=$1 ORDER BY created_at DESC,id DESC`, [versionId]);
@@ -198,27 +213,46 @@ async function defaultActiveCanonical(versionId: string, transaction: Transactio
 
 export function editorCanonicalEntryId(entryType: CompendiumEntryType, canonicalKey: string): string { return `${entryType}-${canonicalKey}`; }
 
-async function buildCanonical(client: DbClient, entry: EditorEntry, revision: EditorRevision): Promise<CanonicalRevision> {
-  const sourceRow = (await client.query<QueryResultRow & Record<string, unknown>>(`SELECT s.*,f.mime_type,f.checksum_sha256 FROM sources s JOIN files f ON f.id=$2 AND f.source_id=s.id WHERE s.id=$1`, [entry.sourceId,entry.fileId])).rows[0];
-  if (!sourceRow || !sourceRow.canonical_source_id || !sourceRow.publication_code || !sourceRow.publisher || !sourceRow.release_year || !sourceRow.canonical_book_id) throw new EntryEditorError("Complete canonical source publication metadata is required before publishing.",409);
-  const source: ContentSource = { schemaVersion:1,kind:"source",sourceId:String(sourceRow.canonical_source_id),title:String(sourceRow.title),category:sourceRow.category as ContentSource["category"],edition:sourceRow.edition as ContentSource["edition"],language:sourceRow.language as ContentSource["language"],accessTier:sourceRow.access_tier as ContentSource["accessTier"],shared:Boolean(sourceRow.shared),ownerUserId:sourceRow.owner_user_id == null ? null : String(sourceRow.owner_user_id),publication:{code:String(sourceRow.publication_code),title:String(sourceRow.publication_title),publisher:String(sourceRow.publisher),releaseYear:Number(sourceRow.release_year),...(sourceRow.publication_revision ? {revision:String(sourceRow.publication_revision)} : {}),sourcePriority:Number(sourceRow.source_priority),canonicalBookId:String(sourceRow.canonical_book_id)},...(sourceRow.license ? {license:String(sourceRow.license)} : {}),files:[{fileId:entry.fileId,path:`sources/${sourceRow.canonical_source_id}/files/${entry.fileId}.pdf`,mediaType:String(sourceRow.mime_type),contentHash:`sha256:${sourceRow.checksum_sha256}`}] };
+export function editorSubmissionErrorStatus(error: unknown): { status: "pending" } {
+  if (error instanceof PublicationEnqueueAmbiguousError) return { status: "pending" };
+  throw error;
+}
+
+export async function buildEditorCanonicalRevision(client: DbClient, admin: AdminContext, entry: EditorEntry, revision: EditorRevision): Promise<CanonicalRevision> {
+  let source;
+  try {
+    const metadata = new ContentMetadataService(client as never);
+    const sourceRecord = await metadata.getSource(admin, entry.sourceId);
+    const files = await metadata.listFiles(admin, entry.sourceId);
+    if (!sourceRecord.canonicalSourceId || sourceRecord.edition !== entry.edition || sourceRecord.language !== entry.language || !files.some((file) => file.id === entry.fileId)) {
+      throw new EntryEditorError("The entry source/file boundary is deleted or no longer matches its version.", 409);
+    }
+    source = contentSourceFromMetadataRecord(sourceRecord, contentSourceFilesFromMetadataRecords(sourceRecord.canonicalSourceId, files));
+  } catch (error) {
+    if (error instanceof EntryEditorError) throw error;
+    if (error instanceof ContentMetadataNotFoundError || error instanceof ContentMetadataValidationError) throw new EntryEditorError(error.message, 409);
+    throw error;
+  }
   const typedFields = projectionFields(revision.projection);
   let plain = revision.body;
   const sections: Array<{sectionId:string;heading:string;text:string;startOffset:number;endOffset:number}> = [{sectionId:"content",heading:revision.title,text:revision.body,startOffset:0,endOffset:revision.body.length}];
   const citations = revision.citations.map((citation,index) => {
+    const page = Number(citation.page);
+    if (!Number.isSafeInteger(page) || page < 1) throw new EntryEditorError("Every citation requires a positive source page.", 409);
+    if (!['active','archived'].includes(String(citation.generationStatus))) throw new EntryEditorError("Citation generations must remain active or archived.", 409);
     const separator = "\n\n";
     const quote = String(citation.quote);
     const startOffset = plain.length + separator.length;
     plain += separator + quote;
     sections.push({sectionId:`evidence-${index+1}`,heading:String(citation.section),text:separator+quote,startOffset:startOffset-separator.length,endOffset:plain.length});
-    return { citationId:`evidence-${index+1}`,sourceId:source.sourceId,fileId:entry.fileId,page:Number(citation.page),section:String(citation.section),quote,startOffset,endOffset:startOffset+quote.length };
+    return { citationId:`evidence-${index+1}`,sourceId:source.sourceId,fileId:entry.fileId,page,section:String(citation.section),quote,startOffset,endOffset:startOffset+quote.length };
   });
   return createCanonicalRevision({ schemaVersion:1,kind:"canonicalRevision",entryId:editorCanonicalEntryId(entry.entryType,entry.canonicalKey),createdAt:revision.createdAt,source,entry:{entryType:canonicalType(entry.entryType),name:revision.title,aliases:entry.aliases,typedFields},text:{plain,sections},citations } as never);
 }
 
 function projectionFields(projection: Record<string, unknown>): JsonValue[] { return Object.entries(projection).filter(([key,value]) => !["extension_data","extensionData"].includes(key) && value != null).map(([key,value]) => ({ key:key.replaceAll("_","-"),label:key.replaceAll("_"," "),type:typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : "string",value:value as JsonValue })); }
 function canonicalType(type: CompendiumEntryType): "spell"|"classFeature"|"item"|"monster"|"other" { return type === "creature" ? "monster" : type === "class" || type === "feature" ? "classFeature" : type === "spell" || type === "item" ? type : "other"; }
-function mapEntrySummary(row: Record<string, unknown>): Omit<EditorEntry,"revisions"|"publications"|"audit"> { return { versionId:String(row.version_id),entryId:String(row.entry_id),canonicalKey:String(row.canonical_key),entryType:String(row.entry_type) as CompendiumEntryType,edition:String(row.edition),language:String(row.language),sourceId:String(row.source_id),fileId:String(row.file_id),slug:String(row.slug),aliases:(row.aliases ?? []) as string[],activeRevisionId:String(row.active_revision_id),versionLifecycle:String(row.version_lifecycle),canonicalRevisionId:row.canonical_revision_id == null ? null : String(row.canonical_revision_id),publicationStatus:String(row.publication_status),publicationAction:row.publication_action == null ? null : String(row.publication_action) }; }
+function mapEntrySummary(row: Record<string, unknown>): Omit<EditorEntry,"revisions"|"publications"|"audit"> { return { versionId:String(row.version_id),entryId:String(row.entry_id),canonicalKey:String(row.canonical_key),entryType:String(row.entry_type) as CompendiumEntryType,edition:String(row.edition),language:String(row.language),sourceId:String(row.source_id),fileId:String(row.file_id),slug:String(row.slug),aliases:(row.aliases ?? []) as string[],activeRevisionId:String(row.active_revision_id),editorHeadRevisionId:String(row.editor_head_revision_id),versionLifecycle:String(row.version_lifecycle),canonicalRevisionId:row.canonical_revision_id == null ? null : String(row.canonical_revision_id),publicationStatus:String(row.publication_status),publicationAction:row.publication_action == null ? null : String(row.publication_action) }; }
 function mapRevision(row: Record<string, unknown>): EditorRevision { const extension = row.extension_data as {editor?:{blocks?:unknown[]}}; return { id:String(row.id),number:Number(row.revision_number),title:String(row.title),summary:row.summary == null ? null : String(row.summary),body:String(row.body),blocks:extension?.editor?.blocks ?? [{type:"paragraph",text:String(row.body)}],projection:camelProjection(row.projection as Record<string,unknown>),citations:row.citations as Record<string,unknown>[],basedOnRevisionId:row.based_on_revision_id == null ? null : String(row.based_on_revision_id),actor:row.created_by == null ? null : String(row.created_by),reason:row.change_reason == null ? null : String(row.change_reason),createdAt:new Date(row.created_at as string|Date).toISOString(),lifecycle:String(row.lifecycle) }; }
 function mapPublication(row: Record<string,unknown>): EditorPublication { return { id:String(row.id),revisionId:row.revision_id == null ? null : String(row.revision_id),action:String(row.action) as "publish"|"unpublish",status:String(row.status),canonicalRevisionId:row.canonical_revision_id == null ? null : String(row.canonical_revision_id),actor:String(row.actor),reason:String(row.reason),lastError:row.last_error == null ? null : String(row.last_error),createdAt:new Date(row.created_at as string|Date).toISOString(),completedAt:row.completed_at == null ? null : new Date(row.completed_at as string|Date).toISOString() }; }
 function mapAudit(row: Record<string,unknown>): EditorAuditEvent { return { id:String(row.id),revisionId:row.revision_id == null ? null : String(row.revision_id),eventType:String(row.event_type),actor:String(row.actor),reason:String(row.reason),details:(row.details ?? {}) as Record<string,unknown>,createdAt:new Date(row.created_at as string|Date).toISOString() }; }

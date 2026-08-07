@@ -111,8 +111,8 @@ export class CompendiumService {
       const entryId = requiredRow(entry.rows[0], "Unable to create or resolve compendium entry.").id;
       const version = await client.query<{ id: string; active_revision_id: string }>(
         `INSERT INTO compendium_versions
-           (entry_id, entry_type, edition, language, source_id, file_id, lifecycle, active_revision_id)
-         VALUES ($1, $2, $3, $4, $5, $6, 'draft', gen_random_uuid())
+           (entry_id, entry_type, edition, language, source_id, file_id, lifecycle, active_revision_id, editor_head_revision_id)
+         SELECT $1, $2, $3, $4, $5, $6, 'draft', revision_id, revision_id FROM (SELECT gen_random_uuid() AS revision_id) generated
          RETURNING id, active_revision_id`,
         [entryId, input.entryType, input.edition, input.language, input.sourceId, input.fileId],
       );
@@ -205,8 +205,9 @@ export class CompendiumService {
         source_id: string;
         file_id: string;
         active_revision_id: string;
+        editor_head_revision_id: string;
       }>(
-       `SELECT entry_type, lifecycle, source_id, file_id, active_revision_id
+       `SELECT entry_type, lifecycle, source_id, file_id, active_revision_id, editor_head_revision_id
           FROM compendium_versions WHERE id = $1 FOR UPDATE`,
         [versionId],
       );
@@ -215,7 +216,7 @@ export class CompendiumService {
        if (input.projection.type !== owner.entry_type) throw new CompendiumValidationError("Projection type must match the version entry type.");
        if (input.basedOnRevisionId) {
          requireUuid(input.basedOnRevisionId, "basedOnRevisionId");
-         if (owner.active_revision_id !== input.basedOnRevisionId) throw new CompendiumValidationError("The entry changed after this editor was opened. Reload before saving a correction.");
+         if (owner.editor_head_revision_id !== input.basedOnRevisionId) throw new CompendiumValidationError("The entry changed after this editor was opened. Reload before saving a correction.");
        }
       const sequence = await client.query<{ revision_number: number }>(
         `SELECT coalesce(max(revision_number), 0) + 1 AS revision_number
@@ -236,6 +237,10 @@ export class CompendiumService {
         await insertCitation(client, revisionId, versionId, owner.source_id, owner.file_id, citation);
       }
       if (input.actor && input.reason) await insertEditorAudit(client, versionId, revisionId, "revision_created", input.actor, input.reason);
+      await client.query(
+        "UPDATE compendium_versions SET editor_head_revision_id = $2 WHERE id = $1",
+        [versionId, revisionId],
+      );
       if (owner.lifecycle === "draft") {
         await client.query(
           "UPDATE compendium_versions SET active_revision_id = $2 WHERE id = $1 AND lifecycle = 'draft'",
@@ -340,15 +345,15 @@ function validateProjection(projection: ProjectionInput): void {
 
 async function insertCitation(client: DbClient, revisionId: string, versionId: string, sourceId: string, fileId: string, citation: CitationInput): Promise<void> {
   const chunk = await client.query<{ quote_text: string; generation_status: string }>(
-    `SELECT c.quote_text, g.status AS generation_status FROM chunks c
+    `SELECT c.quote_text, c.page_number, g.status AS generation_status FROM chunks c
      JOIN ingestion_generations g
        ON g.id = c.generation_id AND g.file_id = c.file_id AND g.source_id = c.source_id
      WHERE c.id = $1 AND c.generation_id = $2 AND c.file_id = $3 AND c.source_id = $4
-       AND g.status IN ('active', 'archived')
+       AND g.status IN ('active', 'archived') AND c.page_number > 0
      FOR SHARE OF c, g`,
     [citation.chunkId, citation.generationId, fileId, sourceId],
   );
-  if (!chunk.rows[0]) throw new CompendiumValidationError("Citation chunk is outside the version source/file boundary.");
+  if (!chunk.rows[0]) throw new CompendiumValidationError("Citation chunk must have a positive page and remain in an active or archived generation within the version source/file boundary.");
   validateCitation(citation, chunk.rows[0].quote_text);
   await client.query(
     `INSERT INTO compendium_citations

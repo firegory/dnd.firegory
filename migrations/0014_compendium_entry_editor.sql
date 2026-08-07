@@ -8,11 +8,14 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER TABLE compendium_revisions ADD COLUMN IF NOT EXISTS based_on_revision_id uuid;
 ALTER TABLE compendium_revisions ADD COLUMN IF NOT EXISTS created_by text;
 ALTER TABLE compendium_revisions ADD COLUMN IF NOT EXISTS change_reason text;
+ALTER TABLE compendium_versions ADD COLUMN IF NOT EXISTS editor_head_revision_id uuid;
+UPDATE compendium_versions SET editor_head_revision_id = active_revision_id WHERE editor_head_revision_id IS NULL;
+ALTER TABLE compendium_versions ALTER COLUMN editor_head_revision_id SET NOT NULL;
 
 ALTER TABLE compendium_revisions DROP CONSTRAINT IF EXISTS compendium_revisions_editor_metadata;
 ALTER TABLE compendium_revisions ADD CONSTRAINT compendium_revisions_editor_metadata CHECK (
-  (created_by IS NULL AND change_reason IS NULL)
-  OR (btrim(created_by) <> '' AND btrim(change_reason) <> '')
+  (based_on_revision_id IS NULL AND created_by IS NULL AND change_reason IS NULL)
+  OR (created_by IS NOT NULL AND change_reason IS NOT NULL AND btrim(created_by) <> '' AND btrim(change_reason) <> '')
 );
 
 DO $$ BEGIN
@@ -20,6 +23,14 @@ DO $$ BEGIN
     ALTER TABLE compendium_revisions ADD CONSTRAINT compendium_revisions_based_on_fk
       FOREIGN KEY (based_on_revision_id, version_id)
       REFERENCES compendium_revisions(id, version_id);
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'compendium_versions'::regclass AND conname = 'compendium_versions_editor_head_fk') THEN
+    ALTER TABLE compendium_versions ADD CONSTRAINT compendium_versions_editor_head_fk
+      FOREIGN KEY (editor_head_revision_id, id)
+      REFERENCES compendium_revisions(id, version_id) DEFERRABLE INITIALLY DEFERRED;
   END IF;
 END $$;
 
@@ -125,5 +136,5 @@ BEGIN
 END $$;
 DROP TRIGGER IF EXISTS compendium_editor_revision_metadata_required ON compendium_revisions;
 CREATE TRIGGER compendium_editor_revision_metadata_required BEFORE INSERT ON compendium_revisions
-FOR EACH ROW WHEN (NEW.created_by IS NOT NULL OR NEW.change_reason IS NOT NULL)
+FOR EACH ROW WHEN (NEW.based_on_revision_id IS NOT NULL OR NEW.created_by IS NOT NULL OR NEW.change_reason IS NOT NULL)
 EXECUTE FUNCTION compendium_guard_editor_revision_metadata();
