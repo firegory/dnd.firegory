@@ -18,7 +18,7 @@ import {
 } from "./candidate-schema.ts";
 import type { CompendiumEntryType } from "./service.ts";
 import { validateSpellProjection } from "./spell-schema.ts";
-import type { SnapshotSpellCandidate } from "./next-dnd/import-adapter.ts";
+import { spellDetailEvidence, type SnapshotSpellCandidate } from "./next-dnd/import-adapter.ts";
 import { NEXT_DND_PARSER_VERSION } from "./next-dnd/parser.ts";
 
 export type SnapshotSpellEvidence = Readonly<{
@@ -27,6 +27,12 @@ export type SnapshotSpellEvidence = Readonly<{
   rawBlobPath: string;
   fetchedAt: string;
   fileChecksumSha256: string;
+  indexUrl: string;
+  indexFingerprintSha256: string;
+  rawIndexBlobPath: string;
+  indexFetchedAt: string;
+  indexCardFingerprintSha256: string;
+  metadataEvidenceText: string;
 }>;
 
 export type CandidatePublicationContext = Readonly<{
@@ -159,7 +165,9 @@ export function projectSnapshotSpellCandidate(value: unknown, context: Readonly<
     throw new CandidateProjectionError("Collector snapshot database file checksum changed across the review boundary.");
   }
   const projection = validateSpellProjection(candidate.attributes);
-  const plain = candidate.body;
+  const metadataText = candidate.sourceVersion.index.metadataEvidenceText;
+  const plain = `${candidate.body}\n\n${metadataText}`;
+  const metadataSectionText = `\n\n${metadataText}`;
   const revision = createCanonicalRevision({
     schemaVersion: 1,
     kind: "canonicalRevision",
@@ -172,6 +180,14 @@ export function projectSnapshotSpellCandidate(value: unknown, context: Readonly<
       rawBlobPath: context.evidence.rawBlobPath,
       fetchedAt: context.evidence.fetchedAt,
       fileChecksumSha256: context.evidence.fileChecksumSha256,
+      index: {
+        url: context.evidence.indexUrl,
+        fingerprintSha256: context.evidence.indexFingerprintSha256,
+        rawBlobPath: context.evidence.rawIndexBlobPath,
+        fetchedAt: context.evidence.indexFetchedAt,
+        cardFingerprintSha256: context.evidence.indexCardFingerprintSha256,
+        metadataEvidenceText: context.evidence.metadataEvidenceText,
+      },
     },
     entry: {
       entryType: "spell",
@@ -181,19 +197,22 @@ export function projectSnapshotSpellCandidate(value: unknown, context: Readonly<
     },
     text: {
       plain,
-      sections: [{ sectionId: "spell-rules", heading: candidate.title, text: plain, startOffset: 0, endOffset: plain.length }],
+      sections: [
+        { sectionId: "spell-rules", heading: candidate.title, text: candidate.body, startOffset: 0, endOffset: candidate.body.length },
+        { sectionId: "source-metadata", heading: "window.LIST card metadata", text: metadataSectionText, startOffset: candidate.body.length, endOffset: plain.length },
+      ],
     },
     citations: candidate.citations.map((citation) => ({
       citationId: `collector-${evidenceKey(citation.fieldPath)}`,
       sourceId: context.source.sourceId,
       fileId: context.fileId,
       page: null,
-      section: candidate.title,
+      section: citation.sourceUrl === context.evidence.indexUrl ? "window.LIST card metadata" : candidate.title,
       quote: citation.quote,
       startOffset: null,
       endOffset: null,
       fieldPath: citation.fieldPath,
-      sourceUrl: context.evidence.sourceUrl,
+      sourceUrl: citation.sourceUrl,
     })),
   });
   assertCanonicalRevision(revision);
@@ -358,22 +377,109 @@ function validateSnapshotSpellCandidate(value: unknown, candidateKey: string, en
     throw new CandidateProjectionError("Typed collector extraction is incomplete.");
   }
   const projection = validateSpellProjection(value.attributes);
+  if (!isRecord(value.sourceVersion.index)
+      || !hasExactKeys(value.sourceVersion.index, ["cardFingerprintSha256", "fetchedAt", "metadataEvidenceText", "rawBlobPath", "sha256", "url"])
+      || value.sourceVersion.index.url !== evidence.indexUrl
+      || value.sourceVersion.index.sha256 !== evidence.indexFingerprintSha256
+      || value.sourceVersion.index.rawBlobPath !== evidence.rawIndexBlobPath
+      || value.sourceVersion.index.fetchedAt !== evidence.indexFetchedAt
+      || value.sourceVersion.index.cardFingerprintSha256 !== evidence.indexCardFingerprintSha256
+      || value.sourceVersion.index.metadataEvidenceText !== evidence.metadataEvidenceText
+      || value.sourceVersion.index.rawBlobPath !== `blobs/${value.sourceVersion.index.sha256}.html`) {
+    throw new CandidateProjectionError("Collector spell index card evidence does not match its persisted occurrence envelope.");
+  }
+  const metadata = parseSpellMetadataEvidence(evidence.metadataEvidenceText);
   const expectedPaths = new Set(["$.title", "$.body", ...Object.keys(projection).map((field) => `$.attributes.${field}`)]);
   if (!Array.isArray(value.citations) || value.citations.length !== expectedPaths.size) {
     throw new CandidateProjectionError("Collector spell requires one citation for every canonical field.");
   }
   for (const citation of value.citations) {
     if (!isRecord(citation) || typeof citation.fieldPath !== "string" || !expectedPaths.delete(citation.fieldPath)
-        || citation.sourceUrl !== evidence.sourceUrl || typeof citation.quote !== "string" || !citation.quote.trim()) {
+        || ![evidence.sourceUrl, evidence.indexUrl].includes(String(citation.sourceUrl))
+        || typeof citation.quote !== "string" || !citation.quote.trim()) {
       throw new CandidateProjectionError("Collector spell field citations do not match immutable snapshot evidence.");
     }
-    const expectedQuote = citation.fieldPath === "$.title" ? value.title : citation.fieldPath === "$.body" ? value.body : null;
-    if ((expectedQuote !== null && citation.quote !== expectedQuote)
-        || (expectedQuote === null && !value.body.includes(citation.quote))) {
-      throw new CandidateProjectionError("Collector spell citation quote is absent from immutable snapshot text.");
-    }
+    validateSnapshotCitation(citation, value, projection, metadata, evidence);
   }
   return value as unknown as SnapshotSpellCandidate;
+}
+
+type SpellMetadataEvidence = Readonly<{
+  level: number | null;
+  school: string | null;
+  ritual: boolean;
+  concentration: boolean;
+  classes: readonly string[];
+}>;
+
+function parseSpellMetadataEvidence(text: string): SpellMetadataEvidence {
+  const lines = text.split("\n");
+  if (lines.shift() !== "window.LIST card metadata") throw new CandidateProjectionError("Collector spell metadata evidence heading is invalid.");
+  const expected = ["level", "school", "ritual", "concentration", "classes"];
+  const values: Record<string, unknown> = {};
+  for (const key of expected) {
+    const line = lines.shift();
+    if (!line?.startsWith(`${key}=`)) throw new CandidateProjectionError(`Collector spell metadata evidence is missing ${key}.`);
+    try { values[key] = JSON.parse(line.slice(key.length + 1)); }
+    catch { throw new CandidateProjectionError(`Collector spell metadata evidence ${key} is invalid JSON.`); }
+  }
+  if (lines.length !== 0 || (values.level !== null && !Number.isInteger(values.level))
+      || (values.school !== null && typeof values.school !== "string") || typeof values.ritual !== "boolean"
+      || typeof values.concentration !== "boolean" || !Array.isArray(values.classes)
+      || values.classes.some((item) => typeof item !== "string")) {
+    throw new CandidateProjectionError("Collector spell metadata evidence shape is invalid.");
+  }
+  return values as SpellMetadataEvidence;
+}
+
+function validateSnapshotCitation(
+  citation: Record<string, unknown>,
+  candidate: Record<string, unknown>,
+  projection: ReturnType<typeof validateSpellProjection>,
+  metadata: SpellMetadataEvidence,
+  evidence: SnapshotSpellEvidence,
+): void {
+  const path = String(citation.fieldPath);
+  const quote = String(citation.quote);
+  const sourceUrl = String(citation.sourceUrl);
+  if (path === "$.title" || path === "$.body") {
+    const expected = path === "$.title" ? candidate.title : candidate.body;
+    if (sourceUrl !== evidence.sourceUrl || quote !== expected) {
+      throw new CandidateProjectionError("Collector spell detail citation is not exact immutable detail evidence.");
+    }
+    return;
+  }
+  const field = path.slice("$.attributes.".length) as keyof typeof projection;
+  const value = projection[field];
+  if (["castingTime", "range", "duration", "components"].includes(field)) {
+    const detailValue = spellDetailEvidence(String(candidate.body))[field as "castingTime" | "range" | "duration" | "components"];
+    if (sourceUrl !== evidence.sourceUrl || quote !== value || value !== detailValue) {
+      throw new CandidateProjectionError(`Collector spell ${field} citation is not its exact detail value.`);
+    }
+    return;
+  }
+  if (field === "concentration" && sourceUrl === evidence.sourceUrl) {
+    if (value !== true || quote !== projection.duration || !String(candidate.body).includes(quote)) {
+      throw new CandidateProjectionError("Collector spell concentration is not supported by exact detail duration evidence.");
+    }
+    return;
+  }
+  const metadataValue = field === "school" ? normalizedSchool(metadata.school) : metadata[field as keyof SpellMetadataEvidence];
+  const expectedQuote = field === "school" ? JSON.stringify(metadata.school) : JSON.stringify(metadata[field as keyof SpellMetadataEvidence]);
+  if (sourceUrl !== evidence.indexUrl || JSON.stringify(value) !== JSON.stringify(metadataValue)
+      || quote !== expectedQuote || !evidence.metadataEvidenceText.includes(`${field}=${quote}`)) {
+    throw new CandidateProjectionError(`Collector spell ${field} is not supported by exact immutable index card evidence.`);
+  }
+}
+
+function normalizedSchool(value: string | null): string | null {
+  if (value === null) return null;
+  const normalized = value.normalize("NFC").trim().toLocaleLowerCase("und");
+  const aliases: Record<string, string> = {
+    ограждение: "abjuration", вызов: "conjuration", прорицание: "divination", очарование: "enchantment",
+    воплощение: "evocation", иллюзия: "illusion", некромантия: "necromancy", преобразование: "transmutation",
+  };
+  return aliases[normalized] ?? normalized;
 }
 
 function typedField(key: string, value: unknown): Readonly<Record<string, JsonValue>> {

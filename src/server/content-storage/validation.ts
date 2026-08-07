@@ -124,6 +124,10 @@ export function assertCanonicalRevision(document: unknown): asserts document is 
     if (!document.source.files.some((file) => file.contentHash === `sha256:${document.sourceVersion!.fileChecksumSha256}`)) {
       throw new ContentIntegrityError("Canonical source version file checksum is absent from its source boundary.");
     }
+    if (normalizeCanonicalHttpUrl(document.sourceVersion.index.url) !== document.sourceVersion.index.url
+        || document.sourceVersion.index.rawBlobPath !== `blobs/${document.sourceVersion.index.fingerprintSha256}.html`) {
+      throw new ContentIntegrityError("Canonical source version index evidence is invalid.");
+    }
   }
   for (const citation of citations) {
     if (citation.sourceId !== document.source.sourceId) {
@@ -135,7 +139,7 @@ export function assertCanonicalRevision(document: unknown): asserts document is 
     if (citation.startOffset === null || citation.endOffset === null) {
       if (citation.startOffset !== null || citation.endOffset !== null || citation.page !== null
           || !citation.fieldPath || !citation.sourceUrl || !document.sourceVersion
-          || citation.sourceUrl !== document.sourceVersion.url) {
+          || ![document.sourceVersion.url, document.sourceVersion.index.url].includes(citation.sourceUrl)) {
         throw new ContentIntegrityError(`External citation ${citation.citationId} has incomplete source-version evidence.`);
       }
     } else {

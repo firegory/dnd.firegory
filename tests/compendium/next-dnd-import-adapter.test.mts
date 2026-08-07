@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { feedNextDndSnapshotToImportRun, nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
+import { feedNextDndSnapshotToImportRun, nextDndImportBatch, spellCandidate } from "../../src/server/compendium/next-dnd/import-adapter.ts";
 import type { NextDndSnapshotManifest, SnapshotResource } from "../../src/server/compendium/next-dnd/collector.ts";
+import { nextDndCardFingerprint } from "../../src/server/compendium/next-dnd/parser.ts";
 
 const resource = (kind: SnapshotResource["kind"], sourceUrl: string, category: SnapshotResource["category"], externalId: string | null, hash: string): SnapshotResource => ({
   kind,
@@ -41,6 +42,10 @@ const manifest: NextDndSnapshotManifest = {
       externalId: "10195",
       normalized: { title: "Метка охотника", contentHtml: "<article>Rules</article>", contentText: "Rules" },
       indexMetadata: { level: 1 },
+      indexSource: {
+        url: indexSnapshot.sourceUrl, fingerprintSha256: indexSnapshot.sha256, rawBlobPath: indexSnapshot.blobPath,
+        fetchedAt: indexSnapshot.fetchedAt, cardFingerprintSha256: nextDndCardFingerprint({ level: 1 }),
+      },
     }],
   }],
 };
@@ -50,10 +55,19 @@ test("maps complete snapshots to stable #75 occurrences and candidates", () => {
   assert.deepEqual(batch.occurrences, [{
     occurrenceIndex: 0, locator: detailSnapshot.sourceUrl, fingerprintSha256: "a".repeat(64),
     rawBlobPath: `blobs/${"a".repeat(64)}.html`, sourceFetchedAt: "2026-08-06T12:00:00.000Z",
+    indexLocator: indexSnapshot.sourceUrl, indexFingerprintSha256: indexSnapshot.sha256,
+    rawIndexBlobPath: indexSnapshot.blobPath, indexSourceFetchedAt: indexSnapshot.fetchedAt,
+    indexCardFingerprintSha256: nextDndCardFingerprint({ level: 1 }),
+    metadataEvidenceText: "window.LIST card metadata\nlevel=1\nschool=null\nritual=false\nconcentration=false\nclasses=[]",
   }]);
   assert.equal(batch.candidates[0].candidateKey, "spells-10195");
   assert.equal(batch.candidates[0].entryType, "spell");
   assert.equal(batch.candidates[0].content.parserVersion, "next-dnd-2024-v3");
+});
+
+test("rejects metadata that does not match the exact collected index card fingerprint", () => {
+  const detail = manifest.categories[0].details[0];
+  assert.throws(() => spellCandidate({ ...detail, indexMetadata: { level: 2 } }), /exact collected window\.LIST card fingerprint/);
 });
 
 test("feeds only occurrence and candidate phases for a complete snapshot", async () => {

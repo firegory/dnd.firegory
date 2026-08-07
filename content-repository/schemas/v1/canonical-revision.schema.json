@@ -16,13 +16,26 @@
     "sourceVersion": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["url", "fingerprintSha256", "rawBlobPath", "fetchedAt", "fileChecksumSha256"],
+      "required": ["url", "fingerprintSha256", "rawBlobPath", "fetchedAt", "fileChecksumSha256", "index"],
       "properties": {
         "url": { "type": "string", "format": "uri", "pattern": "^https://" },
         "fingerprintSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "rawBlobPath": { "type": "string", "pattern": "^blobs/[0-9a-f]{64}\\.html$" },
         "fetchedAt": { "type": "string", "format": "date-time" },
-        "fileChecksumSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "fileChecksumSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "index": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "fingerprintSha256", "rawBlobPath", "fetchedAt", "cardFingerprintSha256", "metadataEvidenceText"],
+          "properties": {
+            "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+            "fingerprintSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "rawBlobPath": { "type": "string", "pattern": "^blobs/[0-9a-f]{64}\\.html$" },
+            "fetchedAt": { "type": "string", "format": "date-time" },
+            "cardFingerprintSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "metadataEvidenceText": { "type": "string", "minLength": 1 }
+          }
+        }
       }
     },
     "entry": {

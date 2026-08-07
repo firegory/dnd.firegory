@@ -58,6 +58,14 @@ export type CanonicalRevision = Readonly<{
     rawBlobPath: string;
     fetchedAt: string;
     fileChecksumSha256: string;
+    index: Readonly<{
+      url: string;
+      fingerprintSha256: string;
+      rawBlobPath: string;
+      fetchedAt: string;
+      cardFingerprintSha256: string;
+      metadataEvidenceText: string;
+    }>;
   }>;
   entry: Readonly<Record<string, JsonValue>>;
   text: Readonly<Record<string, JsonValue>>;

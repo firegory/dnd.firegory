@@ -53,6 +53,12 @@ export type ImportOccurrenceInput = Readonly<{
   chunkId?: string | null;
   rawBlobPath?: string | null;
   sourceFetchedAt?: string | null;
+  indexLocator?: string | null;
+  indexFingerprintSha256?: string | null;
+  rawIndexBlobPath?: string | null;
+  indexSourceFetchedAt?: string | null;
+  indexCardFingerprintSha256?: string | null;
+  metadataEvidenceText?: string | null;
 }>;
 
 export type ImportCandidateInput = Readonly<{
@@ -102,6 +108,12 @@ type OccurrenceRow = Readonly<{
   fingerprint_sha256: string;
   raw_blob_path: string | null;
   source_fetched_at: string | Date | null;
+  index_locator: string | null;
+  index_fingerprint_sha256: string | null;
+  raw_index_blob_path: string | null;
+  index_source_fetched_at: string | Date | null;
+  index_card_fingerprint_sha256: string | null;
+  metadata_evidence_text: string | null;
   created_at: string | Date;
 }>;
 
@@ -263,21 +275,28 @@ export class CompendiumImportRunService {
       }
       for (const occurrence of occurrences) {
         const values = [runId, run.source_id, run.file_id, run.generation_id, occurrence.chunkId ?? null, occurrence.occurrenceIndex, occurrence.locator.trim(), occurrence.fingerprintSha256,
-          occurrence.rawBlobPath ?? null, occurrence.sourceFetchedAt ?? null];
+          occurrence.rawBlobPath ?? null, occurrence.sourceFetchedAt ?? null, occurrence.indexLocator ?? null,
+          occurrence.indexFingerprintSha256 ?? null, occurrence.rawIndexBlobPath ?? null, occurrence.indexSourceFetchedAt ?? null,
+          occurrence.indexCardFingerprintSha256 ?? null, occurrence.metadataEvidenceText ?? null];
         const inserted = await client.query<OccurrenceRow>(
           `INSERT INTO compendium_import_occurrences
-              (import_run_id, source_id, file_id, generation_id, chunk_id, occurrence_index, locator, fingerprint_sha256, raw_blob_path, source_fetched_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+              (import_run_id, source_id, file_id, generation_id, chunk_id, occurrence_index, locator, fingerprint_sha256, raw_blob_path, source_fetched_at,
+               index_locator, index_fingerprint_sha256, raw_index_blob_path, index_source_fetched_at, index_card_fingerprint_sha256, metadata_evidence_text)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
            ON CONFLICT (import_run_id, occurrence_index) DO NOTHING
            RETURNING id, import_run_id, source_id, file_id, generation_id, chunk_id,
-                      occurrence_index, locator, fingerprint_sha256, raw_blob_path, source_fetched_at, created_at`,
+                       occurrence_index, locator, fingerprint_sha256, raw_blob_path, source_fetched_at,
+                       index_locator, index_fingerprint_sha256, raw_index_blob_path, index_source_fetched_at,
+                       index_card_fingerprint_sha256, metadata_evidence_text, created_at`,
           values,
         );
         let persisted = inserted.rows[0];
         if (!persisted) {
           persisted = (await client.query<OccurrenceRow>(
             `SELECT id, import_run_id, source_id, file_id, generation_id, chunk_id,
-                     occurrence_index, locator, fingerprint_sha256, raw_blob_path, source_fetched_at, created_at
+                     occurrence_index, locator, fingerprint_sha256, raw_blob_path, source_fetched_at,
+                     index_locator, index_fingerprint_sha256, raw_index_blob_path, index_source_fetched_at,
+                     index_card_fingerprint_sha256, metadata_evidence_text, created_at
              FROM compendium_import_occurrences
              WHERE import_run_id = $1 AND occurrence_index = $2`,
             [runId, occurrence.occurrenceIndex],
@@ -321,7 +340,9 @@ export class CompendiumImportRunService {
       }
       const occurrences = await client.query<OccurrenceRow>(
         `SELECT id, import_run_id, source_id, file_id, generation_id, chunk_id,
-                 occurrence_index, locator, fingerprint_sha256, raw_blob_path, source_fetched_at, created_at
+                 occurrence_index, locator, fingerprint_sha256, raw_blob_path, source_fetched_at,
+                 index_locator, index_fingerprint_sha256, raw_index_blob_path, index_source_fetched_at,
+                 index_card_fingerprint_sha256, metadata_evidence_text, created_at
          FROM compendium_import_occurrences
          WHERE import_run_id = $1 ORDER BY occurrence_index, id`,
         [runId],
@@ -631,7 +652,13 @@ function occurrenceMatches(row: OccurrenceRow, run: RunRow, input: ImportOccurre
     && row.locator === input.locator.trim()
     && row.fingerprint_sha256 === input.fingerprintSha256
     && (row.raw_blob_path ?? null) === (input.rawBlobPath ?? null)
-    && nullableTimestamp(row.source_fetched_at ?? null) === (input.sourceFetchedAt ?? null);
+    && nullableTimestamp(row.source_fetched_at ?? null) === (input.sourceFetchedAt ?? null)
+    && (row.index_locator ?? null) === (input.indexLocator ?? null)
+    && (row.index_fingerprint_sha256 ?? null) === (input.indexFingerprintSha256 ?? null)
+    && (row.raw_index_blob_path ?? null) === (input.rawIndexBlobPath ?? null)
+    && nullableTimestamp(row.index_source_fetched_at ?? null) === (input.indexSourceFetchedAt ?? null)
+    && (row.index_card_fingerprint_sha256 ?? null) === (input.indexCardFingerprintSha256 ?? null)
+    && (row.metadata_evidence_text ?? null) === (input.metadataEvidenceText ?? null);
 }
 
 function occurrenceManifest(row: OccurrenceRow): Readonly<Record<string, unknown>> {
@@ -647,6 +674,12 @@ function occurrenceManifest(row: OccurrenceRow): Readonly<Record<string, unknown
     fingerprintSha256: row.fingerprint_sha256,
     rawBlobPath: row.raw_blob_path,
     sourceFetchedAt: nullableTimestamp(row.source_fetched_at),
+    indexLocator: row.index_locator,
+    indexFingerprintSha256: row.index_fingerprint_sha256,
+    rawIndexBlobPath: row.raw_index_blob_path,
+    indexSourceFetchedAt: nullableTimestamp(row.index_source_fetched_at),
+    indexCardFingerprintSha256: row.index_card_fingerprint_sha256,
+    metadataEvidenceText: row.metadata_evidence_text,
     createdAt: timestamp(row.created_at),
   };
 }
@@ -754,6 +787,23 @@ function validateRawOccurrenceEvidence(input: ImportOccurrenceInput): void {
   if (path !== null && path !== `blobs/${input.fingerprintSha256}.html`) throw new CompendiumValidationError("rawBlobPath must match the occurrence fingerprint.");
   if (fetchedAt !== null && (!Number.isFinite(Date.parse(fetchedAt)) || new Date(fetchedAt).toISOString() !== fetchedAt)) {
     throw new CompendiumValidationError("sourceFetchedAt must be a canonical date-time.");
+  }
+  const indexValues = [input.indexLocator, input.indexFingerprintSha256, input.rawIndexBlobPath,
+    input.indexSourceFetchedAt, input.indexCardFingerprintSha256, input.metadataEvidenceText].map((value) => value ?? null);
+  if (indexValues.some((value) => value !== null) && indexValues.some((value) => value === null)) {
+    throw new CompendiumValidationError("Index occurrence evidence must be supplied as one complete immutable envelope.");
+  }
+  if (input.indexFingerprintSha256 != null) {
+    requireHash(input.indexFingerprintSha256, "indexFingerprintSha256");
+    requireHash(input.indexCardFingerprintSha256!, "indexCardFingerprintSha256");
+    requireText(input.indexLocator!, "indexLocator");
+    requireText(input.metadataEvidenceText!, "metadataEvidenceText");
+    if (input.rawIndexBlobPath !== `blobs/${input.indexFingerprintSha256}.html`) {
+      throw new CompendiumValidationError("rawIndexBlobPath must match the index fingerprint.");
+    }
+    if (!Number.isFinite(Date.parse(input.indexSourceFetchedAt!)) || new Date(input.indexSourceFetchedAt!).toISOString() !== input.indexSourceFetchedAt) {
+      throw new CompendiumValidationError("indexSourceFetchedAt must be a canonical date-time.");
+    }
   }
 }
 

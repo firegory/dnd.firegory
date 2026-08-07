@@ -111,6 +111,12 @@ type CandidateRow = QueryResultRow & Readonly<{
   previous_fingerprint_sha256: string | null;
   previous_raw_blob_path: string | null;
   previous_source_fetched_at: Date | string | null;
+  previous_index_locator: string | null;
+  previous_index_fingerprint_sha256: string | null;
+  previous_raw_index_blob_path: string | null;
+  previous_index_source_fetched_at: Date | string | null;
+  previous_index_card_fingerprint_sha256: string | null;
+  previous_metadata_evidence_text: string | null;
   previous_chunk_id: string | null;
   previous_page_number: number | null;
   previous_chunk_index: number | null;
@@ -124,6 +130,12 @@ type CandidateRow = QueryResultRow & Readonly<{
   occurrence_fingerprint_sha256: string | null;
   occurrence_raw_blob_path: string | null;
   occurrence_source_fetched_at: Date | string | null;
+  occurrence_index_locator: string | null;
+  occurrence_index_fingerprint_sha256: string | null;
+  occurrence_raw_index_blob_path: string | null;
+  occurrence_index_source_fetched_at: Date | string | null;
+  occurrence_index_card_fingerprint_sha256: string | null;
+  occurrence_metadata_evidence_text: string | null;
   file_checksum_sha256: string;
   chunk_id: string | null;
   page_number: number | null;
@@ -448,14 +460,26 @@ function candidateSelect(suffix: string): string {
                  candidate.invalid_reason, candidate.created_at, run.status AS run_status,
                   occurrence.locator, occurrence.fingerprint_sha256 AS occurrence_fingerprint_sha256,
                   occurrence.raw_blob_path AS occurrence_raw_blob_path,
-                  occurrence.source_fetched_at AS occurrence_source_fetched_at,
+                   occurrence.source_fetched_at AS occurrence_source_fetched_at,
+                   occurrence.index_locator AS occurrence_index_locator,
+                   occurrence.index_fingerprint_sha256 AS occurrence_index_fingerprint_sha256,
+                   occurrence.raw_index_blob_path AS occurrence_raw_index_blob_path,
+                   occurrence.index_source_fetched_at AS occurrence_index_source_fetched_at,
+                   occurrence.index_card_fingerprint_sha256 AS occurrence_index_card_fingerprint_sha256,
+                   occurrence.metadata_evidence_text AS occurrence_metadata_evidence_text,
                   source_file.checksum_sha256 AS file_checksum_sha256,
                   occurrence.chunk_id, chunk.page_number, chunk.chunk_index,
                  chunk.section_heading, chunk.quote_text,
                   previous.occurrence_id AS previous_occurrence_id, previous_occurrence.locator AS previous_locator,
                   previous_occurrence.fingerprint_sha256 AS previous_fingerprint_sha256,
                   previous_occurrence.raw_blob_path AS previous_raw_blob_path,
-                  previous_occurrence.source_fetched_at AS previous_source_fetched_at,
+                   previous_occurrence.source_fetched_at AS previous_source_fetched_at,
+                   previous_occurrence.index_locator AS previous_index_locator,
+                   previous_occurrence.index_fingerprint_sha256 AS previous_index_fingerprint_sha256,
+                   previous_occurrence.raw_index_blob_path AS previous_raw_index_blob_path,
+                   previous_occurrence.index_source_fetched_at AS previous_index_source_fetched_at,
+                   previous_occurrence.index_card_fingerprint_sha256 AS previous_index_card_fingerprint_sha256,
+                   previous_occurrence.metadata_evidence_text AS previous_metadata_evidence_text,
                   previous_occurrence.chunk_id AS previous_chunk_id,
                  previous_chunk.page_number AS previous_page_number, previous_chunk.chunk_index AS previous_chunk_index,
                  previous_chunk.section_heading AS previous_section_heading, previous_chunk.quote_text AS previous_quote_text,
@@ -579,6 +603,12 @@ async function buildPreviousRevision(client: DbClient, row: CandidateRow): Promi
     occurrence_fingerprint_sha256: row.previous_fingerprint_sha256,
     occurrence_raw_blob_path: row.previous_raw_blob_path,
     occurrence_source_fetched_at: row.previous_source_fetched_at,
+    occurrence_index_locator: row.previous_index_locator,
+    occurrence_index_fingerprint_sha256: row.previous_index_fingerprint_sha256,
+    occurrence_raw_index_blob_path: row.previous_raw_index_blob_path,
+    occurrence_index_source_fetched_at: row.previous_index_source_fetched_at,
+    occurrence_index_card_fingerprint_sha256: row.previous_index_card_fingerprint_sha256,
+    occurrence_metadata_evidence_text: row.previous_metadata_evidence_text,
     created_at: row.previous_created_at,
   }, content);
 }
@@ -664,12 +694,16 @@ function previousChainError(row: CandidateRow): string | null {
 
 function currentSnapshotEvidence(row: CandidateRow): SnapshotSpellEvidence | null {
   return snapshotEvidence(row.locator, row.occurrence_fingerprint_sha256, row.occurrence_raw_blob_path,
-    row.occurrence_source_fetched_at, row.file_checksum_sha256);
+    row.occurrence_source_fetched_at, row.file_checksum_sha256, row.occurrence_index_locator,
+    row.occurrence_index_fingerprint_sha256, row.occurrence_raw_index_blob_path, row.occurrence_index_source_fetched_at,
+    row.occurrence_index_card_fingerprint_sha256, row.occurrence_metadata_evidence_text);
 }
 
 function previousSnapshotEvidence(row: CandidateRow): SnapshotSpellEvidence | null {
   return snapshotEvidence(row.previous_locator, row.previous_fingerprint_sha256, row.previous_raw_blob_path,
-    row.previous_source_fetched_at, row.file_checksum_sha256);
+    row.previous_source_fetched_at, row.file_checksum_sha256, row.previous_index_locator,
+    row.previous_index_fingerprint_sha256, row.previous_raw_index_blob_path, row.previous_index_source_fetched_at,
+    row.previous_index_card_fingerprint_sha256, row.previous_metadata_evidence_text);
 }
 
 function snapshotEvidence(
@@ -678,10 +712,22 @@ function snapshotEvidence(
   rawBlobPath: string | null,
   fetchedAt: Date | string | null,
   fileChecksumSha256: string | null,
+  indexUrl: string | null,
+  indexFingerprintSha256: string | null,
+  rawIndexBlobPath: string | null,
+  indexFetchedAt: Date | string | null,
+  indexCardFingerprintSha256: string | null,
+  metadataEvidenceText: string | null,
 ): SnapshotSpellEvidence | null {
-  if (!sourceUrl || !fingerprintSha256 || !rawBlobPath || !fetchedAt || !fileChecksumSha256
-      || rawBlobPath !== `blobs/${fingerprintSha256}.html`) return null;
-  return { sourceUrl, fingerprintSha256, rawBlobPath, fetchedAt: iso(fetchedAt), fileChecksumSha256 };
+  if (!sourceUrl || !fingerprintSha256 || !rawBlobPath || !fetchedAt || !fileChecksumSha256 || !indexUrl
+      || !indexFingerprintSha256 || !rawIndexBlobPath || !indexFetchedAt || !indexCardFingerprintSha256
+      || !metadataEvidenceText || rawBlobPath !== `blobs/${fingerprintSha256}.html`
+      || rawIndexBlobPath !== `blobs/${indexFingerprintSha256}.html`) return null;
+  return {
+    sourceUrl, fingerprintSha256, rawBlobPath, fetchedAt: iso(fetchedAt), fileChecksumSha256,
+    indexUrl, indexFingerprintSha256, rawIndexBlobPath, indexFetchedAt: iso(indexFetchedAt),
+    indexCardFingerprintSha256, metadataEvidenceText,
+  };
 }
 
 function lockCollectorSpellMerge(row: CandidateRow, resolved: Record<string, unknown>): Record<string, unknown> {

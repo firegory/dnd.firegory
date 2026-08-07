@@ -1,5 +1,5 @@
 import type { CompendiumImportRunService, ImportCandidateInput, ImportOccurrenceInput } from "../import-runs.ts";
-import { NEXT_DND_CATEGORIES } from "./parser.ts";
+import { NEXT_DND_CATEGORIES, nextDndCardFingerprint } from "./parser.ts";
 import type { NextDndSnapshotManifest, SnapshotDetail } from "./collector.ts";
 import { SPELL_SCHOOLS, type SpellSchool } from "../spell-schema.ts";
 
@@ -18,6 +18,12 @@ export function nextDndImportBatch(manifest: NextDndSnapshotManifest): Readonly<
       fingerprintSha256: detail.sha256,
       rawBlobPath: detail.blobPath,
       sourceFetchedAt: detail.fetchedAt,
+      indexLocator: detail.indexSource.url,
+      indexFingerprintSha256: detail.indexSource.fingerprintSha256,
+      rawIndexBlobPath: detail.indexSource.rawBlobPath,
+      indexSourceFetchedAt: detail.indexSource.fetchedAt,
+      indexCardFingerprintSha256: detail.indexSource.cardFingerprintSha256,
+      metadataEvidenceText: detail.category === "spells" ? spellMetadataEvidence(detail.indexMetadata) : null,
     })),
     candidates: details.map((detail, occurrenceIndex) => candidate(detail, occurrenceIndex)),
   };
@@ -108,7 +114,20 @@ export type SnapshotSpellCandidate = Readonly<{
     ritual: boolean;
     classes: readonly string[];
   }>;
-  sourceVersion: Readonly<{ url: string; sha256: string; rawBlobPath: string; fetchedAt: string }>;
+  sourceVersion: Readonly<{
+    url: string;
+    sha256: string;
+    rawBlobPath: string;
+    fetchedAt: string;
+    index: Readonly<{
+      url: string;
+      sha256: string;
+      rawBlobPath: string;
+      fetchedAt: string;
+      cardFingerprintSha256: string;
+      metadataEvidenceText: string;
+    }>;
+  }>;
   citations: readonly Readonly<{ fieldPath: string; quote: string; sourceUrl: string }>[];
   extraction: Readonly<{ status: "ready" | "needs_review"; missingFields: readonly string[] }>;
 }>;
@@ -117,6 +136,9 @@ export type SnapshotSpellCandidate = Readonly<{
 export function spellCandidate(detail: SnapshotDetail): SnapshotSpellCandidate {
   if (detail.category !== "spells") throw new Error("Snapshot spell projection only accepts spell details.");
   const metadata = detail.indexMetadata;
+  if (nextDndCardFingerprint(metadata) !== detail.indexSource.cardFingerprintSha256) {
+    throw new Error("Snapshot spell metadata does not match the exact collected window.LIST card fingerprint.");
+  }
   const text = detail.normalized.contentText;
   const level = integer(metadata.level, 0, 9);
   const school = spellSchool(metadata.school ?? metadata.item_icon_title);
@@ -131,6 +153,7 @@ export function spellCandidate(detail: SnapshotDetail): SnapshotSpellCandidate {
   const aliases = typeof metadata.title_en === "string" && metadata.title_en.trim()
     ? [metadata.title_en.trim()] : [];
   const attributes = { level, school, castingTime, range, duration, components, concentration, ritual, classes };
+  const metadataEvidenceText = spellMetadataEvidence(metadata);
   const missingFields = Object.entries(attributes)
     .filter(([, value]) => value === null)
     .map(([name]) => name);
@@ -139,15 +162,28 @@ export function spellCandidate(detail: SnapshotDetail): SnapshotSpellCandidate {
     { fieldPath: "$.body", quote: text, sourceUrl: detail.sourceUrl },
     ...Object.entries(attributes).filter(([, value]) => value !== null).map(([name, value]) => ({
       fieldPath: `$.attributes.${name}`,
-      quote: evidenceQuote(value, text),
-      sourceUrl: detail.sourceUrl,
+      quote: attributeEvidenceQuote(name, value, metadata, text),
+      sourceUrl: detailEvidenceField(name, metadata, text) ? detail.sourceUrl : detail.indexSource.url,
     })),
   ];
   return {
     schemaVersion: 1, kind: "snapshotSpellCandidate", externalId: detail.externalId,
     sourceUrl: detail.sourceUrl, sha256: detail.sha256, parserVersion: detail.parserVersion,
     title: detail.normalized.title, aliases, body: text, attributes,
-    sourceVersion: { url: detail.sourceUrl, sha256: detail.sha256, rawBlobPath: detail.blobPath, fetchedAt: detail.fetchedAt },
+    sourceVersion: {
+      url: detail.sourceUrl,
+      sha256: detail.sha256,
+      rawBlobPath: detail.blobPath,
+      fetchedAt: detail.fetchedAt,
+      index: {
+        url: detail.indexSource.url,
+        sha256: detail.indexSource.fingerprintSha256,
+        rawBlobPath: detail.indexSource.rawBlobPath,
+        fetchedAt: detail.indexSource.fetchedAt,
+        cardFingerprintSha256: detail.indexSource.cardFingerprintSha256,
+        metadataEvidenceText,
+      },
+    },
     citations, extraction: { status: missingFields.length === 0 ? "ready" : "needs_review", missingFields },
   };
 }
@@ -185,7 +221,51 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function evidenceQuote(value: unknown, text: string): string {
-  const serialized = String(value);
-  return text.includes(serialized) ? serialized : text;
+export function spellMetadataEvidence(metadata: Readonly<Record<string, unknown>>): string {
+  const tags = record(metadata.item_tags);
+  const values = {
+    level: integer(metadata.level, 0, 9),
+    school: typeof (metadata.school ?? metadata.item_icon_title) === "string"
+      ? String(metadata.school ?? metadata.item_icon_title).normalize("NFC").trim() : null,
+    ritual: Boolean(tags.ritual) || /(?:ritual|ритуал)/iu.test(String(metadata.item_prefix_title ?? "")),
+    concentration: Boolean(tags.concentration),
+    classes: stringIds(metadata.filter_class, "class"),
+  };
+  return ["window.LIST card metadata", ...Object.entries(values).map(([key, value]) => `${key}=${JSON.stringify(value)}`)].join("\n");
+}
+
+export function spellDetailEvidence(text: string): Readonly<{
+  castingTime: string | null;
+  range: string | null;
+  duration: string | null;
+  components: string | null;
+}> {
+  return {
+    castingTime: labelledValue(text, ["Casting Time", "Время накладывания", "Время сотворения"]),
+    range: labelledValue(text, ["Range", "Дистанция", "Дальность"]),
+    duration: labelledValue(text, ["Duration", "Длительность"]),
+    components: labelledValue(text, ["Components", "Компоненты"]),
+  };
+}
+
+function detailEvidenceField(name: string, metadata: Readonly<Record<string, unknown>>, text: string): boolean {
+  if (["castingTime", "range", "duration", "components"].includes(name)) return true;
+  if (name === "concentration") {
+    const duration = labelledValue(text, ["Duration", "Длительность"]);
+    return !Boolean(record(metadata.item_tags).concentration) && /(?:concentration|концентрац)/iu.test(duration ?? "");
+  }
+  return false;
+}
+
+function attributeEvidenceQuote(name: string, value: unknown, metadata: Readonly<Record<string, unknown>>, text: string): string {
+  if (["castingTime", "range", "duration", "components"].includes(name)) return String(value);
+  if (name === "concentration" && detailEvidenceField(name, metadata, text)) {
+    const duration = labelledValue(text, ["Duration", "Длительность"]);
+    if (!duration) throw new Error("Concentration detail evidence is absent.");
+    return duration;
+  }
+  if (name === "school") {
+    return JSON.stringify(String(metadata.school ?? metadata.item_icon_title).normalize("NFC").trim());
+  }
+  return JSON.stringify(value);
 }

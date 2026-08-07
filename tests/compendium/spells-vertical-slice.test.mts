@@ -4,7 +4,8 @@ import test from "node:test";
 
 import { classifyCandidatePublication, projectSnapshotSpellCandidate } from "../../src/server/compendium/candidate-publication.ts";
 import { parseSpellListOptions } from "../../src/server/compendium/spell-http.ts";
-import { spellCandidate } from "../../src/server/compendium/next-dnd/import-adapter.ts";
+import { nextDndImportBatch, spellCandidate } from "../../src/server/compendium/next-dnd/import-adapter.ts";
+import { nextDndCardFingerprint } from "../../src/server/compendium/next-dnd/parser.ts";
 import { SpellReadInputError, SpellReadService } from "../../src/server/compendium/spell-read-service.ts";
 import { validateSpellProjection } from "../../src/server/compendium/spell-schema.ts";
 import { projectCanonicalRevisions } from "../../src/server/content-index/projection.ts";
@@ -37,7 +38,25 @@ const detail = {
     level: 1, school: "Прорицание", title_en: "Hunter's Mark", filter_class: [17],
     item_tags: { concentration: { tag_value: "C" } },
   },
+  indexSource: {
+    url: "https://next.dnd.su/spells/", fingerprintSha256: "c".repeat(64),
+    rawBlobPath: `blobs/${"c".repeat(64)}.html`, fetchedAt: "2026-08-06T11:59:00.000Z",
+    cardFingerprintSha256: nextDndCardFingerprint({
+      level: 1, school: "Прорицание", title_en: "Hunter's Mark", filter_class: [17],
+      item_tags: { concentration: { tag_value: "C" } },
+    }),
+  },
 } as const;
+
+function snapshotEvidence(record: typeof detail | ReturnType<typeof spellDetailsFixture>[number]) {
+  return {
+    sourceUrl: record.sourceUrl, fingerprintSha256: record.sha256, rawBlobPath: record.blobPath,
+    fetchedAt: record.fetchedAt, fileChecksumSha256: "d".repeat(64), indexUrl: record.indexSource.url,
+    indexFingerprintSha256: record.indexSource.fingerprintSha256, rawIndexBlobPath: record.indexSource.rawBlobPath,
+    indexFetchedAt: record.indexSource.fetchedAt, indexCardFingerprintSha256: record.indexSource.cardFingerprintSha256,
+    metadataEvidenceText: spellCandidate(record as never).sourceVersion.index.metadataEvidenceText,
+  };
+}
 
 test("collector spell becomes a cited canonical candidate and NFS database projection", () => {
   const candidate = spellCandidate(detail as never);
@@ -52,15 +71,13 @@ test("collector spell becomes a cited canonical candidate and NFS database proje
 
   const revision = projectSnapshotSpellCandidate(candidate, {
     candidateKey: "spells-10195", createdAt: "2026-08-06T12:01:00.000Z", source, fileId: fileUuid,
-    evidence: {
-      sourceUrl: detail.sourceUrl, fingerprintSha256: detail.sha256, rawBlobPath: detail.blobPath,
-      fetchedAt: detail.fetchedAt, fileChecksumSha256: "d".repeat(64),
-    },
+    evidence: snapshotEvidence(detail),
   });
   assert.equal(revision.entryId, "spell-spells-10195");
   assert.equal(revision.entry.entryType, "spell");
   assert.equal(revision.citations.length, 11);
-  assert.equal(revision.citations.every((citation) => citation.page === null && citation.sourceUrl === detail.sourceUrl), true);
+  assert.equal(revision.citations.every((citation) => citation.page === null
+    && [detail.sourceUrl, detail.indexSource.url].includes(String(citation.sourceUrl))), true);
   assert.equal(revision.sourceVersion?.fileChecksumSha256, "d".repeat(64));
 
   const [projection] = projectCanonicalRevisions("fixture", [revision], [{
@@ -88,33 +105,44 @@ test("self-consistent submitted provenance cannot replace persisted occurrence o
   candidate.sha256 = attackerHash;
   candidate.sourceVersion = {
     url: candidate.sourceUrl, sha256: attackerHash, rawBlobPath: `blobs/${attackerHash}.html`, fetchedAt: candidate.sourceVersion.fetchedAt,
+    index: candidate.sourceVersion.index,
   };
   candidate.citations = candidate.citations.map((citation) => ({ ...citation, sourceUrl: candidate.sourceUrl }));
   const capability = classifyCandidatePublication(candidate, {
     candidateKey: "spells-10195", entryType: "spell", sourceId: sourceUuid, fileId: fileUuid, generationId: null,
     edition: "5.5e", language: "ru", accessTier: "open", shared: false, ownerUserId: null, chunk: null,
-    snapshotEvidence: { sourceUrl: detail.sourceUrl, fingerprintSha256: detail.sha256, rawBlobPath: detail.blobPath,
-      fetchedAt: detail.fetchedAt, fileChecksumSha256: "d".repeat(64) },
+    snapshotEvidence: snapshotEvidence(detail),
   });
   assert.equal(capability.publicationCapability, "requires_extraction");
   assert.match(capability.publicationBlockReason!, /persisted occurrence/);
 });
 
-test("all 411 collector records transform with database-bound field evidence", () => {
+test("all 411 parsed index cards transform through occurrence, review, projection, sync, and service mapping", async () => {
   const details = spellDetailsFixture();
-  const revisions = details.map((record) => {
-    const candidate = spellCandidate(record);
+  const batch = nextDndImportBatch({
+    schemaVersion: 2, parserVersion: "next-dnd-2024-v3", status: "complete", collectedAt: details[0].fetchedAt,
+    robots: { userAgent: "fixture", snapshot: {} as never, rules: [], evaluations: [] }, parserFailures: [], diagnostics: [],
+    categories: [{ requestedCategory: "spells", discoveredCategory: "spells", entryCount: details.length,
+      index: {} as never, details }],
+  });
+  assert.equal(batch.occurrences.length, 411);
+  const revisions = batch.candidates.map((record, index) => {
+    const candidate = record.content;
+    const occurrence = batch.occurrences[index];
     const evidence = {
-      sourceUrl: record.sourceUrl, fingerprintSha256: record.sha256, rawBlobPath: record.blobPath,
-      fetchedAt: record.fetchedAt, fileChecksumSha256: "d".repeat(64),
+      sourceUrl: occurrence.locator, fingerprintSha256: occurrence.fingerprintSha256, rawBlobPath: occurrence.rawBlobPath!,
+      fetchedAt: occurrence.sourceFetchedAt!, fileChecksumSha256: "d".repeat(64), indexUrl: occurrence.indexLocator!,
+      indexFingerprintSha256: occurrence.indexFingerprintSha256!, rawIndexBlobPath: occurrence.rawIndexBlobPath!,
+      indexFetchedAt: occurrence.indexSourceFetchedAt!, indexCardFingerprintSha256: occurrence.indexCardFingerprintSha256!,
+      metadataEvidenceText: occurrence.metadataEvidenceText!,
     };
     assert.equal(classifyCandidatePublication(candidate, {
-      candidateKey: `spells-${record.externalId}`, entryType: "spell", sourceId: sourceUuid, fileId: fileUuid,
+      candidateKey: record.candidateKey!, entryType: "spell", sourceId: sourceUuid, fileId: fileUuid,
       generationId: null, edition: "5.5e", language: "ru", accessTier: "open", shared: false,
       ownerUserId: null, chunk: null, snapshotEvidence: evidence,
     }).publicationCapability, "publishable");
     return projectSnapshotSpellCandidate(candidate, {
-      candidateKey: `spells-${record.externalId}`, createdAt: record.fetchedAt, source, fileId: fileUuid, evidence,
+      candidateKey: record.candidateKey!, createdAt: details[index].fetchedAt, source, fileId: fileUuid, evidence,
     });
   });
   assert.equal(revisions.length, 411);
@@ -125,6 +153,23 @@ test("all 411 collector records transform with database-bound field evidence", (
   }]);
   assert.equal(projections.length, 411);
   assert.equal(projections.every((projection) => projection.pages.length === 0 && projection.chunks[0].pageNumber === null), true);
+  for (const [index, revision] of revisions.entries()) {
+    const metadata = revision.sourceVersion!.index.metadataEvidenceText;
+    for (const citation of revision.citations.filter((item) => String(item.fieldPath).startsWith("$.attributes."))) {
+      const quote = String(citation.quote);
+      assert.equal(citation.sourceUrl === revision.sourceVersion!.index.url ? metadata.includes(quote) : revision.text.plain.includes(quote), true);
+      assert.notEqual(quote, details[index].normalized.contentText, "typed fields never use whole-body fallback evidence");
+    }
+  }
+  const mapped = await Promise.all(projections.map(async (projection) => {
+    const synced = nfsIndexEntryRow("fixture-411", projection);
+    const row = { ...synced, mime_type: source.files[0].mediaType, source_title: source.title, edition: source.edition,
+      language: source.language, publication_code: source.publication.code, publication_revision: source.publication.revision,
+      source_priority: source.publication.sourcePriority, sort_title: synced.name.toLocaleLowerCase("und"), source_versions: [] };
+    return new SpellReadService({ async query() { return { rows: [row] }; } }).get({ role: "user" }, synced.entry_id);
+  }));
+  assert.equal(mapped.length, 411);
+  assert.equal(mapped.every((spell, index) => spell.id === projections[index].entryId && spell.citations.length === 11), true);
 });
 
 test("all typed filters restore from URL and reject malformed values", () => {
@@ -172,8 +217,7 @@ test("real NFS projection sync rows map through the spell service contract", asy
   const candidate = spellCandidate(detail as never);
   const revision = projectSnapshotSpellCandidate(candidate, {
     candidateKey: "spells-10195", createdAt: "2026-08-06T12:01:00.000Z", source, fileId: fileUuid,
-    evidence: { sourceUrl: detail.sourceUrl, fingerprintSha256: detail.sha256, rawBlobPath: detail.blobPath,
-      fetchedAt: detail.fetchedAt, fileChecksumSha256: "d".repeat(64) },
+    evidence: snapshotEvidence(detail),
   });
   const [projection] = projectCanonicalRevisions("fixture", [revision], [{
     sourceId: source.sourceId, fileId: fileUuid, path: source.files[0].path,
@@ -218,7 +262,11 @@ test("PDF rows expose previews while external rows expose source links", async (
 
   const snapshotRow = { ...row, mime_type: "text/html", canonical_payload: {
     sourceVersion: { url: detail.sourceUrl, fingerprintSha256: detail.sha256, rawBlobPath: detail.blobPath,
-      fetchedAt: detail.fetchedAt, fileChecksumSha256: "d".repeat(64) },
+      fetchedAt: detail.fetchedAt, fileChecksumSha256: "d".repeat(64), index: {
+        url: detail.indexSource.url, fingerprintSha256: detail.indexSource.fingerprintSha256,
+        rawBlobPath: detail.indexSource.rawBlobPath, fetchedAt: detail.indexSource.fetchedAt,
+        cardFingerprintSha256: detail.indexSource.cardFingerprintSha256,
+      } },
     citations: [{ citationId: "spell-body", page: null, quote: "Mark one creature", section: "Spells",
       fieldPath: "$.body", sourceUrl: detail.sourceUrl }],
   } };

@@ -6,6 +6,7 @@ import { extractCandidates } from "../../src/server/compendium/candidate-extract
 import { projectExtractedCandidate, projectSnapshotSpellCandidate } from "../../src/server/compendium/candidate-publication.ts";
 import { CompendiumImportReviewService } from "../../src/server/compendium/import-review.ts";
 import { nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
+import { nextDndCardFingerprint } from "../../src/server/compendium/next-dnd/parser.ts";
 
 const runId = "11111111-1111-4111-8111-111111111111";
 const candidateId = "22222222-2222-4222-8222-222222222222";
@@ -53,6 +54,10 @@ const collectorContent = nextDndImportBatch({
     blobPath: `blobs/${"f".repeat(64)}.html`,
     normalized: { title: "Метка охотника", contentHtml: "<article>Rules</article>", contentText: "Casting Time: 1 bonus action. Range: 90 feet. Components: V. Duration: Concentration, up to 1 hour. Mark one creature you can see." },
     indexMetadata: { level: 1, school: "Прорицание", title_en: "Hunter's Mark", filter_class: [17], item_tags: { concentration: true } },
+    indexSource: { url: "https://next.dnd.su/spells/", fingerprintSha256: "c".repeat(64),
+      rawBlobPath: `blobs/${"c".repeat(64)}.html`, fetchedAt: "2026-08-06T11:59:00.000Z",
+      cardFingerprintSha256: nextDndCardFingerprint({ level: 1, school: "Прорицание", title_en: "Hunter's Mark",
+        filter_class: [17], item_tags: { concentration: true } }) },
   }] }],
 } as never).candidates[0].content;
 
@@ -69,12 +74,27 @@ function candidate(overrides: Record<string, unknown> = {}) {
     previous_content: null, invalid_reason: null, locator: "page:1", ...chunkFields(),
     occurrence_fingerprint_sha256: "f".repeat(64), occurrence_raw_blob_path: `blobs/${"f".repeat(64)}.html`,
     occurrence_source_fetched_at: "2026-08-06T12:00:00.000Z", file_checksum_sha256: "a".repeat(64),
+    occurrence_index_locator: collectorIndexEvidence().url,
+    occurrence_index_fingerprint_sha256: collectorIndexEvidence().sha256,
+    occurrence_raw_index_blob_path: collectorIndexEvidence().rawBlobPath,
+    occurrence_index_source_fetched_at: collectorIndexEvidence().fetchedAt,
+    occurrence_index_card_fingerprint_sha256: collectorIndexEvidence().cardFingerprintSha256,
+    occurrence_metadata_evidence_text: collectorIndexEvidence().metadataEvidenceText,
     previous_fingerprint_sha256: "f".repeat(64), previous_raw_blob_path: `blobs/${"f".repeat(64)}.html`,
     previous_source_fetched_at: "2026-08-06T12:00:00.000Z",
+    previous_index_locator: collectorIndexEvidence().url, previous_index_fingerprint_sha256: collectorIndexEvidence().sha256,
+    previous_raw_index_blob_path: collectorIndexEvidence().rawBlobPath, previous_index_source_fetched_at: collectorIndexEvidence().fetchedAt,
+    previous_index_card_fingerprint_sha256: collectorIndexEvidence().cardFingerprintSha256,
+    previous_metadata_evidence_text: collectorIndexEvidence().metadataEvidenceText,
     created_at: "2026-08-06T00:00:00.000Z", run_status: "succeeded", decision: null, resolved_content: null,
     publication_status: null, publication_attempt: null, idempotency_key: null, last_error: null, reviewed_by: null, reviewed_at: null,
     expected_active_revision_id: null, expected_active_revision_captured: false,
     ...overrides };
+}
+
+function collectorIndexEvidence() {
+  const index = (collectorContent.sourceVersion as { index: Record<string, string> }).index;
+  return index as { url: string; sha256: string; rawBlobPath: string; fetchedAt: string; cardFingerprintSha256: string; metadataEvidenceText: string };
 }
 
 function missingCandidate(overrides: Record<string, unknown> = {}) {
@@ -129,6 +149,10 @@ const previousCollectorRevision = projectSnapshotSpellCandidate(collectorContent
     sourceUrl: "https://next.dnd.su/spells/10195-hunters-mark", fingerprintSha256: "f".repeat(64),
     rawBlobPath: `blobs/${"f".repeat(64)}.html`, fetchedAt: "2026-08-06T12:00:00.000Z",
     fileChecksumSha256: "a".repeat(64),
+    indexUrl: collectorIndexEvidence().url, indexFingerprintSha256: collectorIndexEvidence().sha256,
+    rawIndexBlobPath: collectorIndexEvidence().rawBlobPath, indexFetchedAt: collectorIndexEvidence().fetchedAt,
+    indexCardFingerprintSha256: collectorIndexEvidence().cardFingerprintSha256,
+    metadataEvidenceText: collectorIndexEvidence().metadataEvidenceText,
   },
 }).revisionId;
 
@@ -610,6 +634,24 @@ test("merge repairs only typed collector fields while immutable evidence stays l
   });
   assert.equal(merged[0].publicationStatus, "queued");
   assert.equal(published, true);
+
+  const unsupported = structuredClone(collectorContent) as Record<string, unknown> & {
+    attributes: Record<string, unknown>;
+    citations: Array<Record<string, unknown>>;
+  };
+  unsupported.attributes.range = "Mark one creature you can see.";
+  unsupported.citations = unsupported.citations.map((citation) => citation.fieldPath === "$.attributes.range"
+    ? { ...citation, quote: "Mark one creature you can see." } : citation);
+  const rejectingService = new CompendiumImportReviewService(async (callback) => callback({
+    async query(sql: string) {
+      if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: [row] };
+      if (sql.includes("FROM sources source LEFT JOIN files")) return { rows: [source()] };
+      return { rows: [], rowCount: 1 };
+    },
+  }), { publish: async () => { throw new Error("must not publish"); }, unpublish: async () => { throw new Error("unused"); } }, async () => new Map());
+  await assert.rejects(rejectingService.act(admin, runId, {
+    candidateIds: [candidateId], action: "merge", activeRevisionTokens: { [candidateId]: null }, resolvedContent: unsupported,
+  }), /range citation is not its exact detail value/);
 
   const tampered = structuredClone(collectorContent) as Record<string, unknown> & { sourceVersion: Record<string, unknown> };
   tampered.sourceVersion.url = "https://next.dnd.su/spells/99999-tampered";

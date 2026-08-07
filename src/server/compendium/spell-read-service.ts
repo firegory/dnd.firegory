@@ -56,6 +56,7 @@ export type SpellDetail = SpellListEntry & Readonly<{
   }>[];
   sourceVersion: Readonly<{
     url: string; fingerprintSha256: string; rawBlobPath: string; fetchedAt: string; fileChecksumSha256: string;
+    index: Readonly<{ url: string; fingerprintSha256: string; rawBlobPath: string; fetchedAt: string; cardFingerprintSha256: string }>;
   }> | null;
 }>;
 
@@ -275,9 +276,14 @@ function sourceVersions(value: unknown): SpellDetail["sourceVersions"] {
 }
 function mapSourceVersion(value: unknown): SpellDetail["sourceVersion"] {
   if (!isRecord(value) || typeof value.url !== "string" || typeof value.fingerprintSha256 !== "string"
-      || typeof value.rawBlobPath !== "string" || typeof value.fetchedAt !== "string" || typeof value.fileChecksumSha256 !== "string") return null;
+      || typeof value.rawBlobPath !== "string" || typeof value.fetchedAt !== "string" || typeof value.fileChecksumSha256 !== "string"
+      || !isRecord(value.index) || typeof value.index.url !== "string" || typeof value.index.fingerprintSha256 !== "string"
+      || typeof value.index.rawBlobPath !== "string" || typeof value.index.fetchedAt !== "string"
+      || typeof value.index.cardFingerprintSha256 !== "string") return null;
   return { url: value.url, fingerprintSha256: value.fingerprintSha256, rawBlobPath: value.rawBlobPath,
-    fetchedAt: value.fetchedAt, fileChecksumSha256: value.fileChecksumSha256 };
+    fetchedAt: value.fetchedAt, fileChecksumSha256: value.fileChecksumSha256,
+    index: { url: value.index.url, fingerprintSha256: value.index.fingerprintSha256, rawBlobPath: value.index.rawBlobPath,
+      fetchedAt: value.index.fetchedAt, cardFingerprintSha256: value.index.cardFingerprintSha256 } };
 }
 function normalizeIdentifier(value: string): string {
   const normalized = typeof value === "string" ? value.normalize("NFC").trim() : "";
