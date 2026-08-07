@@ -28,10 +28,13 @@ export type SpellCitation = Readonly<{
   id: string;
   quote: string;
   section: string;
-  page: number;
+  page: number | null;
   sourceId: string;
   fileId: string;
   previewUrl: string | null;
+  sourceUrl: string | null;
+  sourceDetailUrl: string;
+  fieldPath: string | null;
 }>;
 
 export type SpellListEntry = SpellProjection & Readonly<{
@@ -51,6 +54,9 @@ export type SpellDetail = SpellListEntry & Readonly<{
   sourceVersions: readonly Readonly<{
     sourceId: string; title: string; code: string | null; revision: string | null; revisionId: string;
   }>[];
+  sourceVersion: Readonly<{
+    url: string; fingerprintSha256: string; rawBlobPath: string; fetchedAt: string; fileChecksumSha256: string;
+  }> | null;
 }>;
 
 export class SpellReadInputError extends Error {}
@@ -113,13 +119,17 @@ export class SpellReadService {
   }
 
   async get(user: RetrievalUser, identifier: string, selection: RetrievalSelection = {}): Promise<SpellDetail> {
-    if (!STABLE_ID.test(identifier)) throw new SpellNotFoundError();
+    const normalized = normalizeIdentifier(identifier);
     const boundary = boundarySql(user, selection);
-    boundary.params.push(identifier);
+    boundary.params.push(normalized);
     const result = await this.db.query<SpellRow>(
       `${boundary.sql}
        SELECT * FROM accessible_spells spell
        WHERE spell.entry_id = $${boundary.params.length}
+          OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(spell.aliases) alias
+            WHERE compendium_normalize_name(alias) = compendium_normalize_name($${boundary.params.length})
+          )
        ORDER BY spell.source_priority DESC, spell.revision_id
        LIMIT 1`,
       boundary.params,
@@ -217,19 +227,23 @@ function mapDetail(row: SpellRow): SpellDetail {
   const base = mapListEntry(row);
   const payload = row.canonical_payload;
   const citations = Array.isArray(payload.citations) ? payload.citations.flatMap((value, index) => {
-    if (!isRecord(value) || !Number.isSafeInteger(value.page) || typeof value.quote !== "string") return [];
-    const page = Number(value.page);
+    if (!isRecord(value) || (value.page !== null && !Number.isSafeInteger(value.page)) || typeof value.quote !== "string") return [];
+    const page = value.page === null ? null : Number(value.page);
+    const sourceUrl = typeof value.sourceUrl === "string" && /^https:\/\//.test(value.sourceUrl) ? value.sourceUrl : null;
     return [{
       id: typeof value.citationId === "string" ? value.citationId : `citation-${index + 1}`,
       quote: value.quote, section: typeof value.section === "string" ? value.section : base.title,
       page, sourceId: row.source_id, fileId: row.file_id,
-       previewUrl: row.mime_type === "application/pdf"
+       previewUrl: row.mime_type === "application/pdf" && page !== null
          ? `/api/citations/preview?sourceId=${encodeURIComponent(row.source_id)}&fileId=${encodeURIComponent(row.file_id)}&page=${page}`
          : null,
+       sourceUrl,
+       sourceDetailUrl: `/api/sources/${encodeURIComponent(row.source_id)}`,
+       fieldPath: typeof value.fieldPath === "string" ? value.fieldPath : null,
     }];
   }) : [];
   return {
-    ...base, body: row.plain_text, citations,
+    ...base, body: row.plain_text, citations, sourceVersion: mapSourceVersion(payload.sourceVersion),
     sourceVersions: sourceVersions(row.source_versions),
   };
 }
@@ -258,6 +272,17 @@ function sourceVersions(value: unknown): SpellDetail["sourceVersions"] {
     ? [{ sourceId: item.sourceId, title: item.title, code: typeof item.code === "string" ? item.code : null,
       revision: typeof item.revision === "string" ? item.revision : null, revisionId: item.revisionId }]
     : []);
+}
+function mapSourceVersion(value: unknown): SpellDetail["sourceVersion"] {
+  if (!isRecord(value) || typeof value.url !== "string" || typeof value.fingerprintSha256 !== "string"
+      || typeof value.rawBlobPath !== "string" || typeof value.fetchedAt !== "string" || typeof value.fileChecksumSha256 !== "string") return null;
+  return { url: value.url, fingerprintSha256: value.fingerprintSha256, rawBlobPath: value.rawBlobPath,
+    fetchedAt: value.fetchedAt, fileChecksumSha256: value.fileChecksumSha256 };
+}
+function normalizeIdentifier(value: string): string {
+  const normalized = typeof value === "string" ? value.normalize("NFC").trim() : "";
+  if (!normalized || normalized.length > 256) throw new SpellNotFoundError();
+  return normalized;
 }
 function firstSentence(value: string): string { return value.split(/(?<=[.!?])\s/u, 1)[0].slice(0, 240); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

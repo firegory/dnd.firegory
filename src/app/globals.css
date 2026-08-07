@@ -347,7 +347,8 @@
   }
 
   .spell-filters input[type="text"],
-  .spell-filters input:not([type]) {
+  .spell-filters input:not([type]),
+  .spell-filters select {
     display: block;
     width: 100%;
     min-height: 42px;
@@ -461,7 +462,7 @@
   }
 
   .spell-list-flags {
-    min-width: 2ch;
+    max-width: 13rem;
     color: #6f211f;
     font-weight: 900;
     letter-spacing: 0.12em;

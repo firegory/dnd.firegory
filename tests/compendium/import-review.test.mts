@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { extractCandidates } from "../../src/server/compendium/candidate-extraction.ts";
-import { projectExtractedCandidate } from "../../src/server/compendium/candidate-publication.ts";
+import { projectExtractedCandidate, projectSnapshotSpellCandidate } from "../../src/server/compendium/candidate-publication.ts";
 import { CompendiumImportReviewService } from "../../src/server/compendium/import-review.ts";
 import { nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
 
@@ -50,6 +50,7 @@ const collectorContent = nextDndImportBatch({
   categories: [{ index: {}, entryCount: 1, details: [{
     category: "spells", externalId: "10195", sourceUrl: "https://next.dnd.su/spells/10195-hunters-mark",
     sha256: "f".repeat(64), parserVersion: "next-dnd-2024-v3", fetchedAt: "2026-08-06T12:00:00.000Z",
+    blobPath: `blobs/${"f".repeat(64)}.html`,
     normalized: { title: "Метка охотника", contentHtml: "<article>Rules</article>", contentText: "Casting Time: 1 bonus action. Range: 90 feet. Components: V. Duration: Concentration, up to 1 hour. Mark one creature you can see." },
     indexMetadata: { level: 1, school: "Прорицание", title_en: "Hunter's Mark", filter_class: [17], item_tags: { concentration: true } },
   }] }],
@@ -66,6 +67,10 @@ function candidate(overrides: Record<string, unknown> = {}) {
     candidate_key: content.candidateKey, entry_type: content.entryType, diff_status: "new", content,
     content_sha256: "e".repeat(64),
     previous_content: null, invalid_reason: null, locator: "page:1", ...chunkFields(),
+    occurrence_fingerprint_sha256: "f".repeat(64), occurrence_raw_blob_path: `blobs/${"f".repeat(64)}.html`,
+    occurrence_source_fetched_at: "2026-08-06T12:00:00.000Z", file_checksum_sha256: "a".repeat(64),
+    previous_fingerprint_sha256: "f".repeat(64), previous_raw_blob_path: `blobs/${"f".repeat(64)}.html`,
+    previous_source_fetched_at: "2026-08-06T12:00:00.000Z",
     created_at: "2026-08-06T00:00:00.000Z", run_status: "succeeded", decision: null, resolved_content: null,
     publication_status: null, publication_attempt: null, idempotency_key: null, last_error: null, reviewed_by: null, reviewed_at: null,
     expected_active_revision_id: null, expected_active_revision_captured: false,
@@ -117,6 +122,14 @@ const previousEquipmentRevision = projectExtractedCandidate(equipmentShield, {
   candidateKey: "shield", entryType: "equipment", createdAt: previousCreatedAt, boundary,
   source: canonicalSource(),
   chunk: { id: secondChunkId, chunkIndex: 1, pageNumber: 1, sectionHeading: null, quoteText: equipmentShieldText },
+}).revisionId;
+const previousCollectorRevision = projectSnapshotSpellCandidate(collectorContent, {
+  candidateKey: "spells-10195", createdAt: previousCreatedAt, source: canonicalSource(), fileId,
+  evidence: {
+    sourceUrl: "https://next.dnd.su/spells/10195-hunters-mark", fingerprintSha256: "f".repeat(64),
+    rawBlobPath: `blobs/${"f".repeat(64)}.html`, fetchedAt: "2026-08-06T12:00:00.000Z",
+    fileChecksumSha256: "a".repeat(64),
+  },
 }).revisionId;
 
 test("approval persists audit intent and submits only a worker publication command", async () => {
@@ -492,7 +505,7 @@ test("missing candidates reject cross-source, file, type, key, and CAS tampering
   assert.deepEqual(mutations, []);
 });
 
-test("missing collector snapshots remain nonpublishable through the previous chain", async () => {
+test("missing previously published collector spells can unpublish through validated evidence and CAS", async () => {
   const row = missingCandidate({
     candidate_key: "spells-10195", entry_type: "spell", content: collectorContent, content_sha256: "f".repeat(64),
     previous_content: collectorContent, previous_content_sha256: "f".repeat(64),
@@ -502,14 +515,19 @@ test("missing collector snapshots remain nonpublishable through the previous cha
   });
   const db = { async query(sql: string) {
     if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: [row] };
+    if (sql.includes("FROM sources source LEFT JOIN files")) return { rows: [source()] };
     return { rows: [], rowCount: 1 };
   } };
   const service = new CompendiumImportReviewService(async (callback) => callback(db), {
-    publish: async () => { throw new Error("unused"); }, unpublish: async () => { throw new Error("must not queue"); },
+    publish: async () => { throw new Error("unused"); }, unpublish: async (input) => {
+      assert.equal(input.expectedActiveRevisionId, previousCollectorRevision);
+      return { commandPath: "/spool/unpublish-collector", existing: false };
+    },
   }, async () => new Map());
-  await assert.rejects(service.act(admin, runId, {
-    candidateIds: [candidateId], action: "unpublish", activeRevisionTokens: { [candidateId]: activeRevision },
-  }), /complete previous occurrence and chunk evidence chain/);
+  const result = await service.act(admin, runId, {
+    candidateIds: [candidateId], action: "unpublish", activeRevisionTokens: { [candidateId]: previousCollectorRevision },
+  });
+  assert.equal(result[0].publicationStatus, "queued");
 });
 
 test("review exposes a complete typed snapshot spell for explicit approval", async () => {
@@ -559,6 +577,46 @@ test("typed snapshot publication still requires an audited review action", async
   });
   assert.equal(approved[0].publicationStatus, "queued");
   assert.equal(submitted?.entryId, "spell-spells-10195");
-  assert.equal(submitted?.citations.length, 1);
+  assert.equal(submitted?.citations.length, 11);
   assert.equal(writes.some((sql) => sql.includes("compendium_import_candidate_reviews")), true);
+});
+
+test("merge repairs only typed collector fields while immutable evidence stays locked", async () => {
+  const incomplete = structuredClone(collectorContent) as Record<string, unknown> & {
+    attributes: Record<string, unknown>;
+    extraction: Record<string, unknown>;
+    citations: Array<Record<string, unknown>>;
+  };
+  incomplete.attributes.castingTime = null;
+  incomplete.extraction = { status: "needs_review", missingFields: ["castingTime"] };
+  incomplete.citations = incomplete.citations.filter((citation) => citation.fieldPath !== "$.attributes.castingTime");
+  const row = collectorCandidate({ content: incomplete });
+  let published = false;
+  const db = { async query(sql: string) {
+    if (sql.includes("FROM compendium_import_candidates candidate")) return { rows: [row] };
+    if (sql.includes("FROM sources source LEFT JOIN files")) return { rows: [source()] };
+    return { rows: [], rowCount: 1 };
+  } };
+  const service = new CompendiumImportReviewService(async (callback) => callback(db), {
+    publish: async () => { published = true; return { commandPath: "/spool/repaired", existing: false }; },
+    unpublish: async () => { throw new Error("unused"); },
+  }, async () => new Map());
+  await assert.rejects(service.act(admin, runId, {
+    candidateIds: [candidateId], action: "approve", activeRevisionTokens: { [candidateId]: null },
+  }), /not publishable.*incomplete/i);
+  const merged = await service.act(admin, runId, {
+    candidateIds: [candidateId], action: "merge", activeRevisionTokens: { [candidateId]: null },
+    resolvedContent: collectorContent,
+  });
+  assert.equal(merged[0].publicationStatus, "queued");
+  assert.equal(published, true);
+
+  const tampered = structuredClone(collectorContent) as Record<string, unknown> & { sourceVersion: Record<string, unknown> };
+  tampered.sourceVersion.url = "https://next.dnd.su/spells/99999-tampered";
+  const idleService = new CompendiumImportReviewService(async (callback) => callback({
+    async query(sql: string) { return { rows: sql.includes("FROM compendium_import_candidates candidate") ? [row] : [], rowCount: 1 }; },
+  }), { publish: async () => { throw new Error("must not publish"); }, unpublish: async () => { throw new Error("unused"); } }, async () => new Map());
+  await assert.rejects(idleService.act(admin, runId, {
+    candidateIds: [candidateId], action: "merge", activeRevisionTokens: { [candidateId]: null }, resolvedContent: tampered,
+  }), /cannot modify immutable sourceVersion evidence/);
 });

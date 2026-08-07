@@ -19,6 +19,15 @@ import {
 import type { CompendiumEntryType } from "./service.ts";
 import { validateSpellProjection } from "./spell-schema.ts";
 import type { SnapshotSpellCandidate } from "./next-dnd/import-adapter.ts";
+import { NEXT_DND_PARSER_VERSION } from "./next-dnd/parser.ts";
+
+export type SnapshotSpellEvidence = Readonly<{
+  sourceUrl: string;
+  fingerprintSha256: string;
+  rawBlobPath: string;
+  fetchedAt: string;
+  fileChecksumSha256: string;
+}>;
 
 export type CandidatePublicationContext = Readonly<{
   candidateKey: string;
@@ -47,6 +56,7 @@ export type CandidateCapabilityContext = Readonly<{
   shared: unknown;
   ownerUserId: unknown;
   chunk: EvidenceChunk | null;
+  snapshotEvidence?: SnapshotSpellEvidence | null;
 }>;
 
 const CANONICAL_ENTRY_TYPES: Readonly<Record<CompendiumEntryType, string>> = {
@@ -83,7 +93,7 @@ export function canonicalCandidateEntryId(entryType: string, candidateKey: strin
 export function classifyCandidatePublication(value: unknown, context: CandidateCapabilityContext): CandidatePublicationCapability {
   if (isSnapshotSpellCandidate(value)) {
     try {
-      validateSnapshotSpellCandidate(value, context.candidateKey, context.entryType);
+      validateSnapshotSpellCandidate(value, context.candidateKey, context.entryType, context.snapshotEvidence ?? null);
       return { payloadOrigin: "collector_snapshot", publicationCapability: "publishable", publicationBlockReason: null };
     } catch (error) {
       return {
@@ -138,10 +148,15 @@ export function projectSnapshotSpellCandidate(value: unknown, context: Readonly<
   createdAt: string;
   source: ContentSource;
   fileId: string;
+  evidence: SnapshotSpellEvidence;
 }>): CanonicalRevision {
-  const candidate = validateSnapshotSpellCandidate(value, context.candidateKey, "spell");
-  if (!context.source.files.some((file) => file.fileId === context.fileId)) {
+  const candidate = validateSnapshotSpellCandidate(value, context.candidateKey, "spell", context.evidence);
+  const sourceFile = context.source.files.find((file) => file.fileId === context.fileId);
+  if (!sourceFile) {
     throw new CandidateProjectionError("Collector snapshot file is absent from the canonical source record.");
+  }
+  if (sourceFile.contentHash !== `sha256:${context.evidence.fileChecksumSha256}`) {
+    throw new CandidateProjectionError("Collector snapshot database file checksum changed across the review boundary.");
   }
   const projection = validateSpellProjection(candidate.attributes);
   const plain = candidate.body;
@@ -151,6 +166,13 @@ export function projectSnapshotSpellCandidate(value: unknown, context: Readonly<
     entryId: canonicalCandidateEntryId("spell", context.candidateKey),
     createdAt: context.createdAt,
     source: context.source,
+    sourceVersion: {
+      url: context.evidence.sourceUrl,
+      fingerprintSha256: context.evidence.fingerprintSha256,
+      rawBlobPath: context.evidence.rawBlobPath,
+      fetchedAt: context.evidence.fetchedAt,
+      fileChecksumSha256: context.evidence.fileChecksumSha256,
+    },
     entry: {
       entryType: "spell",
       name: candidate.title,
@@ -161,16 +183,18 @@ export function projectSnapshotSpellCandidate(value: unknown, context: Readonly<
       plain,
       sections: [{ sectionId: "spell-rules", heading: candidate.title, text: plain, startOffset: 0, endOffset: plain.length }],
     },
-    citations: [{
-      citationId: "collector-snapshot",
+    citations: candidate.citations.map((citation) => ({
+      citationId: `collector-${evidenceKey(citation.fieldPath)}`,
       sourceId: context.source.sourceId,
       fileId: context.fileId,
-      page: 1,
-      section: `${candidate.title} [${candidate.sourceVersion.url}]`,
-      quote: plain,
-      startOffset: 0,
-      endOffset: plain.length,
-    }],
+      page: null,
+      section: candidate.title,
+      quote: citation.quote,
+      startOffset: null,
+      endOffset: null,
+      fieldPath: citation.fieldPath,
+      sourceUrl: context.evidence.sourceUrl,
+    })),
   });
   assertCanonicalRevision(revision);
   return revision;
@@ -298,7 +322,7 @@ function isSnapshotSpellCandidate(value: unknown): value is Record<string, unkno
   return isRecord(value) && value.kind === "snapshotSpellCandidate" && value.schemaVersion === 1;
 }
 
-function validateSnapshotSpellCandidate(value: unknown, candidateKey: string, entryType: string | null): SnapshotSpellCandidate {
+function validateSnapshotSpellCandidate(value: unknown, candidateKey: string, entryType: string | null, evidence: SnapshotSpellEvidence | null): SnapshotSpellCandidate {
   if (!isSnapshotSpellCandidate(value) || entryType !== "spell") throw new CandidateProjectionError("Collector candidate is not a typed spell.");
   if (!hasExactKeys(value, ["aliases", "attributes", "body", "citations", "externalId", "extraction", "kind", "parserVersion", "schemaVersion", "sha256", "sourceUrl", "sourceVersion", "title"])) {
     throw new CandidateProjectionError("Collector spell shape is unsupported.");
@@ -317,17 +341,37 @@ function validateSnapshotSpellCandidate(value: unknown, candidateKey: string, en
     throw new CandidateProjectionError("Collector spell source identity is invalid.");
   }
   if (!isRecord(value.sourceVersion) || value.sourceVersion.url !== value.sourceUrl || value.sourceVersion.sha256 !== value.sha256
+      || value.sourceVersion.rawBlobPath !== `blobs/${value.sha256}.html`
       || typeof value.sourceVersion.fetchedAt !== "string" || !Number.isFinite(Date.parse(value.sourceVersion.fetchedAt))) {
     throw new CandidateProjectionError("Collector spell source version is invalid.");
+  }
+  if (!evidence || value.sourceUrl !== evidence.sourceUrl || value.sha256 !== evidence.fingerprintSha256
+      || value.sourceVersion.url !== evidence.sourceUrl || value.sourceVersion.sha256 !== evidence.fingerprintSha256
+      || value.sourceVersion.rawBlobPath !== evidence.rawBlobPath || value.sourceVersion.fetchedAt !== evidence.fetchedAt) {
+    throw new CandidateProjectionError("Collector spell provenance does not match its persisted occurrence and raw blob evidence.");
+  }
+  if (value.parserVersion !== NEXT_DND_PARSER_VERSION || !/^[0-9a-f]{64}$/.test(evidence.fileChecksumSha256)) {
+    throw new CandidateProjectionError("Collector spell parser or database file evidence is unsupported.");
   }
   if (!isRecord(value.extraction) || value.extraction.status !== "ready" || !Array.isArray(value.extraction.missingFields)
       || value.extraction.missingFields.length !== 0) {
     throw new CandidateProjectionError("Typed collector extraction is incomplete.");
   }
-  validateSpellProjection(value.attributes);
-  if (!Array.isArray(value.citations) || !value.citations.some((citation) => isRecord(citation)
-      && citation.fieldPath === "$.body" && citation.quote === value.body && citation.sourceUrl === value.sourceUrl)) {
-    throw new CandidateProjectionError("Collector spell body lacks immutable snapshot evidence.");
+  const projection = validateSpellProjection(value.attributes);
+  const expectedPaths = new Set(["$.title", "$.body", ...Object.keys(projection).map((field) => `$.attributes.${field}`)]);
+  if (!Array.isArray(value.citations) || value.citations.length !== expectedPaths.size) {
+    throw new CandidateProjectionError("Collector spell requires one citation for every canonical field.");
+  }
+  for (const citation of value.citations) {
+    if (!isRecord(citation) || typeof citation.fieldPath !== "string" || !expectedPaths.delete(citation.fieldPath)
+        || citation.sourceUrl !== evidence.sourceUrl || typeof citation.quote !== "string" || !citation.quote.trim()) {
+      throw new CandidateProjectionError("Collector spell field citations do not match immutable snapshot evidence.");
+    }
+    const expectedQuote = citation.fieldPath === "$.title" ? value.title : citation.fieldPath === "$.body" ? value.body : null;
+    if ((expectedQuote !== null && citation.quote !== expectedQuote)
+        || (expectedQuote === null && !value.body.includes(citation.quote))) {
+      throw new CandidateProjectionError("Collector spell citation quote is absent from immutable snapshot text.");
+    }
   }
   return value as unknown as SnapshotSpellCandidate;
 }

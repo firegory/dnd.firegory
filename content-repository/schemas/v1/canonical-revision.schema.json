@@ -13,6 +13,18 @@
     "contentHash": { "$ref": "#/$defs/contentHash" },
     "createdAt": { "type": "string", "format": "date-time" },
     "source": { "$ref": "urn:dnd-firegory:schema:content-repository:source:1" },
+    "sourceVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "fingerprintSha256", "rawBlobPath", "fetchedAt", "fileChecksumSha256"],
+      "properties": {
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "fingerprintSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "rawBlobPath": { "type": "string", "pattern": "^blobs/[0-9a-f]{64}\\.html$" },
+        "fetchedAt": { "type": "string", "format": "date-time" },
+        "fileChecksumSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
     "entry": {
       "type": "object",
       "additionalProperties": false,
@@ -59,11 +71,13 @@
           "citationId": { "$ref": "#/$defs/stableId" },
           "sourceId": { "$ref": "#/$defs/stableId" },
           "fileId": { "$ref": "#/$defs/stableId" },
-          "page": { "type": "integer", "minimum": 1 },
+          "page": { "type": ["integer", "null"], "minimum": 1 },
           "section": { "type": "string", "minLength": 1 },
           "quote": { "type": "string", "minLength": 1 },
-          "startOffset": { "type": "integer", "minimum": 0 },
-          "endOffset": { "type": "integer", "minimum": 1 }
+          "startOffset": { "type": ["integer", "null"], "minimum": 0 },
+          "endOffset": { "type": ["integer", "null"], "minimum": 1 },
+          "fieldPath": { "type": "string", "pattern": "^\\$(\\.[A-Za-z_][A-Za-z0-9_]*|\\[[0-9]+\\])*$" },
+          "sourceUrl": { "type": "string", "format": "uri", "pattern": "^https://" }
         }
       }
     }

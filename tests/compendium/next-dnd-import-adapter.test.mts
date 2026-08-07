@@ -47,7 +47,10 @@ const manifest: NextDndSnapshotManifest = {
 
 test("maps complete snapshots to stable #75 occurrences and candidates", () => {
   const batch = nextDndImportBatch(manifest);
-  assert.deepEqual(batch.occurrences, [{ occurrenceIndex: 0, locator: detailSnapshot.sourceUrl, fingerprintSha256: "a".repeat(64) }]);
+  assert.deepEqual(batch.occurrences, [{
+    occurrenceIndex: 0, locator: detailSnapshot.sourceUrl, fingerprintSha256: "a".repeat(64),
+    rawBlobPath: `blobs/${"a".repeat(64)}.html`, sourceFetchedAt: "2026-08-06T12:00:00.000Z",
+  }]);
   assert.equal(batch.candidates[0].candidateKey, "spells-10195");
   assert.equal(batch.candidates[0].entryType, "spell");
   assert.equal(batch.candidates[0].content.parserVersion, "next-dnd-2024-v3");

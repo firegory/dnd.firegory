@@ -11,11 +11,17 @@ const SCHOOL_RU: Record<string, string> = {
   evocation: "Воплощение", illusion: "Иллюзия", necromancy: "Некромантия", transmutation: "Преобразование",
 };
 
+const CLASS_NAMES: Record<string, readonly [string, string]> = {
+  "class:17": ["Следопыт", "Ranger"],
+};
+
 export function SpellList({
   spells, count, nextHref, options,
 }: Readonly<{ spells: readonly SpellListEntry[]; count: number; nextHref: string | null; options: SpellListOptions }>) {
   const { language, t } = useUiLanguage();
   const school = (value: string) => language === "ru" ? SCHOOL_RU[value] ?? value : value[0].toUpperCase() + value.slice(1);
+  const spellClass = (value: string) => CLASS_NAMES[value]?.[language === "ru" ? 0 : 1]
+    ?? `${t("spellClass")} ${value.replace(/^class:/, "")}`;
   return (
     <div className="spell-page">
       <header className="spell-heading">
@@ -25,7 +31,7 @@ export function SpellList({
       </header>
       <form className="spell-filters" method="get" action="/spells">
         <label>{t("spellName")}<input name="q" defaultValue={options.query ?? ""} maxLength={120} /></label>
-        <label>{t("spellClass")}<input name="class" defaultValue={options.className ?? ""} maxLength={80} /></label>
+        <label>{t("spellClass")}<input name="class" defaultValue={options.className ?? ""} maxLength={80} list="spell-classes" /><datalist id="spell-classes"><option value="class:17">{spellClass("class:17")}</option></datalist></label>
         <label>{t("castingTime")}<input name="casting" defaultValue={options.castingTime ?? ""} maxLength={120} /></label>
         <label>{t("range")}<input name="range" defaultValue={options.range ?? ""} maxLength={120} /></label>
         <label>{t("duration")}<input name="duration" defaultValue={options.duration ?? ""} maxLength={120} /></label>
@@ -43,8 +49,8 @@ export function SpellList({
           ))}</div>
         </fieldset>
         <div className="spell-boolean-filters">
-          <label><input type="checkbox" name="ritual" value="true" defaultChecked={options.ritual === true} />{t("spellRitual")}</label>
-          <label><input type="checkbox" name="concentration" value="true" defaultChecked={options.concentration === true} />{t("spellConcentration")}</label>
+          <label>{t("spellRitual")}<select name="ritual" defaultValue={options.ritual === undefined ? "" : String(options.ritual)}><option value="">{t("anyValue")}</option><option value="true">{t("yes")}</option><option value="false">{t("no")}</option></select></label>
+          <label>{t("spellConcentration")}<select name="concentration" defaultValue={options.concentration === undefined ? "" : String(options.concentration)}><option value="">{t("anyValue")}</option><option value="true">{t("yes")}</option><option value="false">{t("no")}</option></select></label>
         </div>
         <div className="spell-filter-actions"><button type="submit">{t("applyFilters")}</button><Link href="/spells">{t("clearFilters")}</Link></div>
       </form>
@@ -55,7 +61,7 @@ export function SpellList({
             <Link href={`/spells/${spell.id}`}>
               <span className="spell-level-badge">{spell.level}</span>
               <span className="spell-list-main"><strong>{spell.title}</strong><small>{school(spell.school)} · {spell.castingTime}</small></span>
-              <span className="spell-list-flags">{spell.concentration ? "C" : ""}{spell.ritual ? "R" : ""}</span>
+              <span className="spell-list-flags">{[spell.concentration ? t("spellConcentration") : "", spell.ritual ? t("spellRitual") : ""].filter(Boolean).join(" · ")}</span>
             </Link>
             <p>{spell.summary}</p>
             <footer>{spell.source.code ?? spell.source.title}{spell.source.revision ? ` · ${spell.source.revision}` : ""}</footer>

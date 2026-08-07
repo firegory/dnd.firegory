@@ -16,6 +16,8 @@ export function nextDndImportBatch(manifest: NextDndSnapshotManifest): Readonly<
       occurrenceIndex,
       locator: detail.sourceUrl,
       fingerprintSha256: detail.sha256,
+      rawBlobPath: detail.blobPath,
+      sourceFetchedAt: detail.fetchedAt,
     })),
     candidates: details.map((detail, occurrenceIndex) => candidate(detail, occurrenceIndex)),
   };
@@ -106,7 +108,7 @@ export type SnapshotSpellCandidate = Readonly<{
     ritual: boolean;
     classes: readonly string[];
   }>;
-  sourceVersion: Readonly<{ url: string; sha256: string; fetchedAt: string }>;
+  sourceVersion: Readonly<{ url: string; sha256: string; rawBlobPath: string; fetchedAt: string }>;
   citations: readonly Readonly<{ fieldPath: string; quote: string; sourceUrl: string }>[];
   extraction: Readonly<{ status: "ready" | "needs_review"; missingFields: readonly string[] }>;
 }>;
@@ -137,7 +139,7 @@ export function spellCandidate(detail: SnapshotDetail): SnapshotSpellCandidate {
     { fieldPath: "$.body", quote: text, sourceUrl: detail.sourceUrl },
     ...Object.entries(attributes).filter(([, value]) => value !== null).map(([name, value]) => ({
       fieldPath: `$.attributes.${name}`,
-      quote: evidenceQuote(name, value, text, metadata),
+      quote: evidenceQuote(value, text),
       sourceUrl: detail.sourceUrl,
     })),
   ];
@@ -145,7 +147,7 @@ export function spellCandidate(detail: SnapshotDetail): SnapshotSpellCandidate {
     schemaVersion: 1, kind: "snapshotSpellCandidate", externalId: detail.externalId,
     sourceUrl: detail.sourceUrl, sha256: detail.sha256, parserVersion: detail.parserVersion,
     title: detail.normalized.title, aliases, body: text, attributes,
-    sourceVersion: { url: detail.sourceUrl, sha256: detail.sha256, fetchedAt: detail.fetchedAt },
+    sourceVersion: { url: detail.sourceUrl, sha256: detail.sha256, rawBlobPath: detail.blobPath, fetchedAt: detail.fetchedAt },
     citations, extraction: { status: missingFields.length === 0 ? "ready" : "needs_review", missingFields },
   };
 }
@@ -183,11 +185,7 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function evidenceQuote(name: string, value: unknown, text: string, metadata: Readonly<Record<string, unknown>>): string {
-  if (["castingTime", "range", "duration", "components"].includes(name)) return String(value);
-  if (name === "classes") return JSON.stringify(metadata.filter_class ?? []);
-  if (name === "level") return String(metadata.item_prefix_title ?? metadata.level ?? value);
-  if (name === "school") return String(metadata.school ?? metadata.item_icon_title ?? value);
-  if (name === "concentration" || name === "ritual") return String(metadata.item_tags ?? text);
-  return String(value);
+function evidenceQuote(value: unknown, text: string): string {
+  const serialized = String(value);
+  return text.includes(serialized) ? serialized : text;
 }

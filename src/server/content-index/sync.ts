@@ -458,6 +458,7 @@ async function upsertFileIndexRows(
     );
   }
   for (const entry of entries) {
+    const row = nfsIndexEntryRow(repositoryId, entry);
     for (const chunk of entry.chunks) {
       await client.query(
         `INSERT INTO chunks
@@ -486,11 +487,20 @@ async function upsertFileIndexRows(
          canonical_payload=EXCLUDED.canonical_payload, source_id=EXCLUDED.source_id,
          file_id=EXCLUDED.file_id, generation_id=EXCLUDED.generation_id,
          document_id=EXCLUDED.document_id, lifecycle='active', retired_at=NULL, indexed_at=now()`,
-      [entry.id, repositoryId, entry.entryId, entry.revisionId, entry.contentHash, entry.entryType,
-        entry.name, JSON.stringify(entry.aliases), JSON.stringify(entry.typedFields), entry.plainText,
-        JSON.stringify(entry.canonicalPayload), entry.sourceUuid, entry.fileUuid, entry.generationId, entry.documentId],
+      [row.id, row.repository_id, row.entry_id, row.revision_id, row.content_hash, row.entry_type,
+        row.name, JSON.stringify(row.aliases), JSON.stringify(row.typed_fields), row.plain_text,
+        JSON.stringify(row.canonical_payload), row.source_id, row.file_id, row.generation_id, row.document_id],
     );
   }
+}
+
+export function nfsIndexEntryRow(repositoryId: string, entry: IndexedEntryProjection) {
+  return {
+    id: entry.id, repository_id: repositoryId, entry_id: entry.entryId, revision_id: entry.revisionId,
+    content_hash: entry.contentHash, entry_type: entry.entryType, name: entry.name, aliases: entry.aliases,
+    typed_fields: entry.typedFields, plain_text: entry.plainText, canonical_payload: entry.canonicalPayload,
+    source_id: entry.sourceUuid, file_id: entry.fileUuid, generation_id: entry.generationId, document_id: entry.documentId,
+  } as const;
 }
 
 export async function reconcileManagedProjectionRows(

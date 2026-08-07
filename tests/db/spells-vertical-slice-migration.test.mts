@@ -12,5 +12,7 @@ test("0015 registers the additive typed spell projection migration", () => {
   assert.match(sql, /compendium_spells_classes_valid/);
   assert.match(sql, /USING gin \(classes\)/);
   assert.match(sql, /compendium_spells_filters_idx[\s\S]*level, school, ritual, concentration, revision_id/);
+  assert.match(sql, /ALTER TABLE compendium_import_occurrences[\s\S]*raw_blob_path text[\s\S]*source_fetched_at timestamptz/);
+  assert.match(sql, /raw_blob_path ~ '\^blobs\/\[0-9a-f\]\{64\}/);
   assert.doesNotMatch(sql, /\b(?:DELETE|TRUNCATE|DROP TABLE)\b/i);
 });
