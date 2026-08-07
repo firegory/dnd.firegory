@@ -79,6 +79,10 @@ test("collector spell becomes a cited canonical candidate and NFS database proje
   assert.equal(revision.citations.every((citation) => citation.page === null
     && [detail.sourceUrl, detail.indexSource.url].includes(String(citation.sourceUrl))), true);
   assert.equal(revision.sourceVersion?.fileChecksumSha256, "d".repeat(64));
+  assert.equal(revision.text.plain, detail.normalized.contentText);
+  assert.deepEqual((revision.text.sections as Array<Record<string, unknown>>).map((section) => section.sectionId), ["spell-rules"]);
+  assert.match(revision.sourceVersion!.index.metadataEvidenceText, /window\.LIST card metadata[\s\S]*level=1[\s\S]*classes=\["class:17"\]/);
+  assert.doesNotMatch(String(revision.text.plain), /window\.LIST card metadata|level=|classes=/);
 
   const [projection] = projectCanonicalRevisions("fixture", [revision], [{
     sourceId: source.sourceId, fileId: fileUuid, path: source.files[0].path,
@@ -89,6 +93,8 @@ test("collector spell becomes a cited canonical candidate and NFS database proje
   assert.equal(projection.typedFields.length, 9);
   assert.equal(projection.pages.length, 0, "external evidence never fabricates a PDF page");
   assert.equal(projection.chunks[0].pageNumber, null);
+  assert.equal(projection.plainText, detail.normalized.contentText);
+  assert.equal(projection.chunks.every((chunk) => !/window\.LIST card metadata|level=|classes=/.test(chunk.text)), true);
 });
 
 test("spell schema rejects incomplete typed collector output", () => {
@@ -160,6 +166,8 @@ test("all 411 parsed index cards transform through occurrence, review, projectio
       assert.equal(citation.sourceUrl === revision.sourceVersion!.index.url ? metadata.includes(quote) : revision.text.plain.includes(quote), true);
       assert.notEqual(quote, details[index].normalized.contentText, "typed fields never use whole-body fallback evidence");
     }
+    assert.equal(revision.text.plain, details[index].normalized.contentText);
+    assert.doesNotMatch(String(revision.text.plain), /window\.LIST card metadata|level=|classes=/);
   }
   const mapped = await Promise.all(projections.map(async (projection) => {
     const synced = nfsIndexEntryRow("fixture-411", projection);
@@ -170,6 +178,9 @@ test("all 411 parsed index cards transform through occurrence, review, projectio
   }));
   assert.equal(mapped.length, 411);
   assert.equal(mapped.every((spell, index) => spell.id === projections[index].entryId && spell.citations.length === 11), true);
+  assert.equal(mapped.every((spell, index) => spell.body === details[index].normalized.contentText
+    && !/window\.LIST card metadata|level=|classes=/.test(spell.body)), true);
+  assert.equal(projections.every((projection) => projection.plainText === projection.chunks.map((chunk) => chunk.text).join("")), true);
 });
 
 test("all typed filters restore from URL and reject malformed values", () => {
@@ -291,6 +302,8 @@ test("spell pages retain RU/EN, mobile, and print contracts", async () => {
   assert.match(list, /<select name="concentration"/);
   assert.match(detailPage, /Прорицание.*Divination/);
   assert.match(detailPage, /Следопыт.*Ranger/);
+  assert.match(detailPage, /className="spell-body"[\s\S]*spell\.body/);
+  assert.doesNotMatch(detailPage, /metadataEvidenceText|window\.LIST card metadata/);
 });
 
 function spellRow() {

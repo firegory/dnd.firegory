@@ -165,9 +165,7 @@ export function projectSnapshotSpellCandidate(value: unknown, context: Readonly<
     throw new CandidateProjectionError("Collector snapshot database file checksum changed across the review boundary.");
   }
   const projection = validateSpellProjection(candidate.attributes);
-  const metadataText = candidate.sourceVersion.index.metadataEvidenceText;
-  const plain = `${candidate.body}\n\n${metadataText}`;
-  const metadataSectionText = `\n\n${metadataText}`;
+  const plain = candidate.body;
   const revision = createCanonicalRevision({
     schemaVersion: 1,
     kind: "canonicalRevision",
@@ -197,10 +195,7 @@ export function projectSnapshotSpellCandidate(value: unknown, context: Readonly<
     },
     text: {
       plain,
-      sections: [
-        { sectionId: "spell-rules", heading: candidate.title, text: candidate.body, startOffset: 0, endOffset: candidate.body.length },
-        { sectionId: "source-metadata", heading: "window.LIST card metadata", text: metadataSectionText, startOffset: candidate.body.length, endOffset: plain.length },
-      ],
+      sections: [{ sectionId: "spell-rules", heading: candidate.title, text: plain, startOffset: 0, endOffset: plain.length }],
     },
     citations: candidate.citations.map((citation) => ({
       citationId: `collector-${evidenceKey(citation.fieldPath)}`,
