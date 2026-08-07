@@ -30,14 +30,13 @@ if [ "$uid" -eq 0 ]; then uid=10001; fi
 if [ "$gid" -eq 0 ]; then gid=10001; fi
 export APP_URL=http://127.0.0.1:3000
 export APP_PORT=0 AGENT_GATEWAY_PORT=0
-export DND_DATA_ROOT="$root/data" PRODUCTION_SECRETS_ROOT="$root/secrets"
-export APP_UID="$uid" APP_GID="$gid" WORKER_UID="$uid" WORKER_GID="$gid" GATEWAY_UID="$uid" GATEWAY_GID="$gid"
+export DND_DATA_HOST_PATH="$root/data" DND_DATA_ROOT=/app/content-repository
+export PRODUCTION_SECRETS_ROOT="$root/secrets" DND_NFS_PREFLIGHT_TEST_MODE=1
+export APP_UID="$uid" APP_GID="$gid" GATEWAY_UID="$uid" GATEWAY_GID="$gid"
 export COMPOSE_PROJECT_NAME="$project"
 
 compose="docker compose -f compose.production.yml"
-$compose up -d --build postgres redis
-$compose run --rm app npm run db:migrate
-$compose up -d --build
+./scripts/production-up.sh -d --build
 
 for service in app worker gateway postgres redis; do
   attempts=0
@@ -52,6 +51,7 @@ for service in app worker gateway postgres redis; do
     sleep 2
   done
 done
+test "$(docker inspect --format '{{.State.ExitCode}}' "$($compose ps -a -q migrate)")" = 0
 
 ./scripts/production-permissions-smoke.sh
 ./scripts/production-replacement-smoke.sh

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { parse } from "yaml";
@@ -8,18 +9,27 @@ const developmentCompose = await readFile(new URL("../../docker-compose.yml", im
 const dockerfile = await readFile(new URL("../../Dockerfile", import.meta.url), "utf8");
 const dockerignore = await readFile(new URL("../../.dockerignore", import.meta.url), "utf8");
 const entrypoint = await readFile(new URL("../../docker/entrypoint.prod.sh", import.meta.url), "utf8");
+const redisEntrypoint = await readFile(new URL("../../docker/redis-entrypoint.sh", import.meta.url), "utf8");
+const preflight = await readFile(new URL("../../scripts/production-nfs-preflight.sh", import.meta.url), "utf8");
+const productionUp = await readFile(new URL("../../scripts/production-up.sh", import.meta.url), "utf8");
 const permissionsSmoke = await readFile(new URL("../../scripts/production-permissions-smoke.sh", import.meta.url), "utf8");
 const replacementSmoke = await readFile(new URL("../../scripts/production-replacement-smoke.sh", import.meta.url), "utf8");
 
-type Volume = string | { source?: string; target?: string; read_only?: boolean };
+type Volume = string | { source?: string; target?: string; read_only?: boolean; bind?: { create_host_path?: boolean } };
 type Service = {
   build?: { target?: string };
+  image?: string;
   user?: string;
   environment?: Record<string, string>;
   volumes?: Volume[];
+  ports?: string[];
   healthcheck?: unknown;
+  read_only?: boolean;
+  cap_drop?: string[];
+  pids_limit?: number;
+  tmpfs?: string[];
+  depends_on?: Record<string, { condition?: string }>;
   deploy?: { resources?: { limits?: unknown } };
-  ports?: unknown;
 };
 const production = parse(compose, { merge: true }) as {
   services: Record<string, Service>;
@@ -28,69 +38,112 @@ const production = parse(compose, { merge: true }) as {
 
 function canonicalMount(service: Service) {
   return service.volumes?.find((volume): volume is Exclude<Volume, string> => (
-    typeof volume === "object" && volume.source === "${DND_DATA_ROOT}"
+    typeof volume === "object" && volume.source?.includes("DND_DATA_HOST_PATH") === true
   ));
 }
 
-test("production YAML parses and services use non-root production targets", () => {
+test("production images are pinned, standalone, and use compatible identities", () => {
   assert.equal(production.services.app.build?.target, "app-production");
   assert.equal(production.services.worker.build?.target, "worker-production");
   assert.equal(production.services.gateway.build?.target, "agent-gateway");
   assert.equal(production.services.app.user, "${APP_UID:-10001}:${APP_GID:-10001}");
-  assert.equal(production.services.worker.user, "${WORKER_UID:-10001}:${WORKER_GID:-10001}");
+  assert.equal(production.services.worker.user, production.services.app.user);
   assert.equal(production.services.gateway.user, "${GATEWAY_UID:-10001}:${GATEWAY_GID:-10001}");
-  assert.match(dockerfile, /FROM production-base AS app-production/);
-  assert.match(dockerfile, /FROM production-base AS worker-production/);
-  assert.match(dockerfile, /FROM node:22-bookworm-slim AS agent-gateway/);
+  assert.doesNotMatch(compose, /WORKER_(?:UID|GID)/);
+  assert.match(dockerfile, /ARG NODE_IMAGE=node:\d+\.\d+\.\d+-bookworm-slim/);
+  assert.match(dockerfile, /ARG REDIS_IMAGE=redis:7\.4\.5-alpine/);
+  assert.equal(production.services.postgres.image, "pgvector/pgvector:0.8.1-pg16");
+  assert.match(dockerfile, /\.next\/standalone/);
+  assert.match(dockerfile, /CMD \["node", "server\.js"\]/);
 });
 
-test("canonical bind access is read-only except for the worker", () => {
+test("canonical host bind access is read-only except for the worker", () => {
   assert.deepEqual(canonicalMount(production.services.app), {
-    type: "bind", source: "${DND_DATA_ROOT}", target: "${DND_DATA_ROOT}", read_only: true,
+    type: "bind", source: "${DND_DATA_HOST_PATH:?Set DND_DATA_HOST_PATH to the active host NFS mount}", target: "${DND_DATA_ROOT:-/app/content-repository}", read_only: true, bind: { create_host_path: false },
   });
   assert.deepEqual(canonicalMount(production.services.gateway), {
-    type: "bind", source: "${DND_DATA_ROOT}", target: "${DND_DATA_ROOT}", read_only: true,
+    type: "bind", source: "${DND_DATA_HOST_PATH:?Set DND_DATA_HOST_PATH to the active host NFS mount}", target: "${DND_DATA_ROOT:-/app/content-repository}", read_only: true, bind: { create_host_path: false },
   });
-  assert.deepEqual(canonicalMount(production.services.worker), {
-    type: "bind", source: "${DND_DATA_ROOT}", target: "${DND_DATA_ROOT}", read_only: false,
-  });
+  assert.equal(canonicalMount(production.services.worker)?.read_only, false);
   assert.doesNotMatch(compose, /driver_opts:|type:\s*nfs|addr=|nfsvers=|NFS_(?:SERVER|USERNAME|PASSWORD|CREDENTIAL)/i);
 });
 
-test("production persistence, health, secrets, and limits are explicit", () => {
-  assert.ok(production.services.app.volumes?.includes("upload_spool:/app/storage"));
-  assert.ok(production.services.worker.volumes?.includes("upload_spool:/app/storage"));
-  assert.ok(production.services.postgres.volumes?.includes("postgres_data:/var/lib/postgresql/data"));
-  assert.ok(production.services.redis.volumes?.includes("redis_data:/data"));
-  assert.deepEqual(Object.keys(production.volumes).sort(), ["postgres_data", "redis_data", "upload_spool"]);
+test("published HTTP ports default to loopback", () => {
+  assert.deepEqual(production.services.app.ports, ["${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-3000}:3000"]);
+  assert.deepEqual(production.services.gateway.ports, ["${GATEWAY_BIND_ADDRESS:-127.0.0.1}:${AGENT_GATEWAY_PORT:-8787}:8787"]);
   assert.equal(production.services.postgres.ports, undefined);
   assert.equal(production.services.redis.ports, undefined);
+});
+
+test("one-shot migration gates every schema consumer", () => {
+  assert.equal(production.services.migrate.build?.target, "migration-production");
+  for (const name of ["app", "worker", "gateway"]) {
+    assert.equal(production.services[name].depends_on?.migrate?.condition, "service_completed_successfully");
+  }
+});
+
+test("all services have least-privilege runtime limits", () => {
   for (const service of Object.values(production.services)) {
-    assert.ok(service.healthcheck);
+    assert.equal(service.read_only, true);
+    assert.ok(service.cap_drop?.includes("ALL"));
+    assert.ok(service.pids_limit);
     assert.ok(service.deploy?.resources?.limits);
+    assert.ok(service.tmpfs);
   }
-  assert.equal(production.services.postgres.environment?.POSTGRES_PASSWORD_FILE, "/run/secrets/postgres_password");
-  assert.equal(production.services.gateway.environment?.AGENT_GATEWAY_TOKENS_FILE, "/run/secrets/agent_token_policies");
+  for (const name of ["app", "worker", "gateway", "postgres", "redis"]) {
+    assert.ok(production.services[name].healthcheck);
+  }
+  assert.ok(production.services.app.volumes?.includes("upload_spool:/app/storage"));
+  assert.ok(production.services.worker.volumes?.includes("upload_spool:/app/storage"));
+  assert.deepEqual(Object.keys(production.volumes).sort(), ["postgres_data", "redis_data", "upload_spool"]);
 });
 
-test("secret-file entrypoint remains compatible with gateway configuration", () => {
+test("Redis generates protected tmpfs configuration without password arguments", () => {
+  assert.match(redisEntrypoint, /sha256sum/);
+  assert.match(redisEntrypoint, /user healthcheck on nopass -@all \+ping/);
+  assert.match(redisEntrypoint, /umask 077/);
+  assert.doesNotMatch(compose, /requirepass|redis-cli[^\n]*redis_password/);
+  assert.doesNotMatch(JSON.stringify(production.services.redis.healthcheck), /redis_password/);
+});
+
+test("NFS preflight fails closed and smoke bypass is explicit", () => {
+  assert.match(preflight, /findmnt --noheadings --raw --output FSTYPE --target/);
+  assert.match(preflight, /nfs\|nfs4/);
+  assert.match(productionUp, /production-nfs-preflight\.sh[\s\S]*docker compose/);
+  const missing = spawnSync("sh", ["scripts/production-nfs-preflight.sh"], { cwd: new URL("../..", import.meta.url) });
+  assert.notEqual(missing.status, 0);
+  const testMode = spawnSync("sh", ["scripts/production-nfs-preflight.sh"], {
+    cwd: new URL("../..", import.meta.url),
+    env: { ...process.env, DND_DATA_HOST_PATH: process.cwd(), DND_NFS_PREFLIGHT_TEST_MODE: "1" },
+  });
+  assert.equal(testMode.status, 0);
+});
+
+test("validator rejects an incompatible worker identity", () => {
+  const result = spawnSync(process.execPath, ["scripts/validate-production-compose.mjs"], {
+    cwd: new URL("../..", import.meta.url),
+    env: { ...process.env, APP_UID: "10001", WORKER_UID: "10002" },
+    encoding: "utf8",
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /WORKER_UID is incompatible/);
+});
+
+test("secret handling and replacement smoke cover all persistent services", () => {
   assert.match(entrypoint, /export "\$variable=\$value"\s+unset "\$file_variable"/);
-  assert.match(dockerignore, /^secrets$/m);
-});
-
-test("smoke scripts prove canonical permissions and replacement persistence", () => {
-  assert.match(permissionsSmoke, /exec -T app[\s\S]*unexpectedly wrote/);
-  assert.match(permissionsSmoke, /exec -T gateway[\s\S]*unexpectedly wrote/);
-  assert.match(permissionsSmoke, /exec -T worker sh -c 'touch/);
-  assert.match(replacementSmoke, /--force-recreate app/);
-  for (const marker of ["canonical", "spool", "production_smoke", "redis-cli"]) {
-    assert.ok(replacementSmoke.includes(marker));
+  assert.match(dockerignore, /^\.env\*$/m);
+  assert.match(dockerignore, /^!\.env\.example$/m);
+  assert.match(permissionsSmoke, /app_identity[\s\S]*worker_identity/);
+  for (const service of ["app", "worker", "postgres", "redis"]) {
+    assert.match(replacementSmoke, new RegExp(`force-recreate[^\\n]*${service}|force-recreate ${service}`));
   }
+  assert.match(replacementSmoke, /WAITAOF/);
+  assert.match(replacementSmoke, /appendonly\.aof\.manifest/);
 });
 
 test("development Compose remains the live-reload stack", () => {
   assert.match(developmentCompose, /target: dev/);
   assert.match(developmentCompose, /entrypoint: \["\.\/docker\/entrypoint\.dev\.sh"\]/);
   assert.match(developmentCompose, /- \.:\/app/);
-  assert.doesNotMatch(developmentCompose, /app-production|worker-production|agent-gateway/);
+  assert.doesNotMatch(developmentCompose, /app-production|worker-production|agent-gateway|migration-production/);
 });

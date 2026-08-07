@@ -1,5 +1,6 @@
 x-runtime-environment: &runtime-environment
   NODE_ENV: production
+  HOME: /tmp
   DATABASE_URL_FILE: /run/secrets/database_url
   REDIS_URL_FILE: /run/secrets/redis_url
   AUTH_SECRET_FILE: /run/secrets/auth_secret
@@ -7,7 +8,7 @@ x-runtime-environment: &runtime-environment
   LLM_API_KEY_FILE: /run/secrets/llm_api_key
   STORAGE_ROOT: /app/storage
   PUBLICATION_SPOOL_ROOT: /app/storage/publication-spool
-  DND_DATA_ROOT: ${DND_DATA_ROOT:?Set DND_DATA_ROOT to the host-mounted NFSv4 path}
+  DND_DATA_ROOT: ${DND_DATA_ROOT:-/app/content-repository}
   EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-zai}
   EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-}
   LLM_BASE_URL: ${LLM_BASE_URL:-}
@@ -23,15 +24,39 @@ x-runtime-secrets: &runtime-secrets
 x-service-defaults: &service-defaults
   restart: unless-stopped
   init: true
+  read_only: true
+  cap_drop:
+    - ALL
   security_opt:
     - no-new-privileges:true
-  depends_on:
-    postgres:
-      condition: service_healthy
-    redis:
-      condition: service_healthy
+  pids_limit: 256
 
 services:
+  migrate:
+    <<: *service-defaults
+    restart: "no"
+    build:
+      context: .
+      target: migration-production
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
+    command: ["node", "--experimental-strip-types", "scripts/migrate.mts"]
+    environment:
+      NODE_ENV: production
+      HOME: /tmp
+      DATABASE_URL_FILE: /run/secrets/database_url
+    secrets:
+      - database_url
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "${MIGRATE_CPU_LIMIT:-1.0}"
+          memory: ${MIGRATE_MEMORY_LIMIT:-512M}
+
   app:
     <<: *service-defaults
     build:
@@ -39,18 +64,32 @@ services:
       target: app-production
     user: "${APP_UID:-10001}:${APP_GID:-10001}"
     ports:
-      - "${APP_PORT:-3000}:3000"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-3000}:3000"
     environment:
       <<: *runtime-environment
-      APP_URL: ${APP_URL:?Set APP_URL to the public application URL}
+      APP_URL: ${APP_URL:?Set APP_URL to the public HTTPS application URL}
       NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-${APP_URL}}
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
     secrets: *runtime-secrets
     volumes:
       - type: bind
-        source: ${DND_DATA_ROOT}
-        target: ${DND_DATA_ROOT}
+        source: ${DND_DATA_HOST_PATH:?Set DND_DATA_HOST_PATH to the active host NFS mount}
+        target: ${DND_DATA_ROOT:-/app/content-repository}
         read_only: true
+        bind:
+          create_host_path: false
       - upload_spool:/app/storage
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777
+      - /app/.next/cache:rw,noexec,nosuid,nodev,size=128m,mode=1777
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "node", "scripts/app-healthcheck.mjs"]
       interval: 10s
@@ -68,15 +107,26 @@ services:
     build:
       context: .
       target: worker-production
-    user: "${WORKER_UID:-10001}:${WORKER_GID:-10001}"
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
     environment: *runtime-environment
     secrets: *runtime-secrets
     volumes:
       - type: bind
-        source: ${DND_DATA_ROOT}
-        target: ${DND_DATA_ROOT}
+        source: ${DND_DATA_HOST_PATH:?Set DND_DATA_HOST_PATH to the active host NFS mount}
+        target: ${DND_DATA_ROOT:-/app/content-repository}
         read_only: false
+        bind:
+          create_host_path: false
       - upload_spool:/app/storage
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=${WORKER_TMPFS_SIZE:-1G},mode=1777
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "node", "scripts/worker-healthcheck.mjs"]
       interval: 10s
@@ -96,25 +146,35 @@ services:
       target: agent-gateway
     user: "${GATEWAY_UID:-10001}:${GATEWAY_GID:-10001}"
     ports:
-      - "${AGENT_GATEWAY_PORT:-8787}:8787"
+      - "${GATEWAY_BIND_ADDRESS:-127.0.0.1}:${AGENT_GATEWAY_PORT:-8787}:8787"
     environment:
+      HOME: /tmp
       DATABASE_URL_FILE: /run/secrets/database_url
       AGENT_GATEWAY_HOST: 0.0.0.0
       AGENT_GATEWAY_PORT: 8787
       AGENT_GATEWAY_TOKENS_FILE: /run/secrets/agent_token_policies
       AGENT_GATEWAY_CURSOR_SECRET_FILE: /run/secrets/agent_cursor_key
-      DND_DATA_ROOT: ${DND_DATA_ROOT}
+      DND_DATA_ROOT: ${DND_DATA_ROOT:-/app/content-repository}
     secrets:
       - database_url
       - agent_token_policies
       - agent_cursor_key
     volumes:
       - type: bind
-        source: ${DND_DATA_ROOT}
-        target: ${DND_DATA_ROOT}
+        source: ${DND_DATA_HOST_PATH:?Set DND_DATA_HOST_PATH to the active host NFS mount}
+        target: ${DND_DATA_ROOT:-/app/content-repository}
         read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "npm", "run", "agent-healthcheck"]
+      test: ["CMD", "node", "--experimental-strip-types", "scripts/agent-healthcheck.mts"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -126,8 +186,16 @@ services:
           memory: ${GATEWAY_MEMORY_LIMIT:-512M}
 
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.1-pg16
     restart: unless-stopped
+    init: true
+    read_only: true
+    user: postgres
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-dnd_firegory}
       POSTGRES_USER: ${POSTGRES_USER:-dnd}
@@ -137,6 +205,9 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+      - /var/run/postgresql:rw,noexec,nosuid,nodev,size=16m,mode=1777
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -150,17 +221,27 @@ services:
           memory: ${POSTGRES_MEMORY_LIMIT:-1G}
 
   redis:
-    image: redis:7-alpine
+    build:
+      context: .
+      target: redis-production
     restart: unless-stopped
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - exec redis-server --appendonly yes --requirepass "$$(tr -d '\r\n' < /run/secrets/redis_password)"
+    init: true
+    read_only: true
+    user: redis
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
     secrets:
       - redis_password
     volumes:
       - redis_data:/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,mode=1777
+      - /run/redis:rw,noexec,nosuid,nodev,size=1m,mode=1777
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$(tr -d '\r\n' < /run/secrets/redis_password)\" ping | grep -q PONG"]
+      test: ["CMD", "redis-cli", "--user", "healthcheck", "--pass", "", "ping"]
       interval: 5s
       timeout: 5s
       retries: 12

@@ -11,8 +11,8 @@ started with `docker compose up --build`.
 - Sufficient disk space for PostgreSQL data, Redis, and file storage.
 - Network access to the z.ai API (for embeddings and LLM features).
 - PostgreSQL 16 built with ICU and the deterministic root collation `und-x-icu` (provided by the Compose image).
-- An NFSv4 export already mounted on the Docker host. Compose does not provision,
-  mount, or authenticate to NFS.
+- An NFSv4 export already mounted on the Docker host and `findmnt` available for
+  the mandatory fail-closed host preflight. Compose does not provision NFS.
 
 ## Step 1: Clone the repository
 
@@ -30,14 +30,13 @@ cp .env.example .env
 Edit `.env` with non-secret deployment values:
 
 ```bash
-# Required host path; this same absolute path is used inside containers
-DND_DATA_ROOT=/mnt/dnd-firegory
+# Required active host NFS mount and optional in-container path
+DND_DATA_HOST_PATH=/mnt/dnd-firegory
+DND_DATA_ROOT=/app/content-repository
 
 # Numeric identities must match the host NFS export ownership/ACLs
 APP_UID=10001
 APP_GID=10001
-WORKER_UID=10001
-WORKER_GID=10001
 GATEWAY_UID=10001
 GATEWAY_GID=10001
 LLM_BASE_URL=https://api.openai.com/v1
@@ -54,6 +53,8 @@ POSTGRES_USER=dnd
 # Optional host ports and secret directory
 APP_PORT=3000
 AGENT_GATEWAY_PORT=8787
+APP_BIND_ADDRESS=127.0.0.1
+GATEWAY_BIND_ADDRESS=127.0.0.1
 PRODUCTION_SECRETS_ROOT=./secrets
 ```
 
@@ -72,20 +73,25 @@ end with a newline. Values shown are descriptions, not usable credentials.
 | `agent-token-policies.json` | Gateway token policy JSON documented in `agent-gateway.md` |
 | `agent-cursor-key` | Random gateway cursor HMAC key, at least 32 bytes |
 
-The secret directory is git-ignored. Compose mounts these files through Docker
-secrets and does not place their values in generated container configuration.
+The secret directory is git-ignored and Docker-build-ignored. Compose mounts
+these files through Docker secrets and does not place their values in generated
+container configuration.
 
 ### Security notes
 
 - Generate `auth-secret` and `agent-cursor-key` with cryptographically random values.
 - Use distinct strong PostgreSQL and Redis passwords.
 - PostgreSQL and Redis have no production host port mapping; access them through the Compose network.
+- App and gateway ports bind to loopback by default. Serve them only through a
+  TLS reverse proxy on the same host or an authenticated private network; never
+  expose either plaintext port to the public Internet.
 - Never commit `.env` to version control.
 
 ### Host NFSv4 assumptions
 
 Mount the export on the host before starting Compose, for example at
-`/mnt/dnd-firegory`, and set `DND_DATA_ROOT` to that absolute path. Mount options,
+`/mnt/dnd-firegory`, and set `DND_DATA_HOST_PATH` to that absolute path. The
+in-container `DND_DATA_ROOT` defaults to `/app/content-repository`. Mount options,
 server address, Kerberos material, and other NFS credentials belong in host
 configuration such as `/etc/fstab` or an infrastructure manager, never in this
 repository or generated Compose configuration.
@@ -94,18 +100,24 @@ The export must provide NFSv4 close-to-open consistency, same-filesystem atomic
 rename, hard links, file and directory fsync behavior, and stable numeric UID/GID
 mapping. Root squashing is expected. Grant app and gateway identities read and
 traverse access only; grant the worker identity read/write/create/rename access.
-The defaults use one identity (`10001:10001`), with Docker's `ro` bind flags
-enforcing app/gateway immutability. Distinct IDs are supported when host ACLs
-provide equivalent access. Changing IDs or `DND_DATA_ROOT` only requires editing
-`.env` and recreating containers; images do not need rebuilding.
+App and worker intentionally use the same `APP_UID:APP_GID` because both access
+the local upload spool. Gateway may use a separate identity. Docker's `ro` bind
+flags enforce app/gateway canonical immutability. Changing IDs or paths only
+requires editing `.env` and recreating containers; images do not need rebuilding.
 
 ## Step 3: Start services
 
 ```bash
-docker compose -f compose.production.yml up -d --build
+npm run production:up
 ```
 
-This starts five services:
+`production:up` reads `DND_DATA_HOST_PATH` from the environment or `.env`, then
+uses `findmnt` to prove that path is on an active `nfs`/`nfs4` mount before any
+container starts. It fails closed for missing paths, missing `findmnt`, and local
+filesystems. `DND_NFS_PREFLIGHT_TEST_MODE=1` is reserved for the isolated smoke
+test and must never be used in production.
+
+This starts five long-running services plus a one-shot migration service:
 
 | Service | Description | Internal port |
 | --- | --- | --- |
@@ -114,16 +126,16 @@ This starts five services:
 | `gateway` | Read-only agent HTTP/MCP gateway | 8787 |
 | `postgres` | PostgreSQL 16 + pgvector | 5432 |
 | `redis` | Job queue and cache | 6379 |
+| `migrate` | Applies all schema migrations and exits | — |
 
 The first start initializes the PostgreSQL database with the pgvector extension.
 
-## Step 4: Run migrations
+## Step 4: Verify migrations
 
-```bash
-docker compose -f compose.production.yml exec app npm run db:migrate
-```
-
-This creates the schema tables and indexes. Migrations are idempotent — re-running is safe.
+The one-shot `migrate` service creates the schema tables and indexes. App,
+worker, and gateway start only after it exits successfully. Check its result with
+`docker compose -f compose.production.yml ps -a migrate` and inspect failures
+with `docker compose -f compose.production.yml logs migrate`.
 The compendium migration fails clearly if PostgreSQL is not UTF-8 or lacks the deterministic ICU root collation `und-x-icu`; verify custom PostgreSQL builds before upgrading.
 
 ## Step 5: Create the first admin user
@@ -149,7 +161,8 @@ Run through this checklist:
 **app** (Next.js):
 
 - Built from the multi-stage `app-production` target and runs as a configurable non-root UID/GID.
-- Runs the prebuilt Next.js production server.
+- Uses the pinned Node.js 22.22.3 runtime image.
+- Runs the reduced Next.js standalone production server.
 - Uses the local named volume `upload_spool` for uploads and publication commands.
 - Mounts canonical `DND_DATA_ROOT` read-only. Publication requests write only to the shared publication spool and Redis queue.
 
@@ -158,6 +171,8 @@ Run through this checklist:
 - Built from the multi-stage `worker-production` target with PDF/OCR runtime tools.
 - Runs `npm run worker` which polls the Redis queue for ingestion jobs.
 - Shares the local `upload_spool` volume with the app for file access.
+- Uses the exact same `APP_UID:APP_GID` as app; incompatible worker identity
+  overrides are rejected by production validation.
 - Is the sole read-write owner of canonical `DND_DATA_ROOT`; do not run any app container with that mount writable.
 - Requires the same environment variables as the app.
 - The image includes PDF processing packages (`poppler-utils`, `qpdf`, `ghostscript`, `ocrmypdf`, `tesseract-ocr`, `tesseract-ocr-eng`, `tesseract-ocr-rus`) needed by the ingestion pipeline.
@@ -170,7 +185,7 @@ Run through this checklist:
 
 **postgres**:
 
-- Uses the `pgvector/pgvector:pg16` image.
+- Uses the pinned `pgvector/pgvector:0.8.1-pg16` image.
 - Initializes with `docker/postgres/init/001-pgvector.sql` on first volume creation.
 - Data persists in the `postgres_data` named volume.
 - Health check confirms the database is ready before dependent services start.
@@ -178,7 +193,9 @@ Run through this checklist:
 
 **redis**:
 
-- Uses `redis:7-alpine` with AOF persistence enabled.
+- Uses the pinned Redis 7.4.5 production target with AOF persistence enabled.
+- Generates a mode-0600 ACL and config on tmpfs from the secret at startup; the
+  password never appears in Redis arguments or its healthcheck.
 - Data persists in the `redis_data` named volume.
 - Health check confirms Redis is responding.
 
@@ -186,7 +203,7 @@ Run through this checklist:
 
 ```bash
 # Start all services
-docker compose -f compose.production.yml up -d --build
+npm run production:up
 
 # View logs
 docker compose -f compose.production.yml logs -f app
@@ -195,8 +212,8 @@ docker compose -f compose.production.yml logs -f worker
 # Restart a single service
 docker compose -f compose.production.yml restart app
 
-# Run migrations
-docker compose -f compose.production.yml exec app npm run db:migrate
+# Inspect the one-shot migration
+docker compose -f compose.production.yml ps -a migrate
 
 # Shell into the app container
 docker compose -f compose.production.yml exec app sh
@@ -211,15 +228,16 @@ docker compose -f compose.production.yml down
 docker compose -f compose.production.yml down -v
 
 # Rebuild after dependency changes
-docker compose -f compose.production.yml build --no-cache app worker gateway
+docker compose -f compose.production.yml build --no-cache app worker gateway migrate redis
 ```
 
 Run `npm run production:config` to validate Compose. It parses and checks the
 production contract statically, then invokes `docker compose config` when Docker
 is installed. `npm run production:smoke` builds the stack,
-waits for all five healthchecks, proves app/gateway read-only and worker
-read-write canonical access, then replaces app and verifies canonical, spool,
-PostgreSQL, and Redis persistence.
+waits for migration success and all five healthchecks, proves app/gateway
+read-only and worker read-write canonical access, then recreates app, worker,
+PostgreSQL, and Redis and verifies canonical, spool, database, and Redis AOF
+persistence.
 
 ### Troubleshooting
 
@@ -227,9 +245,9 @@ PostgreSQL, and Redis persistence.
 `APP_PORT` or `AGENT_GATEWAY_PORT` in `.env`. PostgreSQL and Redis are not
 published on host ports in the production stack.
 
-**Stale images**: Rebuild with `docker compose -f compose.production.yml build --no-cache app worker gateway`.
+**Stale images**: Rebuild with `docker compose -f compose.production.yml build --no-cache app worker gateway migrate redis`.
 
-**Missing pgvector extension**: If the `vector` extension is missing after changing init scripts, recreate the Postgres volume: `docker compose down -v` then `docker compose up -d`.
+**Missing pgvector extension**: If the `vector` extension is missing after changing init scripts, recreate the production Postgres volume with `docker compose -f compose.production.yml down -v`, then run `npm run production:up`.
 
 **Worker PDF/OCR failures**: The Docker image installs the PDF processing packages required by the worker. If you run `npm run worker` directly on Debian/Ubuntu instead of Docker, install the same system dependencies on the host.
 
@@ -254,13 +272,17 @@ sudo apt-get update && sudo apt-get install -y \
 
 `poppler-utils` provides `pdfinfo` and `pdftotext`; without those, ingestion jobs fail before PDF text extraction. Missing `qpdf`, `ghostscript`, `ocrmypdf`, or Tesseract keeps the worker running but degrades normalization/OCR quality. The worker logs a startup preflight warning listing missing tools before it processes jobs.
 
-**Redis connection errors**: Ensure the worker and app can reach `redis:6379` on the internal Docker network. Check `docker compose logs redis`.
+**Redis connection errors**: Ensure the worker and app can reach `redis:6379` on the internal Docker network. Check `docker compose -f compose.production.yml logs redis`.
 
 **Publication storage**: Production Compose bind-mounts the host's existing NFSv4 path and never provisions NFS. App and gateway use `ro`; worker alone uses `rw`. Keep the local `upload_spool` named volume outside canonical storage. Checksummed generation reservations use fsynced unique temporary files plus exclusive hard-link installation and directory fsync, so the shared filesystem must provide those semantics consistently to all submitters. Reservation filenames are permanent consumed tombstones and must not be manually removed; valid complete reservations participate in the ordering floor. All canonical repository directories must be on one filesystem because revision and activation-delta installation rely on same-filesystem atomic rename. Canonical directories must not be symlinks and must not be renameable by untrusted processes. PostgreSQL advisory locks are a contention optimization only; publication ordering survives PostgreSQL rebuild because reservations, semantically valid commands, and no-follow canonical activation deltas are rescanned before allocation. Deploy v1+v2-capable readers before upgrading the bootstrap to `readerContractVersion: 2`; unpublication remains blocked until then. Direct reads of bootstrap `manifests/repository.json` are not active-state reads. See `content-repository/README.md` for the resolver contract, cache consistency, outbox recovery, and durability assumptions.
 
 ## Reverse proxy setup
 
-For production, run behind a reverse proxy (nginx, Caddy, Traefik) that handles TLS termination.
+Production requires a reverse proxy (nginx, Caddy, Traefik) that handles TLS
+termination on the same host, or an authenticated private network. The default
+loopback binds are intended for a same-host proxy. Set a non-loopback bind only
+for a firewalled private interface and never expose plaintext app or gateway
+ports publicly.
 
 Example nginx snippet:
 
@@ -288,11 +310,10 @@ Set `APP_URL` and `NEXT_PUBLIC_APP_URL` to the public HTTPS URL.
 
 ```bash
 git pull origin main
-docker compose -f compose.production.yml up -d --build
-docker compose -f compose.production.yml exec app npm run db:migrate
+npm run production:up
 ```
 
-Always run migrations after upgrading — new migrations may have been added.
+The one-shot migration gate runs automatically on every Compose reconciliation.
 
 ## Production considerations
 

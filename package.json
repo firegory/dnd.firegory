@@ -20,7 +20,8 @@
     "agent-healthcheck": "node --experimental-strip-types scripts/agent-healthcheck.mts",
     "agent-secret-hash": "node --experimental-strip-types scripts/agent-secret-hash.mts",
     "production:config": "node scripts/validate-production-compose.mjs",
-    "production:smoke": "./scripts/production-smoke.sh"
+    "production:smoke": "./scripts/production-smoke.sh",
+    "production:up": "./scripts/production-up.sh -d --build"
   },
   "dependencies": {
     "ajv": "^8.20.0",

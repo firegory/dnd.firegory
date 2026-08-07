@@ -95,7 +95,7 @@ This command remains the live-reload development stack. For production, mount
 the canonical NFSv4 export on the host and use `compose.production.yml`:
 
 ```bash
-docker compose -f compose.production.yml up -d --build
+npm run production:up
 ```
 
 Production uses separate non-root app, worker, and gateway image targets. See
