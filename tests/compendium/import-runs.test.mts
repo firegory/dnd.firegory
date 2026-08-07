@@ -265,7 +265,7 @@ test("candidate diff retains unchanged, changed, missing, duplicate, and invalid
     async query(sql: string, values: unknown[] = []) {
       if (sql.includes("FROM compendium_import_runs") && sql.includes("FOR UPDATE")) return { rows: [runRow] } as never;
       if (sql.includes("FROM compendium_import_occurrences") && sql.includes("ORDER BY occurrence_index")) {
-        return { rows: [0, 1, 2, 3, 4].map((index) => occurrenceRow(index)) } as never;
+        return { rows: [0, 1, 2, 3, 4, 5].map((index) => occurrenceRow(index)) } as never;
       }
       if (sql.includes("DISTINCT ON (candidate.entry_type, candidate.candidate_key)")) return { rows: [
         { id: "old-a", candidate_key: "a", entry_type: "spell", diff_status: "new", content: { name: "same" }, content_sha256: sameHash },
@@ -299,8 +299,10 @@ test("candidate diff retains unchanged, changed, missing, duplicate, and invalid
     { occurrenceIndex: 2, candidateKey: "b", entryType: "spell", content: { name: "duplicate" } },
     { occurrenceIndex: 3, candidateKey: null, entryType: null, content: { raw: "?" }, invalidReason: "parser rejected candidate" },
     { occurrenceIndex: 4, candidateKey: "b", entryType: "equipment", content: { name: "same key, different type" } },
+    { occurrenceIndex: 5, candidateKey: "en-starter", entryType: "guide", content: { review: { status: "pending" } } },
   ], "worker");
-  assert.deepEqual(result.map(({ diffStatus }) => diffStatus).sort(), ["changed", "duplicate", "invalid", "missing", "missing", "new", "unchanged"]);
+  assert.deepEqual(result.map(({ diffStatus }) => diffStatus).sort(), ["changed", "duplicate", "invalid", "missing", "missing", "new", "new", "unchanged"]);
+  assert.equal(inserted.find((candidate) => candidate.entry_type === "guide")?.invalid_reason, null);
   const missing = inserted.filter((candidate) => candidate.diff_status === "missing");
   assert.deepEqual(missing.map((candidate) => candidate.entry_type).sort(), ["item", "spell"]);
   assert.ok(missing.every((candidate) => candidate.candidate_key === "c" && candidate.occurrence_id === null));

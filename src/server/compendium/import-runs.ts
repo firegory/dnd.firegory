@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { QueryResultRow } from "pg";
 
 import { withTransaction } from "../db/client.ts";
-import { COMPENDIUM_ENTRY_TYPES, CompendiumValidationError, type CompendiumEntryType } from "./service.ts";
+import { COMPENDIUM_ENTRY_TYPES, CompendiumValidationError } from "./service.ts";
 
 type DbClient = Readonly<{
   query<T extends QueryResultRow = QueryResultRow>(sql: string, values?: unknown[]): Promise<{ rows: T[]; rowCount?: number | null }>;
@@ -12,6 +12,8 @@ type TransactionRunner = <T>(callback: (client: DbClient) => Promise<T>) => Prom
 
 export type ImportRunStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled";
 export type ImportDiffStatus = "new" | "unchanged" | "changed" | "missing" | "duplicate" | "invalid";
+export const IMPORT_CANDIDATE_ENTRY_TYPES = [...COMPENDIUM_ENTRY_TYPES, "guide"] as const;
+export type ImportCandidateEntryType = (typeof IMPORT_CANDIDATE_ENTRY_TYPES)[number];
 
 type RunRow = Readonly<{
   id: string;
@@ -56,7 +58,7 @@ export type ImportOccurrenceInput = Readonly<{
 export type ImportCandidateInput = Readonly<{
   occurrenceIndex: number;
   candidateKey?: string | null;
-  entryType?: CompendiumEntryType | null;
+  entryType?: ImportCandidateEntryType | null;
   content: Readonly<Record<string, unknown>>;
   invalidReason?: string | null;
 }>;
@@ -78,7 +80,7 @@ type CandidateRow = Readonly<{
   previous_candidate_id: string | null;
   candidate_order: number;
   candidate_key: string;
-  entry_type: CompendiumEntryType | null;
+  entry_type: ImportCandidateEntryType | null;
   diff_status: ImportDiffStatus;
   content: Record<string, unknown>;
   content_sha256: string;
@@ -353,7 +355,7 @@ export class CompendiumImportRunService {
       const seen = new Set<string>();
       const present = new Set<string>();
       const planned: Array<Readonly<{
-        candidateOrder: number; occurrenceId: string | null; previous: BaselineCandidateRow | null; key: string; type: CompendiumEntryType | null;
+        candidateOrder: number; occurrenceId: string | null; previous: BaselineCandidateRow | null; key: string; type: ImportCandidateEntryType | null;
         status: ImportDiffStatus; content: Record<string, unknown>; hash: string; invalidReason: string | null;
       }>> = [];
 
@@ -364,7 +366,7 @@ export class CompendiumImportRunService {
         const type = candidate.entryType ?? null;
         const invalidReason = candidate.invalidReason?.trim()
           || (!validCandidateKey(key) ? "candidateKey must be a stable lowercase key" : null)
-          || (!type || !COMPENDIUM_ENTRY_TYPES.includes(type) ? "entryType is unsupported" : null);
+          || (!type || !IMPORT_CANDIDATE_ENTRY_TYPES.includes(type) ? "entryType is unsupported" : null);
         const hash = sha256Json(candidate.content);
         if (invalidReason) {
           planned.push({ candidateOrder: planned.length, occurrenceId, previous: null, key: key || `invalid:${candidate.occurrenceIndex}`, type, status: "invalid", content: candidate.content, hash, invalidReason });
@@ -646,7 +648,7 @@ function candidateMatches(row: CandidateRow, run: RunRow, candidate: Readonly<{
   occurrenceId: string | null;
   previous: BaselineCandidateRow | null;
   key: string;
-  type: CompendiumEntryType | null;
+  type: ImportCandidateEntryType | null;
   status: ImportDiffStatus;
   content: Readonly<Record<string, unknown>>;
   hash: string;
@@ -702,7 +704,7 @@ function candidateReplayMatches(
     const type = input.entryType ?? null;
     const invalidReason = input.invalidReason?.trim()
       || (!validCandidateKey(key) ? "candidateKey must be a stable lowercase key" : null)
-      || (!type || !COMPENDIUM_ENTRY_TYPES.includes(type) ? "entryType is unsupported" : null);
+      || (!type || !IMPORT_CANDIDATE_ENTRY_TYPES.includes(type) ? "entryType is unsupported" : null);
     const duplicate = !invalidReason && seen.has(key);
     if (!invalidReason) seen.add(key);
     if (!row
@@ -738,7 +740,7 @@ function candidateReplayMatches(
 function timestamp(value: string | Date): string { return value instanceof Date ? value.toISOString() : value; }
 
 function sha256Json(value: unknown): string { return createHash("sha256").update(canonicalJson(value)).digest("hex"); }
-function candidateIdentity(type: CompendiumEntryType, key: string): string { return `${type}:${key}`; }
+function candidateIdentity(type: ImportCandidateEntryType, key: string): string { return `${type}:${key}`; }
 function validCandidateKey(value: string): boolean { return /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/.test(value); }
 function requireHash(value: string, field: string): void { if (!/^[0-9a-f]{64}$/.test(value)) throw new CompendiumValidationError(`${field} must be a lowercase SHA-256 hash.`); }
 function requireUuid(value: string, field: string): void { if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw new CompendiumValidationError(`${field} must be a UUID.`); }

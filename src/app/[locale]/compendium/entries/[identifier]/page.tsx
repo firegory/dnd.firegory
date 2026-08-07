@@ -36,8 +36,26 @@ export default async function EntryPage({ params }: { params: Promise<{ locale: 
         <div className="entry-body">{entry.body.split(/\n{2,}/).filter(Boolean).map((paragraph, index) => <p key={index}>{paragraph}</p>)}</div>
         <footer className="entry-source">
           <h2>{locale === "ru" ? "Источник и цитаты" : "Source and citations"}</h2>
-          <p><strong>{entry.source.publication.title}</strong>{entry.source.publication.attribution ? ` · ${entry.source.publication.attribution}` : ""}</p>
-          <ul>{entry.citations.map((citation, index) => <li key={citationText(citation, "id") ?? index}>{citationText(citation, "quote") ?? (locale === "ru" ? "Цитата из источника" : "Source citation")}</li>)}</ul>
+          <p>
+            <strong>{entry.source.publication.title}</strong>{entry.source.publication.attribution ? ` · ${entry.source.publication.attribution}` : ""}
+            {safeExternalUrl(entry.source.publication.originUrl) ? <> · <a href={entry.source.publication.originUrl!} rel="noopener noreferrer">{locale === "ru" ? "Открыть источник" : "Open source"}</a></> : null}
+          </p>
+          <ul className="entry-citations">{entry.citations.map((citation, index) => {
+            const quote = citationText(citation, "quote") ?? (locale === "ru" ? "Цитата из источника" : "Source citation");
+            const page = citationNumber(citation, "page");
+            const section = citationText(citation, "section");
+            const chunkId = citationText(citation, "chunkId");
+            const sourceId = citationText(citation, "sourceId");
+            const fileId = citationText(citation, "fileId");
+            const previewHref = sourceId && fileId && page
+              ? `/api/citations/preview?sourceId=${encodeURIComponent(sourceId)}&fileId=${encodeURIComponent(fileId)}&page=${page}`
+              : chunkId ? `/api/citations/preview?chunkId=${encodeURIComponent(chunkId)}` : null;
+            return <li key={citationText(citation, "id") ?? index}>
+              <blockquote>«{quote}»</blockquote>
+              <span>{entry.source.publication.title}{page ? ` · ${locale === "ru" ? "стр." : "p."} ${page}` : ""}{section ? ` · ${section}` : ""}</span>
+              {previewHref ? <a href={previewHref} target="_blank" rel="noopener noreferrer">{locale === "ru" ? "Превью цитаты" : "Citation preview"}</a> : null}
+            </li>;
+          })}</ul>
         </footer>
       </article>
     </AppLayout>
@@ -46,4 +64,18 @@ export default async function EntryPage({ params }: { params: Promise<{ locale: 
 
 function citationText(value: Readonly<Record<string, unknown>>, key: string): string | null {
   return typeof value[key] === "string" && value[key] ? value[key] : null;
+}
+
+function citationNumber(value: Readonly<Record<string, unknown>>, key: string): number | null {
+  return typeof value[key] === "number" && Number.isSafeInteger(value[key]) && value[key] > 0 ? value[key] : null;
+}
+
+function safeExternalUrl(value: string | null): boolean {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password;
+  } catch {
+    return false;
+  }
 }

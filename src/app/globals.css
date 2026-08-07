@@ -626,6 +626,34 @@
   .entry-source h2 {
     margin-top: 0;
   }
+
+  .entry-source a,
+  .entry-citations a {
+    color: var(--color-accent);
+    font-weight: 700;
+  }
+
+  .entry-citations {
+    display: grid;
+    gap: 18px;
+    padding: 0;
+    list-style: none;
+  }
+
+  .entry-citations blockquote {
+    margin: 0 0 8px;
+    padding-left: 14px;
+    border-left: 3px solid var(--color-accent);
+    font-family: var(--font-display);
+    line-height: 1.6;
+  }
+
+  .entry-citations span {
+    display: block;
+    margin-bottom: 5px;
+    color: var(--color-text-muted);
+    font-size: 0.78rem;
+  }
 }
 
 @media (max-width: 61.999rem) {

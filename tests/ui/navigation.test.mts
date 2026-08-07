@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { getNavigationItems, isNavigationItemActive } from "../../src/components/ui/navigation.ts";
+import { readFile } from "node:fs/promises";
 
 describe("compendium navigation", () => {
   it("keeps search and settings reachable for every authenticated role", () => {
@@ -26,5 +27,10 @@ describe("compendium navigation", () => {
     assert.equal(isNavigationItemActive("/admin/sources/id-1", "/admin/sources"), true);
     assert.equal(isNavigationItemActive("/search", "/search"), true);
     assert.equal(isNavigationItemActive("/searching", "/search"), false);
+  });
+
+  it("switches locale in place without dropping query or hash state", async () => {
+    const sidebar = await readFile(new URL("../../src/components/ui/sidebar.tsx", import.meta.url), "utf8");
+    assert.match(sidebar, /pathname\.replace[\s\S]*window\.location\.search[\s\S]*window\.location\.hash/);
   });
 });

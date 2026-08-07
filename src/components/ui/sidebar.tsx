@@ -67,7 +67,7 @@ function LanguageToggle() {
   function changeLanguage(value: UiLanguage) {
     setLanguage(value);
     if (/^\/(?:ru|en)\/compendium(?:\/|$)/.test(pathname)) {
-      router.replace(pathname.replace(/^\/(?:ru|en)/, `/${value}`));
+      router.replace(`${pathname.replace(/^\/(?:ru|en)/, `/${value}`)}${window.location.search}${window.location.hash}`);
     }
   }
 

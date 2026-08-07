@@ -30,7 +30,7 @@ export default async function CategoryPage({ params }: { params: Promise<{ local
       <ol className="entry-list">
         {result.entries.map((entry) => (
           <li key={entry.versionId}>
-            <Link href={`/${locale}/compendium/entries/${encodeURIComponent(entry.slug)}`}><strong>{entry.title}</strong>{entry.summary ? <span>{entry.summary}</span> : null}</Link>
+            <Link href={`/${locale}/compendium/entries/${entry.id}`}><strong>{entry.title}</strong>{entry.summary ? <span>{entry.summary}</span> : null}</Link>
             <small>{entry.source.publication.title}</small>
           </li>
         ))}
