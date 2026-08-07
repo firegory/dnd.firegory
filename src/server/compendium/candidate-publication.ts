@@ -18,7 +18,8 @@ import {
 } from "./candidate-schema.ts";
 import type { CompendiumEntryType } from "./service.ts";
 import { validateSpellProjection } from "./spell-schema.ts";
-import { spellDetailEvidence, type SnapshotSpellCandidate } from "./next-dnd/import-adapter.ts";
+import { projectionAttributes, validateFlatProjection, type FlatEntryType } from "./flat-schema.ts";
+import { flatMetadataEvidence, spellDetailEvidence, type SnapshotFlatCandidate, type SnapshotSpellCandidate } from "./next-dnd/import-adapter.ts";
 import { NEXT_DND_PARSER_VERSION } from "./next-dnd/parser.ts";
 
 export type SnapshotSpellEvidence = Readonly<{
@@ -68,13 +69,14 @@ export type CandidateCapabilityContext = Readonly<{
 const CANONICAL_ENTRY_TYPES: Readonly<Record<CompendiumEntryType, string>> = {
   spell: "spell",
   creature: "monster",
-  equipment: "item",
+  equipment: "equipment",
   feature: "classFeature",
   item: "item",
   class: "other",
   species: "other",
-  background: "other",
-  feat: "other",
+  background: "background",
+  feat: "feat",
+  glossary: "glossary",
 };
 const EXTRACTION_METHODS = new Set(["section-parser", "table-parser", "spell-parser", "stat-block-parser", "llm"]);
 const STABLE_ID = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
@@ -105,6 +107,17 @@ export function classifyCandidatePublication(value: unknown, context: CandidateC
       return {
         payloadOrigin: "collector_snapshot", publicationCapability: "requires_extraction",
         publicationBlockReason: `Collector spell requires review repair: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+  if (isSnapshotFlatCandidate(value)) {
+    try {
+      validateSnapshotFlatCandidate(value, context.candidateKey, context.entryType, context.snapshotEvidence ?? null);
+      return { payloadOrigin: "collector_snapshot", publicationCapability: "publishable", publicationBlockReason: null };
+    } catch (error) {
+      return {
+        payloadOrigin: "collector_snapshot", publicationCapability: "requires_extraction",
+        publicationBlockReason: `Collector flat entry requires review repair: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }
@@ -223,6 +236,52 @@ export function projectSnapshotSpellCandidate(value: unknown, context: Readonly<
       endOffset: null,
       fieldPath: citation.fieldPath,
       sourceUrl: citation.sourceUrl,
+    })),
+  });
+  assertCanonicalRevision(revision);
+  return revision;
+}
+
+export function projectSnapshotFlatCandidate(value: unknown, context: Readonly<{
+  candidateKey: string;
+  entryType: FlatEntryType;
+  createdAt: string;
+  source: ContentSource;
+  fileId: string;
+  evidence: SnapshotSpellEvidence;
+}>): CanonicalRevision {
+  const candidate = validateSnapshotFlatCandidate(value, context.candidateKey, context.entryType, context.evidence);
+  const sourceFile = context.source.files.find((file) => file.fileId === context.fileId);
+  if (!sourceFile || sourceFile.contentHash !== `sha256:${context.evidence.fileChecksumSha256}`) {
+    throw new CandidateProjectionError("Collector snapshot file checksum changed across the review boundary.");
+  }
+  const projection = validateFlatProjection(candidate.entryType, candidate.attributes);
+  const plain = candidate.body;
+  const revision = createCanonicalRevision({
+    schemaVersion: 1, kind: "canonicalRevision",
+    entryId: canonicalCandidateEntryId(candidate.entryType, context.candidateKey), createdAt: context.createdAt,
+    source: context.source,
+    sourceVersion: {
+      url: context.evidence.sourceUrl, fingerprintSha256: context.evidence.fingerprintSha256,
+      rawBlobPath: context.evidence.rawBlobPath, fetchedAt: context.evidence.fetchedAt,
+      fileChecksumSha256: context.evidence.fileChecksumSha256,
+      index: {
+        url: context.evidence.indexUrl, fingerprintSha256: context.evidence.indexFingerprintSha256,
+        rawBlobPath: context.evidence.rawIndexBlobPath, fetchedAt: context.evidence.indexFetchedAt,
+        cardFingerprintSha256: context.evidence.indexCardFingerprintSha256,
+        metadataEvidenceText: context.evidence.metadataEvidenceText,
+      },
+    },
+    entry: {
+      entryType: candidate.entryType, name: candidate.title, aliases: candidate.aliases,
+      typedFields: Object.entries(projectionAttributes(projection)).map(([key, fieldValue]) => typedField(key, fieldValue)),
+    },
+    text: { plain, sections: [{ sectionId: `${candidate.entryType}-rules`, heading: candidate.title, text: plain, startOffset: 0, endOffset: plain.length }] },
+    citations: candidate.citations.map((citation) => ({
+      citationId: `collector-${evidenceKey(citation.fieldPath)}`, sourceId: context.source.sourceId,
+      fileId: context.fileId, page: null,
+      section: citation.sourceUrl === context.evidence.indexUrl ? "window.LIST flat projection" : candidate.title,
+      quote: citation.quote, startOffset: null, endOffset: null, fieldPath: citation.fieldPath, sourceUrl: citation.sourceUrl,
     })),
   });
   assertCanonicalRevision(revision);
@@ -349,6 +408,64 @@ function isCollectorSnapshotCandidate(value: unknown): boolean {
 
 function isSnapshotSpellCandidate(value: unknown): value is Record<string, unknown> {
   return isRecord(value) && value.kind === "snapshotSpellCandidate" && value.schemaVersion === 1;
+}
+
+function isSnapshotFlatCandidate(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && value.kind === "snapshotFlatCandidate" && value.schemaVersion === 1;
+}
+
+function validateSnapshotFlatCandidate(value: unknown, candidateKey: string, entryType: string | null, evidence: SnapshotSpellEvidence | null): SnapshotFlatCandidate {
+  if (!isSnapshotFlatCandidate(value) || !entryType || !["feat", "background", "item", "equipment", "glossary"].includes(entryType)) {
+    throw new CandidateProjectionError("Collector candidate is not a supported typed flat entry.");
+  }
+  if (!hasExactKeys(value, ["aliases", "attributes", "body", "citations", "entryType", "externalId", "extraction", "kind", "parserVersion", "schemaVersion", "sha256", "sourceUrl", "sourceVersion", "title"])) {
+    throw new CandidateProjectionError("Collector flat entry shape is unsupported.");
+  }
+  const type = entryType as FlatEntryType;
+  if (value.entryType !== type || candidateKey !== `${type === "background" ? "backgrounds" : type === "feat" ? "feats" : type === "item" ? "items" : type}-${value.externalId}`
+      || typeof value.externalId !== "string" || !/^\d+$/.test(value.externalId)) {
+    throw new CandidateProjectionError("Collector flat entry identity does not match its immutable review row.");
+  }
+  if (typeof value.title !== "string" || !value.title.trim() || typeof value.body !== "string" || !value.body.trim()
+      || !Array.isArray(value.aliases) || value.aliases.some((alias) => typeof alias !== "string" || !alias.trim())) {
+    throw new CandidateProjectionError("Collector flat title, aliases, or body are invalid.");
+  }
+  const projection = validateFlatProjection(type, value.attributes);
+  const attributes = projectionAttributes(projection);
+  if (!evidence || typeof value.sha256 !== "string" || value.sha256 !== evidence.fingerprintSha256
+      || value.sourceUrl !== evidence.sourceUrl || typeof value.sourceUrl !== "string" || !/^https:\/\/next\.dnd\.su\//.test(value.sourceUrl)
+      || !isRecord(value.sourceVersion) || value.sourceVersion.url !== evidence.sourceUrl || value.sourceVersion.sha256 !== evidence.fingerprintSha256
+      || value.sourceVersion.rawBlobPath !== evidence.rawBlobPath || value.sourceVersion.fetchedAt !== evidence.fetchedAt
+      || value.parserVersion !== NEXT_DND_PARSER_VERSION || !isRecord(value.sourceVersion.index)
+      || value.sourceVersion.index.url !== evidence.indexUrl || value.sourceVersion.index.sha256 !== evidence.indexFingerprintSha256
+      || value.sourceVersion.index.rawBlobPath !== evidence.rawIndexBlobPath || value.sourceVersion.index.fetchedAt !== evidence.indexFetchedAt
+      || value.sourceVersion.index.cardFingerprintSha256 !== evidence.indexCardFingerprintSha256
+      || value.sourceVersion.index.metadataEvidenceText !== evidence.metadataEvidenceText
+      || evidence.metadataEvidenceText !== flatMetadataEvidence(attributes)) {
+    throw new CandidateProjectionError("Collector flat provenance does not match its persisted occurrence envelope.");
+  }
+  if (!isRecord(value.extraction) || value.extraction.status !== "ready" || !Array.isArray(value.extraction.missingFields) || value.extraction.missingFields.length !== 0) {
+    throw new CandidateProjectionError("Typed collector extraction is incomplete.");
+  }
+  const expectedPaths = new Set(["$.title", "$.body", ...Object.keys(attributes).map((field) => `$.attributes.${field}`)]);
+  if (!Array.isArray(value.citations) || value.citations.length !== expectedPaths.size) throw new CandidateProjectionError("Collector flat entry requires one citation for every canonical field.");
+  for (const citation of value.citations) {
+    if (!isRecord(citation) || typeof citation.fieldPath !== "string" || !expectedPaths.delete(citation.fieldPath)
+        || typeof citation.quote !== "string" || !citation.quote.trim() || ![evidence.sourceUrl, evidence.indexUrl].includes(String(citation.sourceUrl))) {
+      throw new CandidateProjectionError("Collector flat field citations do not match immutable snapshot evidence.");
+    }
+    if (citation.fieldPath === "$.title" || citation.fieldPath === "$.body") {
+      const expected = citation.fieldPath === "$.title" ? value.title : value.body;
+      if (citation.sourceUrl !== evidence.sourceUrl || citation.quote !== expected) throw new CandidateProjectionError("Collector flat detail citation is not exact evidence.");
+    } else {
+      const field = citation.fieldPath.slice("$.attributes.".length);
+      const expected = JSON.stringify(attributes[field]);
+      if (citation.sourceUrl !== evidence.indexUrl || citation.quote !== expected || !evidence.metadataEvidenceText.includes(`${field}=${expected}`)) {
+        throw new CandidateProjectionError(`Collector flat ${field} citation is not exact persisted evidence.`);
+      }
+    }
+  }
+  return value as unknown as SnapshotFlatCandidate;
 }
 
 function validateSnapshotSpellCandidate(value: unknown, candidateKey: string, entryType: string | null, evidence: SnapshotSpellEvidence | null): SnapshotSpellCandidate {

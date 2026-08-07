@@ -43,7 +43,7 @@
       "additionalProperties": false,
       "required": ["entryType", "name", "aliases", "typedFields"],
       "properties": {
-        "entryType": { "enum": ["rule", "action", "spell", "classFeature", "item", "monster", "other"] },
+        "entryType": { "enum": ["rule", "action", "spell", "classFeature", "item", "monster", "other", "feat", "background", "equipment", "glossary"] },
         "name": { "type": "string", "minLength": 1 },
         "aliases": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
         "typedFields": { "type": "array", "items": { "$ref": "#/$defs/typedField" } }

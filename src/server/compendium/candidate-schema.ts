@@ -150,6 +150,11 @@ const attributesByType = {
       prerequisiteText: nullableStringField, repeatable: { type: "boolean" },
     },
   },
+  glossary: {
+    type: "object", additionalProperties: false,
+    required: ["category", "relatedTerms"],
+    properties: { category: stringField, relatedTerms: { type: "array", items: stringField, uniqueItems: true } },
+  },
 } as const;
 
 function schemaForType(entryType: CompendiumEntryType): object {
@@ -276,6 +281,7 @@ function supportsEntryType(entryType: CompendiumEntryType, quote: string): boole
     species: /(?:species|вид|раса)/iu,
     background: /(?:background|предыстори)/iu,
     feat: /(?:feat|черта)/iu,
+    glossary: /(?:glossary|term|словар|термин)/iu,
   };
   return patterns[entryType].test(quote);
 }

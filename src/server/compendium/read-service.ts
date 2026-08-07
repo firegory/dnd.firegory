@@ -401,6 +401,7 @@ function projectionSelect(): string {
     background: "compendium_backgrounds",
     feat: "compendium_feats",
     equipment: "compendium_equipment",
+    glossary: "compendium_glossary",
   };
   const cases = Object.entries(tables).map(
     ([type, table]) => `WHEN '${type}' THEN (SELECT to_jsonb(p) - 'revision_id' - 'entry_type' FROM ${table} p WHERE p.revision_id = av.revision_id)`,

@@ -187,6 +187,7 @@ function typeSpecificMessages(entryType: CompendiumEntryType, boundary: Extracti
     species: "size enum; speed positive integer",
     background: "abilityScores and skillProficiencies strings",
     feat: "category enum; prerequisiteLevel integer|null; prerequisiteText string|null; repeatable boolean",
+    glossary: "category string; relatedTerms unique string array",
   };
   return [
     {

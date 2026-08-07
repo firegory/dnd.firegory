@@ -4,7 +4,7 @@ import { withTransaction } from "../db/client.ts";
 import { normalizeSpellClasses, SpellValidationError, validateSpellProjection, type SpellProjection } from "./spell-schema.ts";
 
 export const COMPENDIUM_ENTRY_TYPES = [
-  "spell", "creature", "item", "class", "feature", "species", "background", "feat", "equipment",
+  "spell", "creature", "item", "class", "feature", "species", "background", "feat", "equipment", "glossary",
 ] as const;
 export type CompendiumEntryType = (typeof COMPENDIUM_ENTRY_TYPES)[number];
 export type CompendiumEdition = "5e" | "5.5e";
@@ -37,7 +37,8 @@ export type ProjectionInput =
   | (ProjectionBase & Readonly<{ type: "species"; size: "tiny" | "small" | "medium" | "large" | "huge" | "gargantuan"; speed: number }>)
   | (ProjectionBase & Readonly<{ type: "background"; abilityScores: string; skillProficiencies: string }>)
   | (ProjectionBase & Readonly<{ type: "feat"; category: "origin" | "general" | "fighting_style" | "epic_boon"; prerequisiteLevel?: number | null; prerequisiteText?: string | null; repeatable?: boolean }>)
-  | (ProjectionBase & Readonly<{ type: "equipment"; category: "adventuring_gear" | "ammunition" | "armor" | "focus" | "mount" | "tool" | "vehicle" | "weapon" | "other"; costCp?: number | null; weightLb?: number | null }>);
+  | (ProjectionBase & Readonly<{ type: "equipment"; category: "adventuring_gear" | "ammunition" | "armor" | "focus" | "mount" | "tool" | "vehicle" | "weapon" | "other"; costCp?: number | null; weightLb?: number | null }>)
+  | (ProjectionBase & Readonly<{ type: "glossary"; category: string; relatedTerms: readonly string[] }>);
 
 export type CreateCompendiumDraftInput = Readonly<{
   canonicalKey: string;
@@ -343,6 +344,7 @@ function validateProjection(projection: ProjectionInput): void {
     case "feat": enumValue(projection.category, ["origin", "general", "fighting_style", "epic_boon"], "feat.category"); if (projection.prerequisiteLevel != null) integerRange(projection.prerequisiteLevel, 1, 20, "feat.prerequisiteLevel"); optionalText(projection.prerequisiteText, "feat.prerequisiteText"); optionalBoolean(projection.repeatable, "feat.repeatable"); return;
     case "equipment": enumValue(projection.category, ["adventuring_gear", "ammunition", "armor", "focus", "mount", "tool", "vehicle", "weapon", "other"], "equipment.category"); if (projection.costCp != null) integerRange(projection.costCp, 0, 2147483647, "equipment.costCp"); if (projection.weightLb != null) decimalRange(projection.weightLb, 0, 9999999.999, 3, "equipment.weightLb"); return;
     case "item": enumValue(projection.category, ["armor", "potion", "ring", "rod", "scroll", "staff", "wand", "weapon", "wondrous", "other"], "item.category"); enumValue(projection.rarity, ["common", "uncommon", "rare", "very_rare", "legendary", "artifact", "varies"], "item.rarity"); optionalBoolean(projection.requiresAttunement, "item.requiresAttunement"); return;
+    case "glossary": requireText(projection.category, "glossary.category"); stringList(projection.relatedTerms, "glossary.relatedTerms"); return;
   }
 }
 
@@ -379,6 +381,7 @@ async function insertProjection(client: DbClient, revisionId: string, projection
     case "background": await client.query("INSERT INTO compendium_backgrounds (revision_id, ability_scores, skill_proficiencies, extension_data) VALUES ($1,$2,$3,$4::jsonb)", [revisionId, projection.abilityScores.trim(), projection.skillProficiencies.trim(), extension]); return;
     case "feat": await client.query("INSERT INTO compendium_feats (revision_id, category, prerequisite_level, prerequisite_text, repeatable, extension_data) VALUES ($1,$2,$3,$4,$5,$6::jsonb)", [revisionId, projection.category, projection.prerequisiteLevel ?? null, projection.prerequisiteText?.trim() || null, projection.repeatable ?? false, extension]); return;
     case "equipment": await client.query("INSERT INTO compendium_equipment (revision_id, category, cost_cp, weight_lb, extension_data) VALUES ($1,$2,$3,$4,$5::jsonb)", [revisionId, projection.category, projection.costCp ?? null, projection.weightLb ?? null, extension]); return;
+    case "glossary": await client.query("INSERT INTO compendium_glossary (revision_id, category, related_terms, extension_data) VALUES ($1,$2,$3,$4::jsonb)", [revisionId, projection.category.trim(), projection.relatedTerms.map((term) => term.trim()), extension]); return;
   }
 }
 
@@ -387,6 +390,7 @@ function requireUuid(value: string, field: string): void { if (typeof value !== 
 function requireText(value: string, field: string): void { if (typeof value !== "string" || !value.trim()) throw new CompendiumValidationError(`${field} is required.`); }
 function optionalText(value: string | null | undefined, field: string): void { if (value != null && typeof value !== "string") throw new CompendiumValidationError(`${field} must be text or null.`); }
 function optionalBoolean(value: boolean | undefined, field: string): void { if (value !== undefined && typeof value !== "boolean") throw new CompendiumValidationError(`${field} must be boolean.`); }
+function stringList(value: readonly string[], field: string): void { if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) throw new CompendiumValidationError(`${field} must be a list of nonblank text values.`); }
 function integerRange(value: number, min: number, max: number, field: string): void { if (!Number.isSafeInteger(value) || value < min || value > max) throw new CompendiumValidationError(`${field} must be an integer between ${min} and ${max}.`); }
 function numberRange(value: number, min: number, max: number, field: string): void { if (!Number.isFinite(value) || value < min || value > max) throw new CompendiumValidationError(`${field} must be between ${min} and ${max}.`); }
 function decimalRange(value: number, min: number, max: number, scale: number, field: string): void {

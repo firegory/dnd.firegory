@@ -26,6 +26,7 @@ const FIELDS: Record<string, readonly Field[]> = {
   background: [{key:"abilityScores",label:"Ability scores",required:true},{key:"skillProficiencies",label:"Skill proficiencies",required:true}],
   feat: [{key:"category",label:"Category",options:["origin","general","fighting_style","epic_boon"],required:true},{key:"prerequisiteLevel",label:"Prerequisite level",kind:"number"},{key:"prerequisiteText",label:"Prerequisite"},{key:"repeatable",label:"Repeatable",kind:"boolean"}],
   equipment: [{key:"category",label:"Category",options:["adventuring_gear","ammunition","armor","focus","mount","tool","vehicle","weapon","other"],required:true},{key:"costCp",label:"Cost (cp)",kind:"number"},{key:"weightLb",label:"Weight (lb)",kind:"number"}],
+  glossary: [{key:"category",label:"Category",required:true},{key:"relatedTerms",label:"Related terms (comma-separated)",kind:"stringList"}],
 };
 const TYPES = Object.keys(FIELDS) as EntryType[];
 const INITIAL = { canonicalKey:"",entryType:"spell" as EntryType,edition:"5e",language:"en",sourceId:"",fileId:"",slug:"",aliases:"",title:"",summary:"",blocks:[{type:"paragraph",text:""}] as Block[],projection:{} as Record<string,unknown>,citations:[] as Citation[],reason:"" };
