@@ -211,7 +211,7 @@ export async function seedAccessFixture(database: Pool | PoolClient, options: Re
       );
       await client.query("INSERT INTO compendium_names(version_id,entry_id,entry_type,edition,language,kind,name) VALUES ($1,$2,'spell',$3,'en','slug',$4)", [versionId, entryId, edition, `qa-spell-${suffix}`]);
       await client.query(
-        `INSERT INTO compendium_spells(revision_id,level,school,casting_time,range_text,duration_text,components,concentration,ritual)
+        `INSERT INTO compendium_spells(revision_id,level,school,casting_time,range_text,duration,components,concentration,ritual)
          VALUES ($1,1,'evocation','1 action','60 feet','Instantaneous','V, S',false,false)`,
         [revisionId],
       );
