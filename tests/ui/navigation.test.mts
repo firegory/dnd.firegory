@@ -10,6 +10,7 @@ describe("compendium navigation", () => {
       const routes = getNavigationItems(role).map((item) => item.href);
       assert.ok(routes.includes("/ru/compendium"));
       assert.ok(routes.includes("/search"));
+      assert.ok(routes.includes("/bestiary"));
       assert.ok(routes.includes("/settings"));
     }
     assert.equal(getNavigationItems("user", "en")[0].href, "/en/compendium");
@@ -18,7 +19,7 @@ describe("compendium navigation", () => {
   it("adds all existing administration routes only for administrators", () => {
     assert.deepEqual(
       getNavigationItems("admin").map((item) => item.href),
-      ["/ru/compendium", "/search", "/spells", "/feats", "/backgrounds", "/items", "/equipment", "/glossary", "/settings", "/admin/sources", "/admin/ingestion", "/admin/compendium/imports", "/admin/compendium/entries", "/admin/users"],
+      ["/ru/compendium", "/search", "/spells", "/bestiary", "/feats", "/backgrounds", "/items", "/equipment", "/glossary", "/settings", "/admin/sources", "/admin/ingestion", "/admin/compendium/imports", "/admin/compendium/entries", "/admin/users"],
     );
     assert.equal(getNavigationItems("user").some((item) => item.href.startsWith("/admin")), false);
   });

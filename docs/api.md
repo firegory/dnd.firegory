@@ -534,3 +534,8 @@ Common error status codes:
 | 403 | Forbidden — insufficient role (admin required) |
 | 404 | Not found |
 | 500 | Internal server error |
+# Bestiary
+
+`GET /api/bestiary` supports repeated/comma-separated `size`, `type`, and exact `cr`, plus `alignment`, `crMin`, `crMax`, `q`, source selection, `limit`, and opaque `cursor`. Results are numerically ordered by challenge rating.
+
+`GET /api/bestiary/:identifier` resolves an accessible entry ID or alias and returns the complete controlled stat block, source versions, and field citations. An inaccessible identifier returns the same `404` shape as an absent identifier.

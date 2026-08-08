@@ -5,8 +5,9 @@ import test from "node:test";
 import { extractCandidates } from "../../src/server/compendium/candidate-extraction.ts";
 import { projectExtractedCandidate, projectSnapshotSpellCandidate } from "../../src/server/compendium/candidate-publication.ts";
 import { CompendiumImportReviewService } from "../../src/server/compendium/import-review.ts";
-import { nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
+import { creatureCandidate, nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
 import { nextDndCardFingerprint } from "../../src/server/compendium/next-dnd/parser.ts";
+import { ancientDragonDetail } from "../fixtures/next-dnd/bestiary.mts";
 
 const runId = "11111111-1111-4111-8111-111111111111";
 const candidateId = "22222222-2222-4222-8222-222222222222";
@@ -60,6 +61,8 @@ const collectorContent = nextDndImportBatch({
         filter_class: [17], item_tags: { concentration: true } }) },
   }] }],
 } as never).candidates[0].content;
+const creatureDetail = ancientDragonDetail();
+const creatureCollectorContent = creatureCandidate(creatureDetail as never);
 
 function chunkFields(text = fixtureText, id = chunkId) {
   return { chunk_id: id, chunk_index: id === chunkId ? 0 : 1, page_number: 1, section_heading: null, quote_text: text };
@@ -658,4 +661,27 @@ test("merge repairs only typed collector fields while immutable evidence stays l
   await assert.rejects(idleService.act(admin, runId, {
     candidateIds: [candidateId], action: "merge", activeRevisionTokens: { [candidateId]: null }, resolvedContent: tampered,
   }), /cannot modify immutable sourceVersion evidence/);
+});
+
+test("resolved snapshot creature merges are reclassified against immutable evidence", async () => {
+  const invalid = structuredClone(creatureCollectorContent) as typeof creatureCollectorContent & {attributes:{armorClass:Array<{value:number}>}};
+  invalid.attributes.armorClass[0].value = 23;
+  const index = creatureDetail.indexSource;
+  const row = collectorCandidate({
+    candidate_key:"bestiary-999",entry_type:"creature",content:invalid,
+    locator:creatureDetail.sourceUrl,occurrence_fingerprint_sha256:creatureDetail.sha256,
+    occurrence_raw_blob_path:creatureDetail.blobPath,occurrence_source_fetched_at:creatureDetail.fetchedAt,
+    occurrence_index_locator:index.url,occurrence_index_fingerprint_sha256:index.fingerprintSha256,
+    occurrence_raw_index_blob_path:index.rawBlobPath,occurrence_index_source_fetched_at:index.fetchedAt,
+    occurrence_index_card_fingerprint_sha256:index.cardFingerprintSha256,
+    occurrence_metadata_evidence_text:(creatureCollectorContent.sourceVersion.index as {metadataEvidenceText:string}).metadataEvidenceText,
+  });
+  let submitted=false;
+  const service = new CompendiumImportReviewService(async (callback) => callback({
+    async query(sql:string){if(sql.includes("FROM compendium_import_candidates candidate"))return{rows:[row]};if(sql.includes("FROM sources source LEFT JOIN files"))return{rows:[source()]};return{rows:[],rowCount:1};},
+  }),{publish:async()=>{submitted=true;return{commandPath:"/spool/creature",existing:false};},unpublish:async()=>{throw new Error("unused");}},async()=>new Map());
+  await assert.rejects(service.act(admin,runId,{candidateIds:[candidateId],action:"approve",activeRevisionTokens:{[candidateId]:null}}),/not publishable/i);
+  const result=await service.act(admin,runId,{candidateIds:[candidateId],action:"merge",activeRevisionTokens:{[candidateId]:null},resolvedContent:creatureCollectorContent as unknown as Record<string,unknown>});
+  assert.equal(result[0].publicationStatus,"queued");
+  assert.equal(submitted,true);
 });

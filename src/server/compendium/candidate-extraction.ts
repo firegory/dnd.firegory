@@ -179,7 +179,7 @@ function enrichCandidate(
 function typeSpecificMessages(entryType: CompendiumEntryType, boundary: ExtractionBoundary, chunk: EvidenceChunk): readonly ChatMessage[] {
   const attributeContract: Readonly<Record<CompendiumEntryType, string>> = {
     spell: "level 0..9; school enum; castingTime, range, duration, components strings; concentration and ritual booleans",
-    creature: "size enum; creatureType string; alignment string|null; armorClass and hitPoints integers; challengeRating D&D value; speed string",
+    creature: "complete stat block with size enum; creatureType; alignment string|null; rational challengeRating {numerator,denominator}; armorClass [{value,note?}]; hitPoints {average,formula?}; unique-mode speeds [{mode,distance,unit,note?}]; all six abilities; saves and skills modifier maps; defense, sense, and language string arrays; passivePerception; and {name,text} arrays for traits, actions, bonusActions, reactions, and legendaryActions",
     equipment: "category enum; costCp integer|null; weightLb number|null",
     feature: "level 1..20; featureKind string",
     item: "category and rarity enums; requiresAttunement boolean",

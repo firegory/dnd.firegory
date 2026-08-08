@@ -14,7 +14,8 @@ test("guide review candidates use a registered additive enum migration", () => {
 });
 
 test("merged registry orders #79, #86, guide, then flat compendium", () => {
-  assert.deepEqual(MIGRATION_FILENAMES.slice(-4), [
+  const flatIndex = MIGRATION_FILENAMES.indexOf("0017_flat_compendium_types.sql");
+  assert.deepEqual(MIGRATION_FILENAMES.slice(flatIndex - 3, flatIndex + 1), [
     "0014_compendium_entry_editor.sql",
     "0015_spells_vertical_slice.sql",
     "0016_compendium_guide_candidate_type.sql",

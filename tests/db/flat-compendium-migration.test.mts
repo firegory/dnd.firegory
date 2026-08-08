@@ -5,7 +5,8 @@ import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 
 const sql = await readFile("migrations/0017_flat_compendium_types.sql", "utf8");
 test("0017 adds constrained flat projections and browse indexes", () => {
-  assert.equal(MIGRATION_FILENAMES.at(-1), "0017_flat_compendium_types.sql");
+  const index=MIGRATION_FILENAMES.indexOf("0017_flat_compendium_types.sql");
+  assert.equal(MIGRATION_FILENAMES[index+1], "0018_bestiary_stat_blocks.sql");
   assert.match(sql, /ALTER TYPE compendium_entry_type ADD VALUE IF NOT EXISTS 'glossary'/);
   assert.match(sql, /nfs_index_managed_sources ADD COLUMN IF NOT EXISTS owns_source boolean NOT NULL DEFAULT true/);
   assert.match(sql, /nfs_index_managed_files ADD COLUMN IF NOT EXISTS owns_file boolean NOT NULL DEFAULT true/);
