@@ -325,7 +325,7 @@ export class CompendiumImportReviewService {
         const resolved = input.action === "merge" ? input.resolvedContents?.[row.id] ?? input.resolvedContent : null;
         return [row.id, input.action === "merge" && isRecord(resolved) ? lockCollectorMerge(row, resolved) : row.content] as const;
       }));
-      const capabilities = new Map(rows.rows.map((row) => [row.id, input.action === "merge" && isSnapshotSpellContent(row.content)
+      const capabilities = new Map(rows.rows.map((row) => [row.id, input.action === "merge" && isSnapshotContent(row.content)
         ? classifyCandidatePublication(publicationContents.get(row.id), capabilityContext(row, currentEvidence(row)))
         : candidateCapability(row)]));
       if (input.action !== "reject") {

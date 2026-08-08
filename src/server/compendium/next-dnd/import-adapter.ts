@@ -3,6 +3,7 @@ import { NEXT_DND_CATEGORIES, nextDndCardFingerprint } from "./parser.ts";
 import type { NextDndSnapshotManifest, SnapshotDetail } from "./collector.ts";
 import { SPELL_SCHOOLS, type SpellSchool } from "../spell-schema.ts";
 import { creatureEvidencePaths, normalizeChallengeRating, validateCreatureProjection, type CreatureBlock, type CreatureProjection } from "../creature-schema.ts";
+import { abilityEvidenceQuote, creatureFieldEvidenceSupports, speedEvidenceQuote } from "../creature-evidence.ts";
 
 type ImportRunAdapterTarget = Pick<CompendiumImportRunService, "addDiagnostic" | "failRun" | "recordOccurrences" | "computeCandidateDiff">;
 
@@ -299,7 +300,7 @@ export function creatureEvidenceCitations(projection: CreatureProjection, body: 
     const value = creatureValueAtPath(projection, fieldPath);
     const quote = creatureEvidenceQuote(fieldPath, body, metadata, value);
     assertCreatureEvidence(fieldPath, value, quote);
-    return { fieldPath, quote, sourceUrl: body.split("\n").includes(quote) ? sourceUrl : indexUrl };
+    return { fieldPath, quote, sourceUrl: body.includes(quote) ? sourceUrl : indexUrl };
   });
 }
 
@@ -307,9 +308,10 @@ function creatureEvidenceQuote(path: string, body: string, metadata: string, val
   const key = path.match(/^\$\.attributes\.([A-Za-z]+)/)?.[1] ?? "";
   const labels: Record<string, string[]> = { armorClass: ["Armor Class", "Класс Доспеха", "КД"], hitPoints: ["Hit Points", "Хиты"], speeds: ["Speed", "Скорость"], challengeRating: ["Challenge Rating", "Challenge", "Опасность", "Показатель опасности"], saves: ["Saving Throws", "Спасброски"], skills: ["Skills", "Навыки"], damageResistances: ["Damage Resistances", "Сопротивление урону"], damageImmunities: ["Damage Immunities", "Иммунитет к урону"], conditionImmunities: ["Condition Immunities", "Иммунитет к состояниям"], senses: ["Senses", "Чувства"], passivePerception: ["Senses", "Чувства"], languages: ["Languages", "Языки"] };
   if (["size", "creatureType", "alignment"].includes(key)) return body.split("\n").find((line) => /\b(Tiny|Small|Medium|Large|Huge|Gargantuan)\b/i.test(line)) ?? "";
-  if (key === "abilities") { const ability = path.split(".").at(-1)?.toUpperCase() ?? ""; return body.split("\n").find((line) => new RegExp(`(?:^|\\s)${ability}\\s+\\d+`, "i").test(line)) ?? ""; }
+  if (key === "abilities") return abilityEvidenceQuote(body, path.split(".").at(-1) ?? "") ?? "";
   if (["traits", "actions", "bonusActions", "reactions", "legendaryActions"].includes(key) && isRecord(value)) return body.split("\n").find((line) => line.includes(String(value.name)) && line.includes(String(value.text))) ?? "";
   const line = body.split("\n").find((candidate) => (labels[key] ?? []).some((label) => new RegExp(`^${escapeRegExp(label)}(?:\\s|:)`, "iu").test(candidate)));
+  if (line && key === "speeds" && isRecord(value)) return speedEvidenceQuote(line, String(value.mode)) ?? "";
   if (line) return line;
   if (key === "challengeRating") return metadata.split("\n").find((candidate) => /^(?:challenge_rating|challenge|cr)=/.test(candidate)) ?? "";
   return hasScalarValues(value) ? "" : body;
@@ -322,25 +324,11 @@ function creatureValueAtPath(projection: CreatureProjection, path: string): unkn
 
 function assertCreatureEvidence(path: string, value: unknown, quote: string): void {
   if (!quote) throw new Error(`Creature field ${path} has no exact immutable evidence line.`);
-  if (path.endsWith("challengeRating")) {
-    const challenge = value as CreatureProjection["challengeRating"];
-    if (!numericValues(quote).some((number) => Math.abs(number - challenge.numerator / challenge.denominator) < 0.000001)) throw new Error(`Creature field ${path} is unsupported by its evidence line.`);
-    return;
-  }
-  const normalized = normalizeCreatureEvidence(quote);
-  if (path.endsWith(".saves") || path.endsWith(".skills")) {
-    for (const key of Object.keys(value as Record<string, unknown>)) if (!normalized.includes(normalizeCreatureEvidence(key))) throw new Error(`Creature field ${path} is unsupported by its evidence line.`);
-  }
-  for (const scalar of scalarCreatureValues(value)) {
-    if (typeof scalar === "number" && !numericValues(quote).includes(scalar)) throw new Error(`Creature field ${path} is unsupported by its evidence line.`);
-    if (typeof scalar === "string" && scalar !== "walk" && !normalized.includes(normalizeCreatureEvidence(scalar))) throw new Error(`Creature field ${path} is unsupported by its evidence line.`);
-  }
+  if (!creatureFieldEvidenceSupports(path, value, quote)) throw new Error(`Creature field ${path} is unsupported by its evidence line.`);
 }
 
 function scalarCreatureValues(value: unknown): (string | number)[] { if (Array.isArray(value)) return value.flatMap(scalarCreatureValues); if (isRecord(value)) return Object.values(value).flatMap(scalarCreatureValues); return typeof value === "string" || typeof value === "number" ? [value] : []; }
 function hasScalarValues(value: unknown): boolean { return scalarCreatureValues(value).length > 0; }
-function numericValues(value: string): number[] { return [...value.matchAll(/(?<![\d/])-?\d+(?:\.\d+)?(?:\s*\/\s*\d+)?(?![\d/])/g)].map((match) => { const [left, right] = match[0].split("/").map(Number); return right ? left / right : left; }); }
-function normalizeCreatureEvidence(value: string): string { return value.normalize("NFKD").replace(/\p{M}+/gu, "").toLocaleLowerCase("und").replace(/[^\p{L}\p{N}]+/gu, " ").trim(); }
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
 function labelledValue(text: string, labels: readonly string[]): string | null {

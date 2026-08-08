@@ -24,6 +24,8 @@ ALTER TABLE compendium_creatures
   ADD COLUMN IF NOT EXISTS reactions jsonb,
   ADD COLUMN IF NOT EXISTS legendary_actions jsonb;
 
+ALTER TABLE compendium_creatures ALTER COLUMN projection_status SET DEFAULT 'complete';
+
 -- CR is already persisted evidence and can be represented exactly. No other
 -- missing field is synthesized for legacy rows.
 UPDATE compendium_creatures SET
@@ -39,8 +41,8 @@ BEGIN
   FOR item IN SELECT * FROM jsonb_array_elements(value) LOOP
     IF jsonb_typeof(item) <> 'object' OR NOT (item ? 'value') OR item - 'value' - 'note' <> '{}'::jsonb
        OR jsonb_typeof(item->'value') <> 'number' OR (item->>'value')::numeric <> trunc((item->>'value')::numeric)
-       OR (item->>'value')::integer NOT BETWEEN 1 AND 50
-       OR (item ? 'note' AND (jsonb_typeof(item->'note') <> 'string' OR btrim(item->>'note') = '')) THEN RETURN false; END IF;
+       OR (item->>'value')::numeric NOT BETWEEN 1 AND 50
+       OR (item ? 'note' AND (jsonb_typeof(item->'note') <> 'string' OR btrim(item->>'note') = '' OR length(item->>'note') > 200)) THEN RETURN false; END IF;
   END LOOP;
   RETURN true;
 END $$;
@@ -48,14 +50,65 @@ END $$;
 CREATE OR REPLACE FUNCTION compendium_valid_creature_speeds(value jsonb) RETURNS boolean
 LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
 DECLARE item jsonb;
+DECLARE seen_modes text[] := '{}';
 BEGIN
   IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) NOT BETWEEN 1 AND 8 THEN RETURN false; END IF;
   FOR item IN SELECT * FROM jsonb_array_elements(value) LOOP
     IF jsonb_typeof(item) <> 'object' OR NOT (item ?& ARRAY['mode','distance','unit']) OR item - 'mode' - 'distance' - 'unit' - 'note' <> '{}'::jsonb
-       OR item->>'mode' NOT IN ('walk','burrow','climb','fly','swim') OR item->>'unit' NOT IN ('ft','m')
+       OR jsonb_typeof(item->'mode') <> 'string' OR item->>'mode' NOT IN ('walk','burrow','climb','fly','swim')
+       OR item->>'mode' = ANY(seen_modes) OR jsonb_typeof(item->'unit') <> 'string' OR item->>'unit' NOT IN ('ft','m')
        OR jsonb_typeof(item->'distance') <> 'number' OR (item->>'distance')::numeric <> trunc((item->>'distance')::numeric)
-       OR (item->>'distance')::integer NOT BETWEEN 1 AND 10000
-       OR (item ? 'note' AND (jsonb_typeof(item->'note') <> 'string' OR btrim(item->>'note') = '')) THEN RETURN false; END IF;
+       OR (item->>'distance')::numeric NOT BETWEEN 1 AND 10000
+       OR (item ? 'note' AND (jsonb_typeof(item->'note') <> 'string' OR btrim(item->>'note') = '' OR length(item->>'note') > 200)) THEN RETURN false; END IF;
+    seen_modes := array_append(seen_modes, item->>'mode');
+  END LOOP;
+  RETURN true;
+END $$;
+
+CREATE OR REPLACE FUNCTION compendium_valid_creature_hit_points(value jsonb) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
+BEGIN
+  RETURN jsonb_typeof(value) = 'object' AND value ? 'average' AND value - 'average' - 'formula' = '{}'::jsonb
+    AND jsonb_typeof(value->'average') = 'number'
+    AND (value->>'average')::numeric = trunc((value->>'average')::numeric)
+    AND (value->>'average')::numeric BETWEEN 1 AND 2147483647
+    AND (NOT (value ? 'formula') OR (jsonb_typeof(value->'formula') = 'string'
+      AND value->>'formula' ~* '^\d+d\d+(?:\s*[+-]\s*\d+)?$' AND length(value->>'formula') <= 40));
+END $$;
+
+CREATE OR REPLACE FUNCTION compendium_valid_creature_modifiers(value jsonb) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
+DECLARE modifier record;
+BEGIN
+  IF jsonb_typeof(value) <> 'object' OR (SELECT count(*) FROM jsonb_object_keys(value)) > 100 THEN RETURN false; END IF;
+  FOR modifier IN SELECT * FROM jsonb_each(value) LOOP
+    IF btrim(modifier.key) = '' OR length(modifier.key) > 100 OR jsonb_typeof(modifier.value) <> 'number'
+       OR (modifier.value #>> '{}')::numeric <> trunc((modifier.value #>> '{}')::numeric)
+       OR (modifier.value #>> '{}')::numeric NOT BETWEEN -30 AND 30 THEN RETURN false; END IF;
+  END LOOP;
+  RETURN true;
+END $$;
+
+CREATE OR REPLACE FUNCTION compendium_valid_creature_blocks(value jsonb) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
+DECLARE item jsonb;
+BEGIN
+  IF jsonb_typeof(value) <> 'array' OR jsonb_array_length(value) > 100 THEN RETURN false; END IF;
+  FOR item IN SELECT * FROM jsonb_array_elements(value) LOOP
+    IF jsonb_typeof(item) <> 'object' OR NOT (item ?& ARRAY['name','text']) OR item - 'name' - 'text' <> '{}'::jsonb
+       OR jsonb_typeof(item->'name') <> 'string' OR btrim(item->>'name') = '' OR length(item->>'name') > 300
+       OR jsonb_typeof(item->'text') <> 'string' OR btrim(item->>'text') = '' OR length(item->>'text') > 10000 THEN RETURN false; END IF;
+  END LOOP;
+  RETURN true;
+END $$;
+
+CREATE OR REPLACE FUNCTION compendium_valid_creature_texts(value text[]) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
+DECLARE item text;
+BEGIN
+  IF cardinality(value) > 100 OR array_position(value, NULL) IS NOT NULL THEN RETURN false; END IF;
+  FOREACH item IN ARRAY value LOOP
+    IF btrim(item) = '' OR length(item) > 500 THEN RETURN false; END IF;
   END LOOP;
   RETURN true;
 END $$;
@@ -67,7 +120,7 @@ BEGIN
   IF jsonb_typeof(value) <> 'object' OR (SELECT count(*) FROM jsonb_object_keys(value)) <> 6 OR NOT (value ?& ARRAY['str','dex','con','int','wis','cha']) THEN RETURN false; END IF;
   FOR ability IN SELECT * FROM jsonb_each(value) LOOP
     IF jsonb_typeof(ability.value) <> 'number' OR (ability.value #>> '{}')::numeric <> trunc((ability.value #>> '{}')::numeric)
-       OR (ability.value #>> '{}')::integer NOT BETWEEN 1 AND 30 THEN RETURN false; END IF;
+       OR (ability.value #>> '{}')::numeric NOT BETWEEN 1 AND 30 THEN RETURN false; END IF;
   END LOOP;
   RETURN true;
 END $$;
@@ -91,20 +144,38 @@ DO $$ BEGIN
           (21,1),(22,1),(23,1),(24,1),(25,1),(26,1),(27,1),(28,1),(29,1),(30,1))
         AND challenge_rating = challenge_rating_numerator::numeric / challenge_rating_denominator
         AND compendium_valid_creature_armor(armor_classes)
-        AND jsonb_typeof(hit_points_detail) = 'object' AND hit_points_detail ? 'average'
+        AND compendium_valid_creature_hit_points(hit_points_detail)
         AND compendium_valid_creature_speeds(speeds)
         AND compendium_valid_creature_abilities(abilities)
-        AND jsonb_typeof(saves) = 'object' AND jsonb_typeof(skills) = 'object'
+        AND compendium_valid_creature_modifiers(saves) AND compendium_valid_creature_modifiers(skills)
         AND damage_resistances IS NOT NULL AND damage_immunities IS NOT NULL AND condition_immunities IS NOT NULL
         AND senses IS NOT NULL AND languages IS NOT NULL AND passive_perception BETWEEN 0 AND 100
-        AND jsonb_typeof(traits) = 'array' AND jsonb_typeof(actions) = 'array'
-        AND jsonb_typeof(bonus_actions) = 'array' AND jsonb_typeof(reactions) = 'array' AND jsonb_typeof(legendary_actions) = 'array'
-        AND array_position(damage_resistances, NULL) IS NULL AND array_position(damage_immunities, NULL) IS NULL
-        AND array_position(condition_immunities, NULL) IS NULL AND array_position(senses, NULL) IS NULL AND array_position(languages, NULL) IS NULL
+        AND compendium_valid_creature_blocks(traits) AND compendium_valid_creature_blocks(actions)
+        AND compendium_valid_creature_blocks(bonus_actions) AND compendium_valid_creature_blocks(reactions)
+        AND compendium_valid_creature_blocks(legendary_actions)
+        AND compendium_valid_creature_texts(damage_resistances) AND compendium_valid_creature_texts(damage_immunities)
+        AND compendium_valid_creature_texts(condition_immunities) AND compendium_valid_creature_texts(senses)
+        AND compendium_valid_creature_texts(languages)
       )
     );
   END IF;
 END $$;
+
+-- Rows that predate this migration remain editable and may be completed by an
+-- UPDATE, but no application path may create another incomplete projection.
+CREATE OR REPLACE FUNCTION compendium_reject_new_legacy_creature() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.projection_status = 'legacy_incomplete' THEN
+    RAISE EXCEPTION 'new legacy_incomplete creature projections are not allowed';
+  END IF;
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS compendium_creatures_reject_new_legacy ON compendium_creatures;
+CREATE TRIGGER compendium_creatures_reject_new_legacy
+BEFORE INSERT ON compendium_creatures
+FOR EACH ROW EXECUTE FUNCTION compendium_reject_new_legacy_creature();
 
 CREATE INDEX IF NOT EXISTS compendium_creatures_cr_exact_idx
   ON compendium_creatures (challenge_rating, creature_type, revision_id);

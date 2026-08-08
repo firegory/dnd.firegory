@@ -2,7 +2,7 @@ import type { QueryResultRow } from "pg";
 
 import { withTransaction } from "../db/client.ts";
 import { normalizeSpellClasses, SpellValidationError, validateSpellProjection, type SpellProjection } from "./spell-schema.ts";
-import { challengeRatingNumber, CreatureValidationError, isLegacyCreatureProjection, validateCreatureProjection, validateLegacyCreatureProjection, type CreatureProjection, type LegacyCreatureProjection } from "./creature-schema.ts";
+import { challengeRatingNumber, CreatureValidationError, isLegacyCreatureProjection, validateCreatureProjection, type CreatureProjection, type LegacyCreatureProjection } from "./creature-schema.ts";
 
 export const COMPENDIUM_ENTRY_TYPES = [
   "spell", "creature", "item", "class", "feature", "species", "background", "feat", "equipment",
@@ -335,7 +335,11 @@ function validateProjection(projection: ProjectionInput): void {
       catch (error) { if (error instanceof SpellValidationError) throw new CompendiumValidationError(error.message); throw error; }
       return;
     case "creature":
-      try { const value = creatureProjectionValue(projection); if (isLegacyCreatureProjection(value)) validateLegacyCreatureProjection(value); else validateCreatureProjection(value); }
+      try {
+        const value = creatureProjectionValue(projection);
+        if (isLegacyCreatureProjection(value)) throw new CompendiumValidationError("New creature revisions require a complete stat-block projection.");
+        validateCreatureProjection(value);
+      }
       catch (error) { if (error instanceof CreatureValidationError) throw new CompendiumValidationError(error.message); throw error; }
       return;
     case "class": if (![6, 8, 10, 12].includes(projection.hitDie)) throw new CompendiumValidationError("class.hitDie must be d6, d8, d10, or d12."); requireText(projection.primaryAbility, "class.primaryAbility"); optionalText(projection.spellcastingAbility, "class.spellcastingAbility"); return;
@@ -375,17 +379,7 @@ async function insertProjection(client: DbClient, revisionId: string, projection
     case "spell": await client.query("INSERT INTO compendium_spells (revision_id, level, school, casting_time, range_text, duration, components, concentration, ritual, classes, extension_data) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)", [revisionId, projection.level, projection.school, projection.castingTime.trim(), projection.range.trim(), projection.duration.trim(), projection.components.trim(), projection.concentration ?? false, projection.ritual ?? false, normalizeSpellClasses(projection.classes), extension]); return;
     case "creature": {
       const value = creatureProjectionValue(projection);
-      if (isLegacyCreatureProjection(value)) {
-        const creature = validateLegacyCreatureProjection(value);
-        await client.query(`INSERT INTO compendium_creatures
-          (revision_id,size,creature_type,alignment,armor_class,hit_points,challenge_rating,speed,
-           projection_status,challenge_rating_numerator,challenge_rating_denominator,extension_data)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'legacy_incomplete',$9,$10,$11::jsonb)`,
-        [revisionId, creature.size, creature.creatureType, creature.alignment, creature.armorClass, creature.hitPoints,
-          challengeRatingNumber(creature.challengeRating), creature.speed, creature.challengeRating.numerator,
-          creature.challengeRating.denominator, extension]);
-        return;
-      }
+      if (isLegacyCreatureProjection(value)) throw new CompendiumValidationError("New creature revisions require a complete stat-block projection.");
       const creature = validateCreatureProjection(value);
       const primarySpeed = creature.speeds.find((speed) => speed.mode === "walk") ?? creature.speeds[0];
       await client.query(`INSERT INTO compendium_creatures

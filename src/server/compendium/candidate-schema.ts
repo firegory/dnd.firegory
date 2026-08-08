@@ -3,10 +3,11 @@ import addFormats from "ajv-formats";
 
 import type { CompendiumEdition, CompendiumEntryType, CompendiumLanguage } from "./service.ts";
 import { creatureEvidencePaths, validateCreatureProjection } from "./creature-schema.ts";
+import { creatureFieldEvidenceSupports } from "./creature-evidence.ts";
 
 export const EXTRACTION_SCHEMA_VERSION = 1 as const;
 export const EXTRACTION_PARSER_VERSION = "2";
-export const EXTRACTION_PROMPT_VERSION = "2";
+export const EXTRACTION_PROMPT_VERSION = "3";
 
 export type ExtractionMethod = "section-parser" | "table-parser" | "spell-parser" | "stat-block-parser" | "llm";
 export type CandidateReviewStatus = "ready" | "ambiguous_duplicate";
@@ -272,6 +273,9 @@ function citationSupportsField(candidate: CandidateWire, path: string, quote: st
   if (path === "$.entryType") return supportsEntryType(candidate.entryType, quote);
   if (path === "$.attributes.costCp") return value === null ? supportsNull(quote) : parseMoneyToCp(quote).includes(value as number);
   if (path === "$.attributes.weightLb") return value === null ? supportsNull(quote) : parseWeights(quote).includes(value as number);
+  if (candidate.entryType === "creature" && path.startsWith("$.attributes.") && !isLegacyCreatureAttributes(candidate.attributes)) {
+    return creatureFieldEvidenceSupports(path, value, quote);
+  }
   if (path === "$.attributes.challengeRating" && isRecord(value)) {
     const numerator = Number(value.numerator); const denominator = Number(value.denominator);
     return denominator > 0 && numericValues(quote).some((number) => Math.abs(number - numerator / denominator) < 0.000001);

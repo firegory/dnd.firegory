@@ -3,13 +3,19 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { classifyCandidatePublication } from "../../src/server/compendium/candidate-publication.ts";
+import { validateCandidateWire } from "../../src/server/compendium/candidate-schema.ts";
 import { CreatureReadService } from "../../src/server/compendium/creature-read-service.ts";
 import { normalizeChallengeRating } from "../../src/server/compendium/creature-schema.ts";
-import { buildEditorCanonicalRevision, EntryEditorError } from "../../src/server/compendium/entry-editor.ts";
+import { buildEditorCanonicalRevision, camelProjection, EntryEditorError } from "../../src/server/compendium/entry-editor.ts";
 import { creatureCandidate, creatureMetadataEvidence } from "../../src/server/compendium/next-dnd/import-adapter.ts";
 import { ancientDragonDetail } from "../fixtures/next-dnd/bestiary.mts";
 
 const detail = ancientDragonDetail();
+type MutableCreatureAttributes = {
+  abilities: Record<string,number>; saves: Record<string,number>; skills: Record<string,number>;
+  speeds: Array<{distance:number}>; armorClass: Array<{value:number}>; hitPoints: {average:number};
+  challengeRating: {numerator:number;denominator:number}; actions: Array<{name:string;text:string}>;
+};
 const evidence = { sourceUrl:detail.sourceUrl,fingerprintSha256:detail.sha256,rawBlobPath:detail.blobPath,fetchedAt:detail.fetchedAt,fileChecksumSha256:"d".repeat(64),indexUrl:detail.indexSource.url,indexFingerprintSha256:detail.indexSource.fingerprintSha256,rawIndexBlobPath:detail.indexSource.rawBlobPath,indexFetchedAt:detail.indexSource.fetchedAt,indexCardFingerprintSha256:detail.indexSource.cardFingerprintSha256,metadataEvidenceText:creatureMetadataEvidence(detail.indexMetadata) };
 const context = { candidateKey:"bestiary-999",entryType:"creature",sourceId:"11111111-1111-4111-8111-111111111111",fileId:"22222222-2222-4222-8222-222222222222",generationId:null,edition:"5.5e",language:"ru",accessTier:"open",shared:false,ownerUserId:null,chunk:null,snapshotEvidence:evidence } as const;
 
@@ -32,6 +38,34 @@ test("collector repair cannot replace unsupported values or immutable citations"
   const blockTamper=structuredClone(candidate);
   blockTamper.attributes.actions[0].text="The dragon makes nine attacks.";
   assert.equal(classifyCandidatePublication(blockTamper,context).publicationCapability,"requires_extraction");
+});
+
+test("collector and PDF evidence bind creature keys to their own values", () => {
+  const candidate=creatureCandidate(detail as never);
+  const mutations: Array<(attributes: MutableCreatureAttributes)=>void> = [
+    (attributes)=>{[attributes.abilities.str,attributes.abilities.dex]=[attributes.abilities.dex,attributes.abilities.str];},
+    (attributes)=>{[attributes.saves.DEX,attributes.saves.CON]=[attributes.saves.CON,attributes.saves.DEX];},
+    (attributes)=>{[attributes.skills.Perception,attributes.skills.Stealth]=[attributes.skills.Stealth,attributes.skills.Perception];},
+    (attributes)=>{[attributes.speeds[0].distance,attributes.speeds[2].distance]=[attributes.speeds[2].distance,attributes.speeds[0].distance];},
+    (attributes)=>{attributes.armorClass[0].value=24;},
+    (attributes)=>{attributes.hitPoints.average=22;},
+    (attributes)=>{attributes.challengeRating={numerator:22,denominator:1};},
+    (attributes)=>{[attributes.actions[0].text,attributes.actions[1].text]=[attributes.actions[1].text,attributes.actions[0].text];},
+  ];
+  const pdfText=`Ancient Red Dragon\n${candidate.body}`;
+  const pdfCitation=(fieldPath:string,quote:string)=>{const start=pdfText.indexOf(quote);assert.ok(start>=0);const quoteSpanStart=Array.from(pdfText.slice(0,start)).length;return {fieldPath,chunkId:"99999999-9999-4999-8999-999999999999",quote,quoteSpanStart,quoteSpanEnd:quoteSpanStart+Array.from(quote).length};};
+  const pdf={entryType:"creature",candidateKey:"ancient-red-dragon",title:"Ancient Red Dragon",body:candidate.body,attributes:candidate.attributes,citations:[
+    pdfCitation("$.entryType","Gargantuan dragon, chaotic evil."),pdfCitation("$.candidateKey","Ancient Red Dragon"),pdfCitation("$.title","Ancient Red Dragon"),pdfCitation("$.body",candidate.body),
+    ...candidate.citations.filter((citation)=>citation.fieldPath.startsWith("$.attributes.")).map((citation)=>pdfCitation(citation.fieldPath,citation.quote)),
+  ]} as const;
+  const chunk={id:"99999999-9999-4999-8999-999999999999",chunkIndex:0,pageNumber:1,sectionHeading:"Ancient Red Dragon",quoteText:pdfText};
+  assert.equal(validateCandidateWire(pdf,[chunk]),pdf);
+  for(const mutate of mutations){
+    const collectorTamper=structuredClone(candidate) as unknown as {attributes:MutableCreatureAttributes};mutate(collectorTamper.attributes);
+    assert.equal(classifyCandidatePublication(collectorTamper,context).publicationCapability,"requires_extraction");
+    const pdfTamper=structuredClone(pdf) as unknown as {attributes:MutableCreatureAttributes};mutate(pdfTamper.attributes);
+    assert.throws(()=>validateCandidateWire(pdfTamper,[chunk]),/(?:value-supporting evidence|type schema)/i);
+  }
 });
 
 test("CR rejects unreduced fractions and keyset ties include title and ID", async () => {
@@ -59,6 +93,9 @@ test("legacy editor projections retain null alignment and cannot publish", async
   assert.match(editor,/field\.key==="alignment"[\s\S]*value\.alignment=.*:null/);
   const entry={entryType:"creature"}; const revision={projection:{projectionStatus:"legacy_incomplete"}};
   await assert.rejects(buildEditorCanonicalRevision({query(){throw new Error("database must not be read");}} as never,{userId:"admin",role:"admin"},entry as never,revision as never),(error:unknown)=>error instanceof EntryEditorError&&error.status===409);
+  assert.deepEqual(camelProjection({projection_status:"legacy_incomplete",size:"medium",creature_type:"beast",alignment:null,armor_class:12,hit_points:10,challenge_rating:0.25,speed:"30 ft., fly 60 ft.",extension_data:{}}),{
+    projectionStatus:"legacy_incomplete",size:"medium",creatureType:"beast",alignment:null,challengeRating:0.25,extensionData:{},armorClass:[{value:12}],hitPoints:{average:10},speeds:[{mode:"walk",distance:30,unit:"ft"},{mode:"fly",distance:60,unit:"ft"}],
+  });
 });
 
 test("detail links retain filters and print keeps source and citation text", async () => {

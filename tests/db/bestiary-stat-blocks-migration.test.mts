@@ -17,4 +17,9 @@ test("0018 adds the complete creature projection without changing flat or spell 
   assert.match(sql, /challenge_rating = challenge_rating_numerator::numeric \/ challenge_rating_denominator/);
   assert.match(sql, /legacy_incomplete/);
   assert.doesNotMatch(sql, /passive_perception = coalesce|abilities = jsonb_build_object/);
+  assert.match(sql, /item->>'mode' = ANY\(seen_modes\)/);
+  for (const validator of ["hit_points", "modifiers", "blocks", "texts"]) assert.match(sql, new RegExp(`compendium_valid_creature_${validator}`));
+  assert.match(sql, /new legacy_incomplete creature projections are not allowed/);
+  assert.match(sql, /BEFORE INSERT ON compendium_creatures/);
+  assert.doesNotMatch(sql, /BEFORE (?:INSERT OR UPDATE|UPDATE) ON compendium_creatures/);
 });
