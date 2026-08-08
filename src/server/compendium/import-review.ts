@@ -23,6 +23,8 @@ import {
   type CandidatePublicationCapability,
 } from "./candidate-publication.ts";
 import type { CompendiumEntryType } from "./service.ts";
+import { validateCreatureProjection } from "./creature-schema.ts";
+import { creatureEvidenceCitations } from "./next-dnd/import-adapter.ts";
 
 type DbClient = Readonly<{
   query<T extends QueryResultRow = QueryResultRow>(sql: string, values?: readonly unknown[]): Promise<{ rows: T[]; rowCount?: number | null }>;
@@ -747,6 +749,21 @@ function lockCollectorMerge(row: CandidateRow, resolved: Record<string, unknown>
       throw new ImportReviewError(`Collector merge cannot modify immutable ${field} evidence.`, 409);
     }
   }
+  if (isSnapshotCreatureContent(row.content)) {
+    const sourceVersion = recordValue(row.content.sourceVersion);
+    const index = recordValue(sourceVersion.index);
+    try {
+      const projection = validateCreatureProjection(resolved.attributes);
+      const citations = [
+        { fieldPath: "$.title", quote: String(row.content.title), sourceUrl: String(row.content.sourceUrl) },
+        { fieldPath: "$.body", quote: String(row.content.body), sourceUrl: String(row.content.sourceUrl) },
+        ...creatureEvidenceCitations(projection, String(row.content.body), String(index.metadataEvidenceText), String(row.content.sourceUrl), String(index.url)),
+      ];
+      return { ...resolved, citations, extraction: { status: "ready", missingFields: [] } };
+    } catch (error) {
+      throw new ImportReviewError(`Collector creature repair is unsupported by immutable evidence: ${error instanceof Error ? error.message : String(error)}`, 409);
+    }
+  }
   return resolved;
 }
 
@@ -831,6 +848,7 @@ function boundedInteger(value: number | undefined, fallback: number, minimum: nu
 }
 function requireUuid(value: string, name: string): void { if (!UUID.test(value)) throw new ImportReviewError(`${name} must be a UUID.`); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function recordValue(value: unknown): Record<string, unknown> { if (!isRecord(value)) throw new ImportReviewError("Collector source evidence is malformed.", 409); return value; }
 function isSnapshotSpellContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotSpellCandidate" && value.schemaVersion === 1; }
 function isSnapshotCreatureContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotCreatureCandidate" && value.schemaVersion === 1; }
 function isSnapshotContent(value: Record<string, unknown>): boolean { return isSnapshotSpellContent(value) || isSnapshotCreatureContent(value); }

@@ -149,7 +149,7 @@ DO $$ BEGIN
         AND compendium_valid_creature_abilities(abilities)
         AND compendium_valid_creature_modifiers(saves) AND compendium_valid_creature_modifiers(skills)
         AND damage_resistances IS NOT NULL AND damage_immunities IS NOT NULL AND condition_immunities IS NOT NULL
-        AND senses IS NOT NULL AND languages IS NOT NULL AND passive_perception BETWEEN 0 AND 100
+        AND senses IS NOT NULL AND languages IS NOT NULL AND passive_perception IS NOT NULL AND passive_perception BETWEEN 0 AND 100
         AND compendium_valid_creature_blocks(traits) AND compendium_valid_creature_blocks(actions)
         AND compendium_valid_creature_blocks(bonus_actions) AND compendium_valid_creature_blocks(reactions)
         AND compendium_valid_creature_blocks(legendary_actions)
@@ -163,19 +163,21 @@ END $$;
 
 -- Rows that predate this migration remain editable and may be completed by an
 -- UPDATE, but no application path may create another incomplete projection.
-CREATE OR REPLACE FUNCTION compendium_reject_new_legacy_creature() RETURNS trigger
+CREATE OR REPLACE FUNCTION compendium_guard_legacy_creature_status() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  IF NEW.projection_status = 'legacy_incomplete' THEN
+  IF TG_OP = 'INSERT' AND NEW.projection_status = 'legacy_incomplete' THEN
     RAISE EXCEPTION 'new legacy_incomplete creature projections are not allowed';
+  ELSIF TG_OP = 'UPDATE' AND OLD.projection_status = 'complete' AND NEW.projection_status = 'legacy_incomplete' THEN
+    RAISE EXCEPTION 'complete creature projections cannot return to legacy_incomplete';
   END IF;
   RETURN NEW;
 END $$;
 
 DROP TRIGGER IF EXISTS compendium_creatures_reject_new_legacy ON compendium_creatures;
 CREATE TRIGGER compendium_creatures_reject_new_legacy
-BEFORE INSERT ON compendium_creatures
-FOR EACH ROW EXECUTE FUNCTION compendium_reject_new_legacy_creature();
+BEFORE INSERT OR UPDATE OF projection_status ON compendium_creatures
+FOR EACH ROW EXECUTE FUNCTION compendium_guard_legacy_creature_status();
 
 CREATE INDEX IF NOT EXISTS compendium_creatures_cr_exact_idx
   ON compendium_creatures (challenge_rating, creature_type, revision_id);

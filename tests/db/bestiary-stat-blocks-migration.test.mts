@@ -20,6 +20,8 @@ test("0018 adds the complete creature projection without changing flat or spell 
   assert.match(sql, /item->>'mode' = ANY\(seen_modes\)/);
   for (const validator of ["hit_points", "modifiers", "blocks", "texts"]) assert.match(sql, new RegExp(`compendium_valid_creature_${validator}`));
   assert.match(sql, /new legacy_incomplete creature projections are not allowed/);
-  assert.match(sql, /BEFORE INSERT ON compendium_creatures/);
-  assert.doesNotMatch(sql, /BEFORE (?:INSERT OR UPDATE|UPDATE) ON compendium_creatures/);
+  assert.match(sql, /passive_perception IS NOT NULL AND passive_perception BETWEEN 0 AND 100/);
+  assert.match(sql, /OLD\.projection_status = 'complete' AND NEW\.projection_status = 'legacy_incomplete'/);
+  assert.match(sql, /BEFORE INSERT OR UPDATE OF projection_status ON compendium_creatures/);
+  assert.doesNotMatch(sql, /OLD\.projection_status = 'legacy_incomplete' AND NEW\.projection_status = 'complete'[\s\S]*RAISE EXCEPTION/);
 });

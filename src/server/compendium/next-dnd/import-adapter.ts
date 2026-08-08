@@ -3,7 +3,7 @@ import { NEXT_DND_CATEGORIES, nextDndCardFingerprint } from "./parser.ts";
 import type { NextDndSnapshotManifest, SnapshotDetail } from "./collector.ts";
 import { SPELL_SCHOOLS, type SpellSchool } from "../spell-schema.ts";
 import { creatureEvidencePaths, normalizeChallengeRating, validateCreatureProjection, type CreatureBlock, type CreatureProjection } from "../creature-schema.ts";
-import { abilityEvidenceQuote, creatureFieldEvidenceSupports, speedEvidenceQuote } from "../creature-evidence.ts";
+import { abilityEvidenceQuote, creatureFieldEvidenceSupports, parseCreatureAlignmentEvidence, passivePerceptionEvidenceQuote, speedEvidenceQuote } from "../creature-evidence.ts";
 
 type ImportRunAdapterTarget = Pick<CompendiumImportRunService, "addDiagnostic" | "failRun" | "recordOccurrences" | "computeCandidateDiff">;
 
@@ -210,7 +210,8 @@ export function creatureCandidate(detail: SnapshotDetail): SnapshotCreatureCandi
   const header = headerLine.match(/\b(Tiny|Small|Medium|Large|Huge|Gargantuan)\s+([^,.;]+)(?:,\s*([^.;]+))?/i);
   const size = header?.[1]?.toLowerCase();
   const creatureType = header?.[2]?.trim();
-  const alignment = header?.[3]?.trim() ?? null;
+  const alignmentEvidence = parseCreatureAlignmentEvidence(headerLine);
+  const alignment = alignmentEvidence.value;
   const acText = labelledCreatureValue(body, ["Armor Class", "Класс Доспеха", "КД"]);
   const hpText = labelledCreatureValue(body, ["Hit Points", "Хиты"]);
   const speedText = labelledCreatureValue(body, ["Speed", "Скорость"]);
@@ -241,7 +242,7 @@ export function creatureCandidate(detail: SnapshotDetail): SnapshotCreatureCandi
     reactions: parseSectionBlocks(body, ["Reactions", "Реакции"], ["Legendary Actions", "Легендарные действия"]),
     legendaryActions: parseSectionBlocks(body, ["Legendary Actions", "Легендарные действия"], []),
   };
-  const missingFields = Object.entries(raw).filter(([key, value]) => value === null || value === undefined || (typeof value === "number" && !Number.isFinite(value))
+  const missingFields = Object.entries(raw).filter(([key, value]) => (value === null && !(key === "alignment" && alignmentEvidence.explicit)) || value === undefined || (typeof value === "number" && !Number.isFinite(value))
     || (Array.isArray(value) && value.length === 0 && ["armorClass", "speeds"].includes(key))).map(([key]) => key);
   let attributes: CreatureProjection;
   try { attributes = validateCreatureProjection(raw); }
@@ -312,6 +313,7 @@ function creatureEvidenceQuote(path: string, body: string, metadata: string, val
   if (["traits", "actions", "bonusActions", "reactions", "legendaryActions"].includes(key) && isRecord(value)) return body.split("\n").find((line) => line.includes(String(value.name)) && line.includes(String(value.text))) ?? "";
   const line = body.split("\n").find((candidate) => (labels[key] ?? []).some((label) => new RegExp(`^${escapeRegExp(label)}(?:\\s|:)`, "iu").test(candidate)));
   if (line && key === "speeds" && isRecord(value)) return speedEvidenceQuote(line, String(value.mode)) ?? "";
+  if (line && key === "passivePerception") return passivePerceptionEvidenceQuote(line) ?? "";
   if (line) return line;
   if (key === "challengeRating") return metadata.split("\n").find((candidate) => /^(?:challenge_rating|challenge|cr)=/.test(candidate)) ?? "";
   return hasScalarValues(value) ? "" : body;

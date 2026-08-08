@@ -15,6 +15,7 @@ type MutableCreatureAttributes = {
   abilities: Record<string,number>; saves: Record<string,number>; skills: Record<string,number>;
   speeds: Array<{distance:number}>; armorClass: Array<{value:number}>; hitPoints: {average:number};
   challengeRating: {numerator:number;denominator:number}; actions: Array<{name:string;text:string}>;
+  passivePerception:number; alignment:string|null;
 };
 const evidence = { sourceUrl:detail.sourceUrl,fingerprintSha256:detail.sha256,rawBlobPath:detail.blobPath,fetchedAt:detail.fetchedAt,fileChecksumSha256:"d".repeat(64),indexUrl:detail.indexSource.url,indexFingerprintSha256:detail.indexSource.fingerprintSha256,rawIndexBlobPath:detail.indexSource.rawBlobPath,indexFetchedAt:detail.indexSource.fetchedAt,indexCardFingerprintSha256:detail.indexSource.cardFingerprintSha256,metadataEvidenceText:creatureMetadataEvidence(detail.indexMetadata) };
 const context = { candidateKey:"bestiary-999",entryType:"creature",sourceId:"11111111-1111-4111-8111-111111111111",fileId:"22222222-2222-4222-8222-222222222222",generationId:null,edition:"5.5e",language:"ru",accessTier:"open",shared:false,ownerUserId:null,chunk:null,snapshotEvidence:evidence } as const;
@@ -51,6 +52,9 @@ test("collector and PDF evidence bind creature keys to their own values", () => 
     (attributes)=>{attributes.hitPoints.average=22;},
     (attributes)=>{attributes.challengeRating={numerator:22,denominator:1};},
     (attributes)=>{[attributes.actions[0].text,attributes.actions[1].text]=[attributes.actions[1].text,attributes.actions[0].text];},
+    (attributes)=>{attributes.passivePerception=60;},
+    (attributes)=>{attributes.alignment="dragon";},
+    (attributes)=>{attributes.alignment=null;},
   ];
   const pdfText=`Ancient Red Dragon\n${candidate.body}`;
   const pdfCitation=(fieldPath:string,quote:string)=>{const start=pdfText.indexOf(quote);assert.ok(start>=0);const quoteSpanStart=Array.from(pdfText.slice(0,start)).length;return {fieldPath,chunkId:"99999999-9999-4999-8999-999999999999",quote,quoteSpanStart,quoteSpanEnd:quoteSpanStart+Array.from(quote).length};};
@@ -66,6 +70,19 @@ test("collector and PDF evidence bind creature keys to their own values", () => 
     const pdfTamper=structuredClone(pdf) as unknown as {attributes:MutableCreatureAttributes};mutate(pdfTamper.attributes);
     assert.throws(()=>validateCandidateWire(pdfTamper,[chunk]),/(?:value-supporting evidence|type schema)/i);
   }
+});
+
+test("null alignment requires explicit immutable unaligned evidence", () => {
+  const unalignedDetail=structuredClone(detail) as {normalized:{contentText:string}} & typeof detail;
+  unalignedDetail.normalized.contentText=unalignedDetail.normalized.contentText.replace("Gargantuan dragon, chaotic evil.","Gargantuan dragon, unaligned.");
+  const unaligned=creatureCandidate(unalignedDetail as never);
+  assert.equal(unaligned.extraction.status,"ready");
+  assert.equal(unaligned.attributes.alignment,null);
+  assert.equal(classifyCandidatePublication(unaligned,{...context,snapshotEvidence:{...evidence}}).publicationCapability,"publishable");
+
+  const absentDetail=structuredClone(detail) as {normalized:{contentText:string}} & typeof detail;
+  absentDetail.normalized.contentText=absentDetail.normalized.contentText.replace("Gargantuan dragon, chaotic evil.","Gargantuan dragon.");
+  assert.equal(creatureCandidate(absentDetail as never).extraction.status,"needs_review");
 });
 
 test("CR rejects unreduced fractions and keyset ties include title and ID", async () => {

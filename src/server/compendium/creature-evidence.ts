@@ -11,6 +11,10 @@ const SPEED_MODES: Readonly<Record<string, CreatureProjection["speeds"][number][
 
 export function creatureFieldEvidenceSupports(path: string, value: unknown, quote: string): boolean {
   const field = path.match(/^\$\.attributes\.([A-Za-z]+)/)?.[1] ?? "";
+  if (field === "alignment") {
+    const alignment = parseCreatureAlignmentEvidence(quote);
+    return alignment.explicit && alignment.value === value;
+  }
   if (field === "abilities") {
     const key = path.split(".").at(-1) ?? "";
     const labels = ABILITY_LABELS[key] ?? [];
@@ -46,6 +50,10 @@ export function creatureFieldEvidenceSupports(path: string, value: unknown, quot
     const match = evidence.match(/^(\d+)(?:\s*\/\s*(\d+))?(?:\s|$)/u);
     return Boolean(match) && Number(value.numerator) * Number(match![2] ?? 1) === Number(match![1]) * Number(value.denominator);
   }
+  if (field === "passivePerception") {
+    const match = quote.match(/(?:passive Perception|пассивное Восприятие)\s*(\d+)/iu);
+    return typeof value === "number" && Boolean(match) && Number(match![1]) === value;
+  }
   if (["traits", "actions", "bonusActions", "reactions", "legendaryActions"].includes(field)) {
     if (!isRecord(value)) return false;
     const block = parseBlock(quote);
@@ -54,6 +62,19 @@ export function creatureFieldEvidenceSupports(path: string, value: unknown, quot
   return scalarValues(value).every((scalar) => typeof scalar === "number"
     ? numericValues(quote).includes(scalar)
     : normalize(quote).includes(normalize(scalar)));
+}
+
+export function parseCreatureAlignmentEvidence(quote: string): Readonly<{ explicit: boolean; value: string | null }> {
+  const match = quote.match(/(?:\b(?:Tiny|Small|Medium|Large|Huge|Gargantuan)|(?:Крошечн|Маленьк|Средн|Больш|Огромн|Громадн)[\p{L}-]*)\s+[^,.;]+(?:,\s*([^.;]+))?/iu);
+  if (!match?.[1]?.trim()) return { explicit: false, value: null };
+  const value = match[1].normalize("NFC").trim();
+  return /^(?:unaligned|none|нет|без мировоззрения|-|—)$/iu.test(value)
+    ? { explicit: true, value: null }
+    : { explicit: true, value };
+}
+
+export function passivePerceptionEvidenceQuote(line: string): string | null {
+  return line.match(/((?:passive Perception|пассивное Восприятие)\s*\d+)/iu)?.[1] ?? null;
 }
 
 export function abilityEvidenceQuote(body: string, key: string): string | null {
