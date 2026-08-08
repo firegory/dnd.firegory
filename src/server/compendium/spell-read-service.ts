@@ -121,8 +121,7 @@ export class SpellReadService {
 
   async get(user: RetrievalUser, identifier: string, selection: RetrievalSelection = {}): Promise<SpellDetail> {
     const normalized = normalizeIdentifier(identifier);
-    const boundary = boundarySql(user, selection);
-    boundary.params.push(normalized);
+    const boundary = boundarySql(user, selection, normalized);
     const result = await this.db.query<SpellRow>(
       `${boundary.sql}
        SELECT * FROM accessible_spells spell
@@ -141,11 +140,20 @@ export class SpellReadService {
   }
 }
 
-function boundarySql(user: RetrievalUser, selection: RetrievalSelection): { sql: string; params: unknown[] } {
+function boundarySql(user: RetrievalUser, selection: RetrievalSelection, exactIdentifier?: string): { sql: string; params: unknown[] } {
   const access = buildSourceAccessSql(buildRetrievalAuthorizationFilter(user, selection));
+  const params = [...access.params];
+  const exactParam = exactIdentifier === undefined ? null : params.push(exactIdentifier);
+  const exactEntries = exactParam === null ? "" : `matching_spell_entries AS MATERIALIZED (
+      SELECT DISTINCT candidate.entry_id
+      FROM nfs_index_entries candidate
+      WHERE candidate.lifecycle = 'active' AND candidate.entry_type = 'spell'
+        AND (candidate.entry_id = $${exactParam}
+          OR nfs_index_normalized_aliases(candidate.aliases) @> ARRAY[compendium_normalize_name($${exactParam})])
+    ),`;
   return {
-    params: [...access.params],
-    sql: `WITH accessible_spell_versions AS MATERIALIZED (
+    params,
+    sql: `WITH ${exactEntries} accessible_spell_versions AS MATERIALIZED (
       SELECT n.entry_id, n.revision_id, n.name, n.aliases, n.typed_fields, n.plain_text,
              n.canonical_payload, n.source_id, n.file_id, f.mime_type, s.title AS source_title,
              s.edition, s.language, s.publication_code, s.publication_revision, s.source_priority,
@@ -159,8 +167,9 @@ function boundarySql(user: RetrievalUser, selection: RetrievalSelection): { sql:
       FROM nfs_index_entries n
       JOIN sources s ON s.id = n.source_id
       JOIN files f ON f.id = n.file_id AND f.source_id = s.id
-      WHERE ${access.sql} AND s.deleted_at IS NULL AND f.deleted_at IS NULL
+       WHERE ${access.sql} AND s.deleted_at IS NULL AND f.deleted_at IS NULL
         AND n.lifecycle = 'active' AND n.entry_type = 'spell'
+        ${exactParam === null ? "" : "AND n.entry_id IN (SELECT entry_id FROM matching_spell_entries)"}
     ), accessible_spells AS MATERIALIZED (
       SELECT spell_version.*,
              (SELECT jsonb_agg(jsonb_build_object(

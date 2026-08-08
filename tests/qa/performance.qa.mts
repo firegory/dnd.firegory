@@ -5,7 +5,7 @@ import test from "node:test";
 import { SpellReadService } from "../../src/server/compendium/spell-read-service.ts";
 import { IDS, isolatedDatabase, runProductionMigrations, seedAccessFixture } from "./postgres.mts";
 
-const VOLUME_ROWS = threshold("QA_VOLUME_ROWS", 10_000, 10_000, 100_000);
+const VOLUME_ROWS = threshold("QA_VOLUME_ROWS", 20_000, 10_000, 100_000);
 const MAX_EXECUTION_MS = threshold("QA_MAX_QUERY_MS", 1_500, 1, 60_000);
 const MAX_PLANNING_MS = threshold("QA_MAX_PLANNING_MS", 250, 1, 10_000);
 
@@ -74,16 +74,20 @@ test("QA integration: mixed representative corpus records bounded list, count, a
   const result = await service.list(user, { edition: "5.5e", language: "en", limit: 50 });
   assert.equal(result.count, Math.floor(VOLUME_ROWS / 20) + 1, "only open, 2024 spell rows plus the baseline spell are visible");
   assert.equal(result.spells.length, 50);
+  const exact = await service.get(user, "volume-spell-000020", { edition: "5.5e", language: "en" });
+  assert.equal(exact.id, "volume-spell-000020");
   const alias = await service.get(user, "Volume Alias 20", { edition: "5.5e", language: "en" });
   assert.equal(alias.id, "volume-spell-000020");
 
+  const detailStatements = statements.filter(({ sql }) => sql.includes("matching_spell_entries"));
   const plans = [
-    ["spell-list", statements.find(({ sql }) => sql.includes("ORDER BY spell.sort_title"))],
-    ["spell-count", statements.find(({ sql }) => sql.includes("count(*)::text"))],
-    ["spell-alias", [...statements].reverse().find(({ sql }) => sql.includes("jsonb_array_elements_text(spell.aliases)"))],
+    ["spell-list", statements.find(({ sql }) => sql.includes("ORDER BY spell.sort_title")), false],
+    ["spell-count", statements.find(({ sql }) => sql.includes("count(*)::text")), false],
+    ["spell-exact", detailStatements[0], true],
+    ["spell-alias", detailStatements[1], true],
   ] as const;
   await mkdir("qa-artifacts", { recursive: true });
-  for (const [name, statement] of plans) {
+  for (const [name, statement, selective] of plans) {
     assert.ok(statement, `${name} production query must be captured`);
     const explained = await db.pool.query<{
       "QUERY PLAN": Array<{ Plan: Record<string, unknown>; "Planning Time": number; "Execution Time": number }>;
@@ -93,11 +97,16 @@ test("QA integration: mixed representative corpus records bounded list, count, a
     assert.ok(evidence["Execution Time"] <= MAX_EXECUTION_MS, `${name} execution ${evidence["Execution Time"]}ms exceeds ${MAX_EXECUTION_MS}ms`);
     assert.ok(evidence["Planning Time"] <= MAX_PLANNING_MS, `${name} planning ${evidence["Planning Time"]}ms exceeds ${MAX_PLANNING_MS}ms`);
     assertNoPathologicalScan(evidence.Plan, VOLUME_ROWS, name);
+    const scanVisits = nfsScanVisits(evidence.Plan);
+    const maxSelectiveVisits = Math.max(100, Math.floor(VOLUME_ROWS * 0.01));
+    if (selective) {
+      assert.ok(scanVisits <= maxSelectiveVisits, `${name} visited ${scanVisits} indexed entries; selective limit is ${maxSelectiveVisits}`);
+    }
     assert.ok(Number(evidence.Plan["Actual Rows"] ?? 0) >= 1, `${name} plan must return rows`);
     await writeFile(`qa-artifacts/${name}-plan.json`, `${JSON.stringify({
       rows: VOLUME_ROWS,
-      thresholds: { executionMs: MAX_EXECUTION_MS, planningMs: MAX_PLANNING_MS },
-      measured: { executionMs: evidence["Execution Time"], planningMs: evidence["Planning Time"] },
+      thresholds: { executionMs: MAX_EXECUTION_MS, planningMs: MAX_PLANNING_MS, selectiveScanVisits: selective ? maxSelectiveVisits : null },
+      measured: { executionMs: evidence["Execution Time"], planningMs: evidence["Planning Time"], nfsScanVisits: scanVisits },
       plan: evidence.Plan,
     }, null, 2)}\n`);
   }
@@ -107,6 +116,22 @@ function threshold(name: string, fallback: number, minimum: number, maximum: num
   const value = process.env[name] === undefined ? fallback : Number(process.env[name]);
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error(`${name} must be an integer from ${minimum} through ${maximum}.`);
   return value;
+}
+
+function nfsScanVisits(plan: Record<string, unknown>): number {
+  let visits = 0;
+  if (plan["Relation Name"] === "nfs_index_entries") {
+    const loops = Number(plan["Actual Loops"] ?? 1);
+    visits += loops * (
+      Number(plan["Actual Rows"] ?? 0)
+      + Number(plan["Rows Removed by Filter"] ?? 0)
+      + Number(plan["Rows Removed by Index Recheck"] ?? 0)
+    );
+  }
+  if (Array.isArray(plan.Plans)) {
+    for (const child of plan.Plans) if (child && typeof child === "object") visits += nfsScanVisits(child as Record<string, unknown>);
+  }
+  return visits;
 }
 
 function assertNoPathologicalScan(plan: Record<string, unknown>, rows: number, queryName: string): void {

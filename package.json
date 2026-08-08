@@ -14,7 +14,7 @@
     "qa:db": "node --test --experimental-strip-types tests/qa/database.qa.mts",
     "qa:publication": "node --test --experimental-strip-types tests/content-storage/publication.test.mts tests/qa/publication-process.qa.mts",
     "qa:performance": "node --test --experimental-strip-types tests/qa/performance.qa.mts",
-    "qa:browser": "playwright test",
+    "qa:browser": "node --experimental-strip-types scripts/run-browser-qa.mts",
     "qa:browser:install": "playwright install --with-deps chromium",
     "qa:build": "npm run typecheck && npm run lint && npm run build",
     "db:migrate": "node --experimental-strip-types scripts/migrate.mts",

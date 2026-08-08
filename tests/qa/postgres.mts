@@ -116,8 +116,13 @@ export async function runProductionMigrations(databaseUrl: string): Promise<void
 }
 
 export async function applyMigrationPrefix(client: PoolClient, through: string): Promise<void> {
-  await client.query("CREATE TABLE schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
+  await client.query("CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
   for (const filename of MIGRATION_FILENAMES) {
+    const applied = await client.query("SELECT 1 FROM schema_migrations WHERE version=$1", [filename]);
+    if (applied.rowCount) {
+      if (filename === through) return;
+      continue;
+    }
     const sql = await readFile(`migrations/${filename}`, "utf8");
     await client.query("BEGIN");
     try {

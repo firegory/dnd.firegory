@@ -14,6 +14,12 @@ test("migration 0014 is registered, additive, and rerunnable", () => {
   assert.match(sql,/EXCEPTION WHEN duplicate_object THEN NULL/);
   assert.doesNotMatch(sql,/DELETE FROM compendium_/i);
   assert.match(sql,/UPDATE compendium_versions SET editor_head_revision_id = active_revision_id/);
+  assert.ok(
+    sql.indexOf("CREATE OR REPLACE FUNCTION compendium_validate_active_revision()")
+      < sql.indexOf("UPDATE compendium_versions SET editor_head_revision_id"),
+    "the dual-path trigger repair must precede the data backfill",
+  );
+  assert.match(sql, /IF TG_TABLE_NAME = 'compendium_versions' THEN\s+target_version := NEW\.id;\s+ELSE\s+target_version := NEW\.version_id;/);
 });
 
 test("migration 0014 enforces immutable audit, constrained outcomes, and version-owned revisions", () => {
