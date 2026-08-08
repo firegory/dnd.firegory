@@ -267,7 +267,7 @@ export function mapCitations(
         fileId: matchedChunk.fileId,
         sourceId: matchedChunk.sourceId,
         chunkId: matchedChunk.chunkId,
-        ...(evidence ? { entityEvidence: [citationEntityEvidence(evidence)] } : {}),
+        ...(evidence.length ? { entityEvidence: evidence.map(citationEntityEvidence) } : {}),
       });
     }
   }
@@ -287,7 +287,7 @@ export function citationEntityEvidence(evidence: EntityEvidence): CitationEntity
 type CitationSupport = Readonly<{
   chunk: RetrievalCandidate;
   quote: string;
-  evidence?: EntityEvidence;
+  evidence: readonly EntityEvidence[];
 }>;
 
 function findCitationSupport(
@@ -303,14 +303,31 @@ function findCitationSupport(
   for (const chunk of candidates) {
     for (const evidence of chunk.entityEvidence ?? []) {
       if (isNormalizedSubstring(citation.quote, evidence.quote)) {
-        return { chunk, quote: evidence.quote, evidence };
+        return {
+          chunk,
+          quote: evidence.quote,
+          evidence: evidenceWithinSpan(chunk, evidence.quote),
+        };
       }
     }
     if (isNormalizedSubstring(citation.quote, chunk.quoteText)) {
-      return { chunk, quote: chunk.quoteText };
+      return {
+        chunk,
+        quote: chunk.quoteText,
+        evidence: evidenceWithinSpan(chunk, chunk.quoteText),
+      };
     }
   }
   return undefined;
+}
+
+function evidenceWithinSpan(
+  chunk: RetrievalCandidate,
+  authoritativeQuote: string,
+): readonly EntityEvidence[] {
+  return chunk.entityEvidence?.filter((evidence) =>
+    isNormalizedSubstring(evidence.quote, authoritativeQuote),
+  ) ?? [];
 }
 
 function isNormalizedSubstring(quote: string, source: string): boolean {
@@ -319,5 +336,5 @@ function isNormalizedSubstring(quote: string, source: string): boolean {
 }
 
 function normalizeCitationText(value: string): string {
-  return value.normalize("NFC").replaceAll(/\s+/g, " ").trim().toLocaleLowerCase();
+  return value.normalize("NFC").replaceAll(/\s+/g, " ").trim().toLowerCase();
 }

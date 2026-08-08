@@ -59,6 +59,20 @@ type EntityRow = QueryResultRow & {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+export type EntityLookupPlan = Readonly<{
+  params: readonly unknown[];
+  matchPredicate: string;
+}>;
+
+export function normalizeEntityLookupName(value: string): string {
+  return value
+    .normalize("NFC")
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[-_\s.,/:;!?()]+/gu, "-")
+    .replaceAll(/^-|-$/g, "");
+}
+
 export function isCompendiumEntryScope(value: unknown): value is CompendiumEntryScope {
   if (!value || typeof value !== "object") return false;
   const scope = value as Record<string, unknown>;
@@ -77,25 +91,17 @@ export function entryScopeConflictsWithSelection(
     || (scope.language !== undefined && selection.language !== undefined && scope.language !== selection.language);
 }
 
-/**
- * Resolves exact titles/aliases and returns only their source-bound citations
- * whose chunks belong to the request's fixed authorized generation snapshot.
- */
-export async function resolveCompendiumEntities(
+export function prepareEntityLookup(
   searchQuery: string,
   generationIds: readonly string[],
   scope?: CompendiumEntryScope,
-  execute: QueryExecutor = query,
-): Promise<EntityResolution> {
-  if (generationIds.length === 0 || (!scope && !searchQuery.trim())) {
-    return { matches: [], candidates: [] };
-  }
+): EntityLookupPlan | null {
+  if (generationIds.length === 0) return null;
 
   const params: unknown[] = [generationIds];
-  const scopeFilters: string[] = [];
-  let matchPredicate: string;
-
   if (scope) {
+    if (!isCompendiumEntryScope(scope)) return null;
+    const scopeFilters: string[] = [];
     params.push(scope.entryId);
     scopeFilters.push(`e.id = $${params.length}::uuid`);
     if (scope.sourceId) {
@@ -114,19 +120,38 @@ export async function resolveCompendiumEntities(
       params.push(scope.language);
       scopeFilters.push(`v.language = $${params.length}`);
     }
-    matchPredicate = scopeFilters.join(" AND ");
-  } else {
-    params.push(searchQuery.slice(0, 500));
-    const queryParam = params.length;
-    matchPredicate = `(
+    return { params, matchPredicate: scopeFilters.join(" AND ") };
+  }
+
+  const boundedQuery = searchQuery.slice(0, 500);
+  if (!normalizeEntityLookupName(boundedQuery)) return null;
+  params.push(boundedQuery);
+  const queryParam = params.length;
+  return {
+    params,
+    matchPredicate: `(
       position('-' || compendium_normalize_name(r.title) || '-' in '-' || compendium_normalize_name($${queryParam}) || '-') > 0
       OR EXISTS (
         SELECT 1 FROM compendium_names exact_name
         WHERE exact_name.version_id = v.id
           AND position('-' || exact_name.normalized_name || '-' in '-' || compendium_normalize_name($${queryParam}) || '-') > 0
       )
-    )`;
-  }
+    )`,
+  };
+}
+
+/**
+ * Resolves exact titles/aliases and returns only their source-bound citations
+ * whose chunks belong to the request's fixed authorized generation snapshot.
+ */
+export async function resolveCompendiumEntities(
+  searchQuery: string,
+  generationIds: readonly string[],
+  scope?: CompendiumEntryScope,
+  execute: QueryExecutor = query,
+): Promise<EntityResolution> {
+  const plan = prepareEntityLookup(searchQuery, generationIds, scope);
+  if (!plan) return { matches: [], candidates: [] };
 
   const result = await execute<EntityRow>(
     `WITH matched_versions AS MATERIALIZED (
@@ -137,7 +162,7 @@ export async function resolveCompendiumEntities(
        FROM compendium_entries e
        JOIN compendium_versions v ON v.entry_id=e.id AND v.entry_type=e.entry_type AND v.edition=e.edition
        JOIN compendium_revisions r ON r.id=v.active_revision_id AND r.version_id=v.id
-       WHERE v.lifecycle='published' AND r.lifecycle='published' AND ${matchPredicate}
+       WHERE v.lifecycle='published' AND r.lifecycle='published' AND ${plan.matchPredicate}
      )
      SELECT matched.entry_id, matched.entry_type, matched.canonical_key, matched.title,
             matched.aliases, matched.edition, matched.language, matched.source_id,
@@ -159,7 +184,7 @@ export async function resolveCompendiumEntities(
      ORDER BY matched.entry_type, matched.entry_id, s.source_priority DESC,
               matched.language, citation.kind, citation.field_path, citation.block_order
      LIMIT 200`,
-    params,
+    plan.params,
   );
 
   return mapEntityRows(result.rows);
@@ -234,9 +259,9 @@ export function enrichRewriteWithEntities<T extends Readonly<{
 }>>(rewrite: T, matches: readonly ExactEntityMatch[]): T {
   if (matches.length === 0) return rewrite;
   const names = matches.flatMap((match) => [match.title, ...match.aliases]);
-  const seen = new Set([rewrite.original, rewrite.canonical, ...rewrite.bilingual, ...rewrite.expanded].map((name) => name.trim().toLocaleLowerCase()));
+  const seen = new Set([rewrite.original, rewrite.canonical, ...rewrite.bilingual, ...rewrite.expanded].map(normalizeEntityLookupName));
   const additions = names.filter((name) => {
-    const key = name.trim().toLocaleLowerCase();
+    const key = normalizeEntityLookupName(name);
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;

@@ -12,26 +12,15 @@ export function groundGeneratedAnswer(
   parsed: RawLlmResponse,
   chunks: readonly RetrievalCandidate[],
   language: AnswerLanguage,
-  extractive = false,
 ): GroundedAnswer {
   const rawCitations = parsed.citations?.filter((citation) => typeof citation.quote === "string" && !!citation.quote.trim()) ?? [];
   const citations = mapCitations(rawCitations, chunks);
   if (citations.length === 0) return unsupportedAnswer(language, chunks.length);
 
-  const answer = typeof parsed.answer === "string" ? parsed.answer.trim() : "";
-  if (extractive || !answer || citations.length !== rawCitations.length) {
-    return {
-      answer: evidenceAnswer(language, citations),
-      citations,
-      confident: false,
-      retrievedChunks: chunks.length,
-    };
-  }
-
   return {
-    answer,
+    answer: evidenceAnswer(language, citations),
     citations,
-    confident: parsed.confident === true,
+    confident: parsed.confident === true && citations.length === (parsed.citations?.length ?? 0),
     retrievedChunks: chunks.length,
   };
 }

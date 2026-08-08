@@ -169,7 +169,7 @@ export async function generateAnswer(
 
   // 5. Parse and map
   const parsed = parseLlmResponse(result.content);
-  const answer: RagAnswer = groundGeneratedAnswer(parsed, chunks, answerLanguage, entryScope !== undefined);
+  const answer: RagAnswer = groundGeneratedAnswer(parsed, chunks, answerLanguage);
 
   return {
     answer,

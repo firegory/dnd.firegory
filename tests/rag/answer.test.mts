@@ -312,6 +312,75 @@ describe("mapCitations", () => {
     assert.deepEqual(result[0].entityEvidence?.map((evidence) => evidence.fieldPath), ["$.range"]);
   });
 
+  it("propagates field evidence contained by a full authoritative chunk quote", () => {
+    const chunks = [makeChunk({
+      quoteText: "Range: Self. Duration: 1 round.",
+      strategy: "entity",
+      entityEvidence: [
+        {
+          entryId: "entry-1",
+          entryType: "spell",
+          canonicalKey: "shield",
+          title: "Shield",
+          citationId: "citation-range",
+          citationKind: "field",
+          fieldPath: "$.range",
+          quote: "Range: Self",
+        },
+        {
+          entryId: "entry-1",
+          entryType: "spell",
+          canonicalKey: "shield",
+          title: "Shield",
+          citationId: "citation-damage",
+          citationKind: "field",
+          fieldPath: "$.damage",
+          quote: "Damage: 4d6",
+        },
+      ],
+    })];
+
+    const result = mapCitations(
+      [{ quote: "Range: Self. Duration: 1 round." }],
+      chunks,
+    );
+
+    assert.deepEqual(result[0].entityEvidence?.map((evidence) => evidence.fieldPath), ["$.range"]);
+  });
+
+  it("derives a narrow citation inside field evidence without attaching outside evidence", () => {
+    const chunks = [makeChunk({
+      strategy: "entity",
+      entityEvidence: [
+        {
+          entryId: "entry-1",
+          entryType: "spell",
+          canonicalKey: "shield",
+          title: "Shield",
+          citationId: "citation-range",
+          citationKind: "field",
+          fieldPath: "$.range",
+          quote: "Range: Self",
+        },
+        {
+          entryId: "entry-1",
+          entryType: "spell",
+          canonicalKey: "shield",
+          title: "Shield",
+          citationId: "citation-duration",
+          citationKind: "field",
+          fieldPath: "$.duration",
+          quote: "Duration: 1 round",
+        },
+      ],
+    })];
+
+    const result = mapCitations([{ quote: "Range: Se" }], chunks);
+
+    assert.equal(result[0].quote, "Range: Self");
+    assert.deepEqual(result[0].entityEvidence?.map((evidence) => evidence.fieldPath), ["$.range"]);
+  });
+
   it("omits an entity field claim without a supporting carried citation", () => {
     const chunks = [makeChunk({
       strategy: "entity",

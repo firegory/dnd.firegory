@@ -5,6 +5,8 @@ import {
   enrichRewriteWithEntities,
   entryScopeConflictsWithSelection,
   isCompendiumEntryScope,
+  normalizeEntityLookupName,
+  prepareEntityLookup,
   resolveCompendiumEntities,
 } from "../../src/server/retrieval/entity.ts";
 
@@ -127,18 +129,22 @@ describe("resolveCompendiumEntities", () => {
     assert.deepEqual(params, [[generationId], entryId, sourceId, versionId, "5e", "en"]);
   });
 
-  it("parameterizes apostrophe aliases without interpolating user text", async () => {
-    const alias = "Mordenkainen's Sword";
-    let sql = "";
-    let params: readonly unknown[] = [];
-    await resolveCompendiumEntities(alias, [generationId], undefined, (async (statement: string, values: readonly unknown[]) => {
-      sql = statement;
-      params = values;
-      return { rows: [entityRow({ title: alias, aliases: ["Меч Морденкайнена"] })] } as never;
-    }) as never);
+  it("parameterizes RU and EN aliases including apostrophes without interpolation", async () => {
+    for (const alias of ["Mordenkainen's Sword", "Меч Морденкайнена"]) {
+      let sql = "";
+      let params: readonly unknown[] = [];
+      await resolveCompendiumEntities(alias, [generationId], undefined, (async (statement: string, values: readonly unknown[]) => {
+        sql = statement;
+        params = values;
+        return { rows: [entityRow({ title: "Mordenkainen's Sword", aliases: ["Меч Морденкайнена"] })] } as never;
+      }) as never);
 
-    assert.equal(sql.includes(alias), false);
-    assert.deepEqual(params, [[generationId], alias]);
+      assert.equal(sql.includes(alias), false);
+      assert.deepEqual(params, [[generationId], alias]);
+      assert.match(sql, /citation\.generation_id = ANY\(\$1::uuid\[\]\)/);
+      assert.match(sql, /v\.active_revision_id/);
+      assert.match(sql, /v\.lifecycle='published' AND r\.lifecycle='published'/);
+    }
   });
 
   it("returns indistinguishable results for inaccessible and nonexistent scoped entries", async () => {
@@ -183,6 +189,36 @@ describe("resolveCompendiumEntities", () => {
 });
 
 describe("entity query contracts", () => {
+  it("normalizes bilingual names with the same deterministic token boundaries", () => {
+    assert.equal(normalizeEntityLookupName("  Mage's  Hand! "), "mage's-hand");
+    assert.equal(normalizeEntityLookupName("  РУКА_МАГА. "), "рука-мага");
+  });
+
+  it("prepares exact query and scoped filters with stable parameter ordering", () => {
+    const aliasPlan = prepareEntityLookup("Mordenkainen's Sword", [generationId]);
+    assert.deepEqual(aliasPlan?.params, [[generationId], "Mordenkainen's Sword"]);
+    assert.match(aliasPlan?.matchPredicate ?? "", /compendium_normalize_name\(\$2\)/);
+
+    const scopePlan = prepareEntityLookup("ignored", [generationId], {
+      entryId,
+      sourceId,
+      versionId,
+      edition: "5e",
+      language: "ru",
+    });
+    assert.deepEqual(scopePlan?.params, [[generationId], entryId, sourceId, versionId, "5e", "ru"]);
+    assert.equal(
+      scopePlan?.matchPredicate,
+      "e.id = $2::uuid AND v.source_id = $3::uuid AND v.id = $4::uuid AND e.edition = $5 AND v.language = $6",
+    );
+  });
+
+  it("prepares no lookup for unauthorized generations, blank names, or invalid scopes", () => {
+    assert.equal(prepareEntityLookup("Shield", []), null);
+    assert.equal(prepareEntityLookup(" -- ", [generationId]), null);
+    assert.equal(prepareEntityLookup("Shield", [generationId], { entryId: "not-a-uuid" }), null);
+  });
+
   it("validates canonical entry scopes", () => {
     assert.equal(isCompendiumEntryScope({ entryId, versionId, edition: "5.5e", language: "en" }), true);
     assert.equal(isCompendiumEntryScope({ entryId: "not-a-uuid" }), false);

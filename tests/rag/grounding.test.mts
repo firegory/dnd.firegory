@@ -65,29 +65,45 @@ describe("groundGeneratedAnswer", () => {
     assert.doesNotMatch(result.answer, /4d6/);
   });
 
-  it("keeps a fully cited general answer and uses authoritative locations", () => {
+  it("marks a response low-confidence when any selected citation lacks a quote", () => {
     const result = groundGeneratedAnswer(
-      { answer: "The spell has a range of Self.", confident: true, citations: [{ quote: "Range: Self", page: 99, section: "Wrong" }] },
+      {
+        answer: "Ignored prose",
+        confident: true,
+        citations: [{ quote: "Range: Self" }, { sourceTitle: "Open Rules" }],
+      },
       [chunk()],
       "en",
     );
 
-    assert.equal(result.answer, "The spell has a range of Self.");
+    assert.equal(result.confident, false);
+    assert.equal(result.citations.length, 1);
+    assert.match(result.answer, /Range: Self/);
+  });
+
+  it("never lets unrelated general-search prose escape through a valid citation", () => {
+    const result = groundGeneratedAnswer(
+      { answer: "The spell deals 4d6 damage.", confident: true, citations: [{ quote: "Range: Self", page: 99, section: "Wrong" }] },
+      [chunk()],
+      "en",
+    );
+
+    assert.doesNotMatch(result.answer, /4d6/);
+    assert.match(result.answer, /Range: Self/);
     assert.equal(result.confident, true);
     assert.equal(result.citations[0].page, 12);
     assert.equal(result.citations[0].section, "Shield");
     assert.equal(result.citations[0].entityEvidence?.[0].fieldPath, "$.range");
   });
 
-  it("makes scoped entity answers extractive even when all citations validate", () => {
+  it("makes fully validated answers extractive while preserving confidence", () => {
     const result = groundGeneratedAnswer(
       { answer: "Unverifiable structured summary", confident: true, citations: [{ quote: "Range: Self" }] },
       [chunk()],
       "en",
-      true,
     );
 
-    assert.equal(result.confident, false);
+    assert.equal(result.confident, true);
     assert.doesNotMatch(result.answer, /structured summary/);
     assert.match(result.answer, /Range: Self/);
     assert.equal(result.citations[0].entityEvidence?.[0].fieldPath, "$.range");
@@ -107,7 +123,7 @@ describe("groundGeneratedAnswer", () => {
       entity: { range: "Self", damage: "4d6" },
       citations: [{ quote: "Range: Self", sourceTitle: "Open Rules" }],
     }));
-    const result = groundGeneratedAnswer(parsed, [chunk()], "en", true);
+    const result = groundGeneratedAnswer(parsed, [chunk()], "en");
 
     assert.doesNotMatch(result.answer, /Model summary|4d6/);
     assert.equal(result.citations[0].quote, "Range: Self");
