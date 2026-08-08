@@ -38,7 +38,7 @@ export type EditorEvidenceBoundary = Readonly<{ sourceId: string; sourceTitle: s
 export type EditorEvidenceChunk = Readonly<{ id: string; generationId: string; quote: string; page: number | null; section: string | null }>;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const TYPE_TABLE: Record<CompendiumEntryType, string> = { spell: "spells", creature: "creatures", item: "items", class: "classes", feature: "features", species: "species", background: "backgrounds", feat: "feats", equipment: "equipment" };
+const TYPE_TABLE: Record<CompendiumEntryType, string> = { spell: "spells", creature: "creatures", item: "items", class: "classes", feature: "features", species: "species", background: "backgrounds", feat: "feats", equipment: "equipment", glossary: "glossary" };
 
 export class EntryEditorService {
   private readonly transaction: TransactionRunner;
@@ -228,6 +228,9 @@ export async function buildEditorCanonicalRevision(client: DbClient, admin: Admi
     if (error instanceof HierarchyValidationError) throw new EntryEditorError(error.message, 409);
     throw error;
   }
+  if (entry.entryType === "creature" && revision.projection.projectionStatus === "legacy_incomplete") {
+    throw new EntryEditorError("Legacy creature projections must be completed before publication.", 409);
+  }
   let source;
   try {
     const metadata = new ContentMetadataService(client as never);
@@ -254,18 +257,43 @@ export async function buildEditorCanonicalRevision(client: DbClient, admin: Admi
     const startOffset = plain.length + separator.length;
     plain += separator + quote;
     sections.push({sectionId:`evidence-${index+1}`,heading:String(citation.section),text:separator+quote,startOffset:startOffset-separator.length,endOffset:plain.length});
-    return { citationId:`evidence-${index+1}`,sourceId:source.sourceId,fileId:entry.fileId,page,section:String(citation.section),quote,startOffset,endOffset:startOffset+quote.length };
+    return { citationId:`evidence-${index+1}`,sourceId:source.sourceId,fileId:entry.fileId,page,section:String(citation.section),quote,startOffset,endOffset:startOffset+quote.length,
+      ...(citation.kind === "field" && typeof citation.fieldPath === "string" ? { fieldPath: citation.fieldPath } : {}) };
   });
   return createCanonicalRevision({ schemaVersion:1,kind:"canonicalRevision",entryId:editorCanonicalEntryId(entry.entryType,entry.canonicalKey),createdAt:revision.createdAt,source,entry:{entryType:canonicalType(entry.entryType),name:revision.title,aliases:entry.aliases,typedFields},text:{plain,sections},citations } as never);
 }
 
-function projectionFields(projection: Record<string, unknown>): JsonValue[] { return Object.entries(projection).filter(([key,value]) => !["extension_data","extensionData","class_kind","species_kind"].includes(key) && value != null).map(([key,raw]) => { const value=hierarchyTypedValue(key,raw); return { key:key.replaceAll("_","-"),label:key.replaceAll("_"," "),type:Array.isArray(value) ? "stringList" : typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : "string",value:value as JsonValue }; }); }
-function canonicalType(type: CompendiumEntryType): "spell"|"classFeature"|"item"|"monster"|"other" { return type === "creature" ? "monster" : type === "class" || type === "feature" ? "classFeature" : type === "spell" || type === "item" ? type : "other"; }
+function projectionFields(projection: Record<string, unknown>): JsonValue[] { return Object.entries(projection).filter(([key,value]) => !["extension_data","extensionData","projection_status","projectionStatus","class_kind","species_kind"].includes(key) && value != null).map(([key,raw]) => {const value=hierarchyTypedValue(key,raw);return { key:key.replaceAll("_","-").replace(/([a-z0-9])([A-Z])/g,"$1-$2").toLowerCase(),label:key.replaceAll("_"," "),type:Array.isArray(value)&&value.every((item)=>typeof item==="string") ? "stringList" : value !== null && typeof value === "object" ? "json" : typeof value === "boolean" ? "boolean" : typeof value === "number" ? "number" : "string",value:value as JsonValue };}); }
+function canonicalType(type: CompendiumEntryType): "spell"|"classFeature"|"item"|"monster"|"other"|"feat"|"background"|"equipment"|"glossary" { return type === "creature" ? "monster" : type === "class" || type === "feature" ? "classFeature" : ["spell", "item", "feat", "background", "equipment", "glossary"].includes(type) ? type as "spell"|"item"|"feat"|"background"|"equipment"|"glossary" : "other"; }
 function mapEntrySummary(row: Record<string, unknown>): Omit<EditorEntry,"revisions"|"publications"|"audit"> { return { versionId:String(row.version_id),entryId:String(row.entry_id),canonicalKey:String(row.canonical_key),entryType:String(row.entry_type) as CompendiumEntryType,edition:String(row.edition),language:String(row.language),sourceId:String(row.source_id),fileId:String(row.file_id),slug:String(row.slug),aliases:(row.aliases ?? []) as string[],activeRevisionId:String(row.active_revision_id),editorHeadRevisionId:String(row.editor_head_revision_id),versionLifecycle:String(row.version_lifecycle),canonicalRevisionId:row.canonical_revision_id == null ? null : String(row.canonical_revision_id),publicationStatus:String(row.publication_status),publicationAction:row.publication_action == null ? null : String(row.publication_action) }; }
 function mapRevision(row: Record<string, unknown>): EditorRevision { const extension = row.extension_data as {editor?:{blocks?:unknown[]}}; return { id:String(row.id),number:Number(row.revision_number),title:String(row.title),summary:row.summary == null ? null : String(row.summary),body:String(row.body),blocks:extension?.editor?.blocks ?? [{type:"paragraph",text:String(row.body)}],projection:camelProjection(row.projection as Record<string,unknown>),citations:row.citations as Record<string,unknown>[],basedOnRevisionId:row.based_on_revision_id == null ? null : String(row.based_on_revision_id),actor:row.created_by == null ? null : String(row.created_by),reason:row.change_reason == null ? null : String(row.change_reason),createdAt:new Date(row.created_at as string|Date).toISOString(),lifecycle:String(row.lifecycle) }; }
 function mapPublication(row: Record<string,unknown>): EditorPublication { return { id:String(row.id),revisionId:row.revision_id == null ? null : String(row.revision_id),action:String(row.action) as "publish"|"unpublish",status:String(row.status),canonicalRevisionId:row.canonical_revision_id == null ? null : String(row.canonical_revision_id),actor:String(row.actor),reason:String(row.reason),lastError:row.last_error == null ? null : String(row.last_error),createdAt:new Date(row.created_at as string|Date).toISOString(),completedAt:row.completed_at == null ? null : new Date(row.completed_at as string|Date).toISOString() }; }
 function mapAudit(row: Record<string,unknown>): EditorAuditEvent { return { id:String(row.id),revisionId:row.revision_id == null ? null : String(row.revision_id),eventType:String(row.event_type),actor:String(row.actor),reason:String(row.reason),details:(row.details ?? {}) as Record<string,unknown>,createdAt:new Date(row.created_at as string|Date).toISOString() }; }
-function camelProjection(value: Record<string,unknown>): Record<string,unknown> { const aliases:Record<string,string>={casting_time:"castingTime",range_text:"range",creature_type:"creatureType",armor_class:"armorClass",hit_points:"hitPoints",challenge_rating:"challengeRating",requires_attunement:"requiresAttunement",hit_die:"hitDie",primary_ability:"primaryAbility",spellcasting_ability:"spellcastingAbility",class_kind:"kind",species_kind:"kind",feature_kind:"featureKind",ability_scores:"abilityScores",skill_proficiencies:"skillProficiencies",prerequisite_level:"prerequisiteLevel",prerequisite_text:"prerequisiteText",cost_cp:"costCp",weight_lb:"weightLb",extension_data:"extensionData"}; const mapped=Object.fromEntries(Object.entries(value).filter(([key])=>key!=="extension_data").map(([key,item])=>[aliases[key]??key,item])); const extension=value.extension_data as {hierarchy?:Record<string,unknown>}|undefined; return {...mapped,...(extension?.hierarchy??{})}; }
+export function camelProjection(value: Record<string,unknown>): Record<string,unknown> {
+  const aliases:Record<string,string>={casting_time:"castingTime",range_text:"range",creature_type:"creatureType",armor_classes:"armorClass",hit_points_detail:"hitPoints",challenge_rating:"challengeRating",speeds:"speeds",damage_resistances:"damageResistances",damage_immunities:"damageImmunities",condition_immunities:"conditionImmunities",passive_perception:"passivePerception",bonus_actions:"bonusActions",legendary_actions:"legendaryActions",projection_status:"projectionStatus",requires_attunement:"requiresAttunement",hit_die:"hitDie",primary_ability:"primaryAbility",spellcasting_ability:"spellcastingAbility",class_kind:"kind",species_kind:"kind",feature_kind:"featureKind",ability_scores:"abilityScores",skill_proficiencies:"skillProficiencies",prerequisite_level:"prerequisiteLevel",prerequisite_text:"prerequisiteText",cost_cp:"costCp",weight_lb:"weightLb",related_terms:"relatedTerms",extension_data:"extensionData"};
+  const complete = value.projection_status === "complete";
+  const omitted = complete ? ["armor_class","hit_points","speed","challenge_rating","challenge_rating_numerator","challenge_rating_denominator"] : ["armor_class","hit_points","speed","armor_classes","hit_points_detail","speeds","abilities","saves","skills","damage_resistances","damage_immunities","condition_immunities","senses","passive_perception","languages","traits","actions","bonus_actions","reactions","legendary_actions","challenge_rating_numerator","challenge_rating_denominator"];
+  const mapped=Object.fromEntries(Object.entries(value).filter(([key])=>!omitted.includes(key)).map(([key,item])=>[aliases[key]??key,item]));
+  if(complete)mapped.challengeRating={numerator:Number(value.challenge_rating_numerator),denominator:Number(value.challenge_rating_denominator)};
+  else {
+    mapped.armorClass=[{value:Number(value.armor_class)}];
+    mapped.hitPoints={average:Number(value.hit_points)};
+    mapped.speeds=legacyEditorSpeeds(String(value.speed));
+  }
+  const extension=value.extension_data as {hierarchy?:Record<string,unknown>}|undefined;
+  return {...mapped,...(extension?.hierarchy??{})};
+}
+function legacyEditorSpeeds(value:string): readonly Record<string,unknown>[] {
+  const aliases:Record<string,string>={walk:"walk",burrow:"burrow",climb:"climb",fly:"fly",swim:"swim",ходьба:"walk",копая:"burrow",лазая:"climb",летая:"fly",лётая:"fly",плавая:"swim"};
+  const modes=new Set<string>();
+  return value.split(/[,;]/).flatMap((part,index)=>{
+    const match=part.trim().match(/(?:(walk|burrow|climb|fly|swim|ходьба|копая|лазая|л[её]тая|плавая)\s*)?(\d+)\s*(ft|feet|фут(?:ов|а)?|m|м)\.?/iu);
+    const mode=match ? aliases[match[1]?.toLocaleLowerCase("und")??""]??(index===0?"walk":"") : "";
+    if(!match||!mode||modes.has(mode))return [];
+    modes.add(mode);
+    return [{mode,distance:Number(match[2]),unit:/^(?:m|м)$/iu.test(match[3])?"m":"ft"}];
+  });
+}
 async function audit(client: DbClient,versionId:string,revisionId:string|null,eventType:string,actor:string,reason:string,details:Record<string,unknown>) { await client.query("INSERT INTO compendium_editor_audit(version_id,revision_id,event_type,actor,reason,details) VALUES($1,$2,$3,$4,$5,$6::jsonb)",[versionId,revisionId,eventType,actor,reason,JSON.stringify(details)]); }
 function requireUuid(value:string,field:string) { if (!UUID.test(value)) throw new EntryEditorError(`${field} must be a UUID.`); }
 function isRecord(value:unknown): value is Record<string,unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

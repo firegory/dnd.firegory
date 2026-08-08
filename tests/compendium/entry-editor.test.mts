@@ -92,6 +92,22 @@ test("editor loads and preserves multiple spell classes in an unchanged correcti
   assert.deepEqual((saved?.projection as Record<string,unknown>).classes,["class:17","class:3"]);
 });
 
+test("editor roundtrip preserves nonempty glossary related terms", async () => {
+  const projection = { category:"combat",related_terms:["Cover","Armor Class"],extension_data:{} };
+  const client={async query(sql:string){
+    if(sql.includes("FROM compendium_versions v JOIN compendium_entries"))return {rows:[{version_id:versionId,entry_id:versionId,canonical_key:"cover",entry_type:"glossary",edition:"5e",language:"en",source_id:versionId,file_id:revisionId,active_revision_id:revisionId,editor_head_revision_id:revisionId,version_lifecycle:"published",slug:"cover",aliases:[],canonical_revision_id:null,publication_status:"unpublished",publication_action:null}]};
+    if(sql.includes("FROM compendium_revisions"))return {rows:[{id:revisionId,revision_number:1,title:"Cover",summary:null,body:"Body",extension_data:{editor:{blocks:[{type:"paragraph",text:"Body"}]}},projection,citations:[],based_on_revision_id:null,created_by:"admin",change_reason:"Create",created_at:"2026-01-01T00:00:00.000Z",lifecycle:"draft"}]};
+    return {rows:[]};
+  }};
+  let saved:Record<string,unknown>|null=null;
+  const compendium={async createRevision(_versionId:string,input:Record<string,unknown>){saved=input;return revisionId;}};
+  const service=new EntryEditorService((async(callback)=>(callback(client as never))) as never,compendium as never,{} as never,async()=>null);
+  const loaded=await service.get(admin,versionId); const base=loaded.revisions[0];
+  assert.deepEqual(base.projection.relatedTerms,["Cover","Armor Class"]);
+  await service.correct(admin,versionId,{basedOnRevisionId:revisionId,title:base.title,summary:base.summary,blocks:base.blocks,projection:{type:"glossary",category:base.projection.category,relatedTerms:base.projection.relatedTerms},citations:[{chunkId:versionId,generationId:revisionId,kind:"block",fieldPath:null,blockOrder:0,quote:"Body",quoteSpanStart:0,quoteSpanEnd:4}],reason:"No field changes."});
+  assert.deepEqual((saved?.projection as Record<string,unknown>).relatedTerms,["Cover","Armor Class"]);
+});
+
 test("spell revision storage writes the explicit normalized class list", async () => {
   let storedClasses:unknown;
   const nextRevision="10000000-0000-4000-8000-000000000003";

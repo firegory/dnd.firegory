@@ -17,11 +17,15 @@ import {
   CandidateProjectionError,
   classifyCandidatePublication,
   projectExtractedCandidate,
+  projectSnapshotCreatureCandidate,
+  projectSnapshotFlatCandidate,
   projectSnapshotSpellCandidate,
   type SnapshotSpellEvidence,
   type CandidatePublicationCapability,
 } from "./candidate-publication.ts";
 import type { CompendiumEntryType } from "./service.ts";
+import { validateCreatureProjection } from "./creature-schema.ts";
+import { creatureEvidenceCitations } from "./next-dnd/import-adapter.ts";
 
 type DbClient = Readonly<{
   query<T extends QueryResultRow = QueryResultRow>(sql: string, values?: readonly unknown[]): Promise<{ rows: T[]; rowCount?: number | null }>;
@@ -322,9 +326,9 @@ export class CompendiumImportReviewService {
       if (rows.rows.length !== ids.length) throw new ImportReviewError("One or more candidates were not found in this run.", 404);
       const publicationContents = new Map(rows.rows.map((row) => {
         const resolved = input.action === "merge" ? input.resolvedContents?.[row.id] ?? input.resolvedContent : null;
-        return [row.id, input.action === "merge" && isRecord(resolved) ? lockCollectorSpellMerge(row, resolved) : row.content] as const;
+        return [row.id, input.action === "merge" && isRecord(resolved) ? lockCollectorMerge(row, resolved) : row.content] as const;
       }));
-      const capabilities = new Map(rows.rows.map((row) => [row.id, input.action === "merge" && isSnapshotSpellContent(row.content)
+      const capabilities = new Map(rows.rows.map((row) => [row.id, input.action === "merge" && isSnapshotCollectorContent(row.content)
         ? classifyCandidatePublication(publicationContents.get(row.id), capabilityContext(row, currentEvidence(row)))
         : candidateCapability(row)]));
       if (input.action !== "reject") {
@@ -549,6 +553,27 @@ async function buildRevision(client: DbClient, candidate: CandidateRow, content:
       throw error;
     }
   }
+  if (isSnapshotCreatureContent(content)) {
+    const evidence = currentSnapshotEvidence(candidate);
+    if (!evidence) throw new ImportReviewError("Collector creature has no complete persisted occurrence and database file evidence.", 409);
+    try { return projectSnapshotCreatureCandidate(content, { candidateKey: candidate.candidate_key, createdAt: iso(candidate.created_at), source, fileId: candidate.file_id, evidence }); }
+    catch (error) { if (error instanceof CandidateProjectionError) throw new ImportReviewError(error.message); throw error; }
+  }
+  if (isSnapshotFlatContent(content)) {
+    const evidence = currentSnapshotEvidence(candidate);
+    if (!evidence || !candidate.entry_type || !["feat", "background", "item", "equipment", "glossary"].includes(candidate.entry_type)) {
+      throw new ImportReviewError("Collector flat entry has no complete typed occurrence and database file evidence.", 409);
+    }
+    try {
+      return projectSnapshotFlatCandidate(content, {
+        candidateKey: candidate.candidate_key, entryType: candidate.entry_type as "feat" | "background" | "item" | "equipment" | "glossary",
+        createdAt: iso(candidate.created_at), source, fileId: candidate.file_id, evidence,
+      });
+    } catch (error) {
+      if (error instanceof CandidateProjectionError) throw new ImportReviewError(error.message);
+      throw error;
+    }
+  }
   if (!candidate.entry_type || !candidate.generation_id || !candidate.chunk_id || candidate.chunk_index === null || !candidate.quote_text) {
     throw new ImportReviewError("Publishable extracted candidates require typed source, generation, and chunk provenance.");
   }
@@ -585,7 +610,7 @@ async function buildRevision(client: DbClient, candidate: CandidateRow, content:
 async function buildPreviousRevision(client: DbClient, row: CandidateRow): Promise<CanonicalRevision> {
   const evidence = previousEvidence(row);
   const content = previousPublishedContent(row);
-  const collector = isSnapshotSpellContent(content ?? {});
+  const collector = isSnapshotCollectorContent(content ?? {});
   if ((!evidence && !collector) || !content || !row.previous_created_at || !row.previous_candidate_key || !row.previous_entry_type) {
     throw new ImportReviewError("Missing candidate has no complete previous publication evidence.", 409);
   }
@@ -677,7 +702,7 @@ function previousEvidence(row: CandidateRow) {
 }
 
 function previousChainError(row: CandidateRow): string | null {
-  const collector = isSnapshotSpellContent(previousPublishedContent(row) ?? row.previous_content ?? {});
+  const collector = isSnapshotCollectorContent(previousPublishedContent(row) ?? row.previous_content ?? {});
   if (row.occurrence_id !== null || !row.previous_candidate_id || !row.previous_occurrence_id
       || (collector ? !previousSnapshotEvidence(row) : !previousEvidence(row))) {
     return `Missing candidate has no complete previous occurrence and ${collector ? "collector" : "chunk"} evidence chain.`;
@@ -730,12 +755,34 @@ function snapshotEvidence(
   };
 }
 
-function lockCollectorSpellMerge(row: CandidateRow, resolved: Record<string, unknown>): Record<string, unknown> {
-  if (!isSnapshotSpellContent(row.content)) return resolved;
-  if (!isSnapshotSpellContent(resolved)) throw new ImportReviewError("Collector spell merge must retain the snapshot candidate envelope.", 409);
-  for (const field of ["schemaVersion", "kind", "externalId", "sourceUrl", "sha256", "parserVersion", "title", "aliases", "body", "sourceVersion"] as const) {
+function lockCollectorMerge(row: CandidateRow, resolved: Record<string, unknown>): Record<string, unknown> {
+  if (!isSnapshotCollectorContent(row.content)) return resolved;
+  if ((isSnapshotSpellContent(row.content) && !isSnapshotSpellContent(resolved))
+      || (isSnapshotCreatureContent(row.content) && !isSnapshotCreatureContent(resolved))
+      || (isSnapshotFlatContent(row.content) && !isSnapshotFlatContent(resolved))) {
+    throw new ImportReviewError("Collector merge must retain its typed snapshot candidate envelope.", 409);
+  }
+  const immutableFields = ["schemaVersion", "kind", "externalId", "sourceUrl", "sha256", "parserVersion", "title", "aliases", "body", "sourceVersion",
+    ...(isSnapshotFlatContent(row.content) ? ["entryType"] : []),
+    ...(isSnapshotCreatureContent(row.content) ? ["citations", "extraction"] : [])] as const;
+  for (const field of immutableFields) {
     if (JSON.stringify(resolved[field]) !== JSON.stringify(row.content[field])) {
-      throw new ImportReviewError(`Collector spell merge cannot modify immutable ${field} evidence.`, 409);
+      throw new ImportReviewError(`Collector merge cannot modify immutable ${field} evidence.`, 409);
+    }
+  }
+  if (isSnapshotCreatureContent(row.content)) {
+    const sourceVersion = recordValue(row.content.sourceVersion);
+    const index = recordValue(sourceVersion.index);
+    try {
+      const projection = validateCreatureProjection(resolved.attributes);
+      const citations = [
+        { fieldPath: "$.title", quote: String(row.content.title), sourceUrl: String(row.content.sourceUrl) },
+        { fieldPath: "$.body", quote: String(row.content.body), sourceUrl: String(row.content.sourceUrl) },
+        ...creatureEvidenceCitations(projection, String(row.content.body), String(index.metadataEvidenceText), String(row.content.sourceUrl), String(index.url)),
+      ];
+      return { ...resolved, citations, extraction: { status: "ready", missingFields: [] } };
+    } catch (error) {
+      throw new ImportReviewError(`Collector creature repair is unsupported by immutable evidence: ${error instanceof Error ? error.message : String(error)}`, 409);
     }
   }
   return resolved;
@@ -822,7 +869,11 @@ function boundedInteger(value: number | undefined, fallback: number, minimum: nu
 }
 function requireUuid(value: string, name: string): void { if (!UUID.test(value)) throw new ImportReviewError(`${name} must be a UUID.`); }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function recordValue(value: unknown): Record<string, unknown> { if (!isRecord(value)) throw new ImportReviewError("Collector source evidence is malformed.", 409); return value; }
 function isSnapshotSpellContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotSpellCandidate" && value.schemaVersion === 1; }
+function isSnapshotCreatureContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotCreatureCandidate" && value.schemaVersion === 1; }
+function isSnapshotFlatContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotFlatCandidate" && value.schemaVersion === 1; }
+function isSnapshotCollectorContent(value: Record<string, unknown>): boolean { return isSnapshotSpellContent(value) || isSnapshotCreatureContent(value) || isSnapshotFlatContent(value); }
 function number(value: unknown): number { return Number(value ?? 0); }
 function iso(value: unknown): string { return value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString(); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message.slice(0, 4000) : "Publication failed."; }

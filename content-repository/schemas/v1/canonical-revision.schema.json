@@ -43,7 +43,7 @@
       "additionalProperties": false,
       "required": ["entryType", "name", "aliases", "typedFields"],
       "properties": {
-        "entryType": { "enum": ["rule", "action", "spell", "classFeature", "item", "monster", "other"] },
+        "entryType": { "enum": ["rule", "action", "spell", "classFeature", "item", "monster", "other", "feat", "background", "equipment", "glossary"] },
         "name": { "type": "string", "minLength": 1 },
         "aliases": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
         "typedFields": { "type": "array", "items": { "$ref": "#/$defs/typedField" } }
@@ -103,7 +103,8 @@
         { "$ref": "#/$defs/stringField" },
         { "$ref": "#/$defs/numberField" },
         { "$ref": "#/$defs/booleanField" },
-        { "$ref": "#/$defs/stringListField" }
+        { "$ref": "#/$defs/stringListField" },
+        { "$ref": "#/$defs/jsonField" }
       ]
     },
     "fieldBase": {
@@ -138,6 +139,12 @@
       "allOf": [
         { "$ref": "#/$defs/fieldBase" },
         { "type": "object", "additionalProperties": false, "properties": { "key": true, "label": true, "type": { "const": "stringList" }, "value": { "type": "array", "items": { "type": "string" } } } }
+      ]
+    },
+    "jsonField": {
+      "allOf": [
+        { "$ref": "#/$defs/fieldBase" },
+        { "type": "object", "additionalProperties": false, "properties": { "key": true, "label": true, "type": { "const": "json" }, "value": true } }
       ]
     }
   }

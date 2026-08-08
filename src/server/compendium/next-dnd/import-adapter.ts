@@ -4,6 +4,10 @@ import type { NextDndSnapshotManifest, SnapshotDetail } from "./collector.ts";
 import { SPELL_SCHOOLS, type SpellSchool } from "../spell-schema.ts";
 import { hierarchyCandidate, hierarchyMetadataEvidence } from "./hierarchy-import.ts";
 import { collectorCandidateKey } from "../identity.ts";
+import { creatureEvidencePaths, normalizeChallengeRating, validateCreatureProjection, type CreatureBlock, type CreatureProjection } from "../creature-schema.ts";
+import { abilityEvidenceQuote, creatureFieldEvidenceSupports, parseCreatureAlignmentEvidence, passivePerceptionEvidenceQuote, speedEvidenceQuote } from "../creature-evidence.ts";
+import { canonicalFlatAttributes, FLAT_ENTRY_TYPES, projectionAttributes, validateFlatProjection, type FlatEntryType, type FlatProjection } from "../flat-schema.ts";
+import { parseMoneyToCp, parseWeights } from "../candidate-schema.ts";
 
 type ImportRunAdapterTarget = Pick<CompendiumImportRunService, "addDiagnostic" | "failRun" | "recordOccurrences" | "computeCandidateDiff">;
 
@@ -26,7 +30,9 @@ export function nextDndImportBatch(manifest: NextDndSnapshotManifest): Readonly<
       indexSourceFetchedAt: detail.indexSource.fetchedAt,
       indexCardFingerprintSha256: detail.indexSource.cardFingerprintSha256,
       metadataEvidenceText: detail.category === "spells" ? spellMetadataEvidence(detail.indexMetadata)
-        : detail.category === "class" || detail.category === "species" ? hierarchyMetadataEvidence(hierarchyCandidate(detail).attributes) : null,
+        : detail.category === "bestiary" ? creatureMetadataEvidence(detail.indexMetadata)
+          : detail.category === "class" || detail.category === "species" ? hierarchyMetadataEvidence(hierarchyCandidate(detail).attributes)
+            : isFlatCategory(detail.category) ? flatMetadataEvidence(projectionAttributes(flatProjection(detail))) : null,
     })),
     candidates: details.map((detail, occurrenceIndex) => candidate(detail, occurrenceIndex)),
   };
@@ -83,8 +89,9 @@ function candidate(detail: SnapshotDetail, occurrenceIndex: number): ImportCandi
     occurrenceIndex,
     candidateKey: collectorCandidateKey(detail.category, NEXT_DND_CATEGORIES[detail.category].entryType, detail.externalId),
     entryType: NEXT_DND_CATEGORIES[detail.category].entryType,
-    content: detail.category === "spells" ? spellCandidate(detail)
-      : detail.category === "class" || detail.category === "species" ? hierarchyCandidate(detail) : {
+    content: detail.category === "spells" ? spellCandidate(detail) : detail.category === "bestiary" ? creatureCandidate(detail)
+      : detail.category === "class" || detail.category === "species" ? hierarchyCandidate(detail)
+        : isFlatCategory(detail.category) ? flatCandidate(detail) : {
       externalId: detail.externalId,
       sourceUrl: detail.sourceUrl,
       sha256: detail.sha256,
@@ -96,6 +103,116 @@ function candidate(detail: SnapshotDetail, occurrenceIndex: number): ImportCandi
     },
   };
 }
+
+export type SnapshotFlatCandidate = Readonly<{
+  schemaVersion: 1;
+  kind: "snapshotFlatCandidate";
+  entryType: FlatEntryType;
+  externalId: string;
+  sourceUrl: string;
+  sha256: string;
+  parserVersion: string;
+  title: string;
+  aliases: readonly string[];
+  body: string;
+  attributes: Readonly<Record<string, unknown>>;
+  sourceVersion: SnapshotSpellCandidate["sourceVersion"];
+  citations: readonly Readonly<{ fieldPath: string; quote: string; sourceUrl: string }>[];
+  extraction: Readonly<{ status: "ready"; missingFields: readonly [] }>;
+}>;
+
+/** Converts a collector snapshot into typed review input; review publication revalidates persisted evidence. */
+export function flatCandidate(detail: SnapshotDetail): SnapshotFlatCandidate {
+  if (!isFlatCategory(detail.category)) throw new Error("Snapshot flat projection only accepts flat compendium details.");
+  if (nextDndCardFingerprint(detail.indexMetadata) !== detail.indexSource.cardFingerprintSha256) {
+    throw new Error("Snapshot flat metadata does not match the exact collected window.LIST card fingerprint.");
+  }
+  const projection = flatProjection(detail);
+  const attributes = canonicalFlatAttributes(projection.type, projection);
+  const metadataEvidenceText = flatMetadataEvidence(attributes);
+  const aliases = typeof detail.indexMetadata.title_en === "string" && detail.indexMetadata.title_en.trim()
+    ? [detail.indexMetadata.title_en.normalize("NFC").trim()] : [];
+  return {
+    schemaVersion: 1, kind: "snapshotFlatCandidate", entryType: projection.type,
+    externalId: detail.externalId, sourceUrl: detail.sourceUrl, sha256: detail.sha256,
+    parserVersion: detail.parserVersion, title: detail.normalized.title, aliases,
+    body: detail.normalized.contentText, attributes,
+    sourceVersion: {
+      url: detail.sourceUrl, sha256: detail.sha256, rawBlobPath: detail.blobPath, fetchedAt: detail.fetchedAt,
+      index: {
+        url: detail.indexSource.url, sha256: detail.indexSource.fingerprintSha256,
+        rawBlobPath: detail.indexSource.rawBlobPath, fetchedAt: detail.indexSource.fetchedAt,
+        cardFingerprintSha256: detail.indexSource.cardFingerprintSha256, metadataEvidenceText,
+      },
+    },
+    citations: [
+      { fieldPath: "$.title", quote: detail.normalized.title, sourceUrl: detail.sourceUrl },
+      { fieldPath: "$.body", quote: detail.normalized.contentText, sourceUrl: detail.sourceUrl },
+      ...Object.entries(attributes).map(([name, value]) => ({
+        fieldPath: `$.attributes.${name}`, quote: JSON.stringify(value), sourceUrl: detail.indexSource.url,
+      })),
+    ],
+    extraction: { status: "ready", missingFields: [] },
+  };
+}
+
+export function flatMetadataEvidence(attributes: Readonly<Record<string, unknown>>): string {
+  return ["window.LIST flat projection", ...Object.entries(attributes).map(([key, value]) => `${key}=${JSON.stringify(value)}`)].join("\n");
+}
+
+function flatProjection(detail: SnapshotDetail): FlatProjection {
+  const metadata = detail.indexMetadata;
+  const explicit = record(metadata.typed_fields ?? metadata.attributes);
+  const explicitValue = (...keys: readonly string[]) => {
+    const key = keys.find((candidate) => Object.hasOwn(explicit, candidate));
+    return key ? { present: true, value: explicit[key] } : { present: false, value: keys.map((candidate) => metadata[candidate]).find((item) => item !== undefined) };
+  };
+  const value = (...keys: readonly string[]) => explicitValue(...keys).value;
+  const labelled = (labels: readonly string[]) => labelledValue(detail.normalized.contentText, labels);
+  const type = NEXT_DND_CATEGORIES[detail.category].entryType as FlatEntryType;
+  if (type === "feat") return validateFlatProjection(type, {
+    category: normalizedEnum(value("category") ?? metadata.item_prefix_title, {
+      origin: "origin", general: "general", "fighting style": "fighting_style", fighting_style: "fighting_style", "epic boon": "epic_boon", epic_boon: "epic_boon",
+      происхождение: "origin", общая: "general", "боевой стиль": "fighting_style", "эпический дар": "epic_boon",
+    }, "general"),
+    prerequisiteLevel: integer(value("prerequisiteLevel", "prerequisite_level"), 1, 20),
+    prerequisiteText: nullableString(explicitValue("prerequisiteText", "prerequisite_text").present ? value("prerequisiteText", "prerequisite_text") : labelled(["Prerequisite", "Требование"])),
+    repeatable: Boolean(value("repeatable")) || /(?:repeatable|повторяем)/iu.test(detail.normalized.contentText),
+  });
+  if (type === "background") return validateFlatProjection(type, {
+    abilityScores: stringList(value("abilityScores", "ability_scores") ?? labelled(["Ability Scores", "Характеристики"])),
+    skillProficiencies: stringList(value("skillProficiencies", "skill_proficiencies") ?? labelled(["Skill Proficiencies", "Владение навыками"])),
+  });
+  if (type === "item") return validateFlatProjection(type, {
+    category: normalizedEnum(value("category") ?? metadata.item_icon_title, Object.fromEntries(["armor", "potion", "ring", "rod", "scroll", "staff", "wand", "weapon", "wondrous", "other"].map((key) => [key, key])), "other"),
+    rarity: normalizedEnum(value("rarity") ?? metadata.item_prefix_title, { common: "common", uncommon: "uncommon", rare: "rare", "very rare": "very_rare", very_rare: "very_rare", legendary: "legendary", artifact: "artifact", varies: "varies" }, "varies"),
+    requiresAttunement: Boolean(value("requiresAttunement") ?? value("requires_attunement")) || /(?:requires attunement|требует настройк)/iu.test(detail.normalized.contentText),
+  });
+  if (type === "equipment") return validateFlatProjection(type, {
+    category: normalizedEnum(value("category") ?? metadata.item_prefix_title, {
+      "adventuring gear": "adventuring_gear", adventuring_gear: "adventuring_gear", ammunition: "ammunition", armor: "armor", focus: "focus", mount: "mount", tool: "tool", vehicle: "vehicle", weapon: "weapon", other: "other",
+      снаряжение: "adventuring_gear", боеприпасы: "ammunition", доспехи: "armor", фокусировка: "focus", транспорт: "vehicle", оружие: "weapon",
+    }, "other"),
+    costCp: explicitValue("costCp", "cost_cp").present ? integer(value("costCp", "cost_cp"), 0, 2_147_483_647) : parseMoneyToCp(String(value("cost") ?? labelled(["Cost", "Стоимость", "Цена"]) ?? ""))[0] ?? null,
+    weightLb: explicitValue("weightLb", "weight_lb").present ? finiteNumber(value("weightLb", "weight_lb")) : parseWeights(String(value("weight") ?? labelled(["Weight", "Вес"]) ?? ""))[0] ?? null,
+  });
+  return validateFlatProjection("glossary", {
+    category: nullableString(value("category") ?? metadata.item_prefix_title) ?? "rules",
+    relatedTerms: stringValues(value("relatedTerms") ?? value("related_terms")),
+  });
+}
+
+function isFlatCategory(category: string): category is "feats" | "backgrounds" | "items" | "equipment" | "glossary" {
+  return category in NEXT_DND_CATEGORIES && FLAT_ENTRY_TYPES.includes(NEXT_DND_CATEGORIES[category as keyof typeof NEXT_DND_CATEGORIES].entryType as FlatEntryType);
+}
+function normalizedEnum(value: unknown, aliases: Readonly<Record<string, string>>, fallback: string): string { const key = String(value ?? "").normalize("NFC").trim().toLocaleLowerCase("und"); return aliases[key] ?? fallback; }
+function nullableString(value: unknown): string | null { return typeof value === "string" && value.trim() ? value.normalize("NFC").trim() : null; }
+function finiteNumber(value: unknown): number | null { const number = typeof value === "number" ? value : Number.NaN; return Number.isFinite(number) ? number : null; }
+function stringList(value: unknown): readonly string[] {
+  const items = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[,;]/u) : [];
+  return [...new Set(items.map((item) => String(item).normalize("NFC").trim()).filter(Boolean))];
+}
+function stringValues(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.normalize("NFC").trim()) : []; }
 
 export type SnapshotSpellCandidate = Readonly<{
   schemaVersion: 1;
@@ -132,6 +249,14 @@ export type SnapshotSpellCandidate = Readonly<{
       metadataEvidenceText: string;
     }>;
   }>;
+  citations: readonly Readonly<{ fieldPath: string; quote: string; sourceUrl: string }>[];
+  extraction: Readonly<{ status: "ready" | "needs_review"; missingFields: readonly string[] }>;
+}>;
+
+export type SnapshotCreatureCandidate = Readonly<{
+  schemaVersion: 1; kind: "snapshotCreatureCandidate"; externalId: string; sourceUrl: string; sha256: string;
+  parserVersion: string; title: string; aliases: readonly string[]; body: string; attributes: CreatureProjection;
+  sourceVersion: SnapshotSpellCandidate["sourceVersion"];
   citations: readonly Readonly<{ fieldPath: string; quote: string; sourceUrl: string }>[];
   extraction: Readonly<{ status: "ready" | "needs_review"; missingFields: readonly string[] }>;
 }>;
@@ -192,6 +317,140 @@ export function spellCandidate(detail: SnapshotDetail): SnapshotSpellCandidate {
   };
 }
 
+/** Deterministic plain-text stat-block transform. It never retains collector HTML. */
+export function creatureCandidate(detail: SnapshotDetail): SnapshotCreatureCandidate {
+  if (detail.category !== "bestiary") throw new Error("Snapshot creature projection only accepts bestiary details.");
+  if (nextDndCardFingerprint(detail.indexMetadata) !== detail.indexSource.cardFingerprintSha256) throw new Error("Snapshot creature metadata does not match its immutable index card fingerprint.");
+  const body = detail.normalized.contentText.normalize("NFC").trim();
+  const metadata = detail.indexMetadata;
+  const aliases = typeof metadata.title_en === "string" && metadata.title_en.trim() ? [metadata.title_en.trim()] : [];
+  const headerLine = body.split("\n").find((line) => /\b(Tiny|Small|Medium|Large|Huge|Gargantuan)\b/i.test(line)) ?? "";
+  const header = headerLine.match(/\b(Tiny|Small|Medium|Large|Huge|Gargantuan)\s+([^,.;]+)(?:,\s*([^.;]+))?/i);
+  const size = header?.[1]?.toLowerCase();
+  const creatureType = header?.[2]?.trim();
+  const alignmentEvidence = parseCreatureAlignmentEvidence(headerLine);
+  const alignment = alignmentEvidence.value;
+  const acText = labelledCreatureValue(body, ["Armor Class", "Класс Доспеха", "КД"]);
+  const hpText = labelledCreatureValue(body, ["Hit Points", "Хиты"]);
+  const speedText = labelledCreatureValue(body, ["Speed", "Скорость"]);
+  const crText = labelledCreatureValue(body, ["Challenge", "Challenge Rating", "Опасность", "Показатель опасности"])
+    ?? scalarMetadata(metadata, ["challenge_rating", "challenge", "cr"]);
+  const armor = acText?.match(/(\d+)(?:\s*\(([^)]+)\))?/);
+  const hp = hpText?.match(/(\d+)(?:\s*\(([^)]+)\))?/);
+  const abilities = Object.fromEntries(["str", "dex", "con", "int", "wis", "cha"].map((key) => {
+    const labels: Record<string, string> = { str: "(?:STR|СИЛ)", dex: "(?:DEX|ЛОВ)", con: "(?:CON|ТЕЛ)", int: "(?:INT|ИНТ)", wis: "(?:WIS|МДР)", cha: "(?:CHA|ХАР)" };
+    return [key, Number(body.match(new RegExp(`${labels[key]}\\s*(\\d+)`, "iu"))?.[1] ?? Number.NaN)];
+  }));
+  const raw: Record<string, unknown> = {
+    size, creatureType, alignment, challengeRating: crText ? normalizeChallengeRating(crText.match(/\d+(?:\s*\/\s*\d+)?/)?.[0] ?? crText) : null,
+    armorClass: armor ? [{ value: Number(armor[1]), ...(armor[2] ? { note: armor[2].trim() } : {}) }] : null,
+    hitPoints: hp ? { average: Number(hp[1]), ...(hp[2] ? { formula: hp[2].replace(/\s+/g, " ").trim() } : {}) } : null,
+    speeds: speedText ? parseSpeeds(speedText) : null, abilities,
+    saves: parseModifiers(labelledCreatureValue(body, ["Saving Throws", "Спасброски"]) ?? ""),
+    skills: parseModifiers(labelledCreatureValue(body, ["Skills", "Навыки"]) ?? ""),
+    damageResistances: splitList(labelledCreatureValue(body, ["Damage Resistances", "Сопротивление урону"]) ?? ""),
+    damageImmunities: splitList(labelledCreatureValue(body, ["Damage Immunities", "Иммунитет к урону"]) ?? ""),
+    conditionImmunities: splitList(labelledCreatureValue(body, ["Condition Immunities", "Иммунитет к состояниям"]) ?? ""),
+    senses: splitList(labelledCreatureValue(body, ["Senses", "Чувства"])?.replace(/passive Perception\s*\d+/i, "") ?? ""),
+    passivePerception: Number(body.match(/(?:passive Perception|пассивное Восприятие)\s*(\d+)/iu)?.[1] ?? Number.NaN),
+    languages: splitList(labelledCreatureValue(body, ["Languages", "Языки"]) ?? ""),
+    traits: parseSectionBlocks(body, ["Traits", "Особенности"], ["Actions", "Действия"]),
+    actions: parseSectionBlocks(body, ["Actions", "Действия"], ["Bonus Actions", "Бонусные действия", "Reactions", "Реакции", "Legendary Actions", "Легендарные действия"]),
+    bonusActions: parseSectionBlocks(body, ["Bonus Actions", "Бонусные действия"], ["Reactions", "Реакции", "Legendary Actions", "Легендарные действия"]),
+    reactions: parseSectionBlocks(body, ["Reactions", "Реакции"], ["Legendary Actions", "Легендарные действия"]),
+    legendaryActions: parseSectionBlocks(body, ["Legendary Actions", "Легендарные действия"], []),
+  };
+  const missingFields = Object.entries(raw).filter(([key, value]) => (value === null && !(key === "alignment" && alignmentEvidence.explicit)) || value === undefined || (typeof value === "number" && !Number.isFinite(value))
+    || (Array.isArray(value) && value.length === 0 && ["armorClass", "speeds"].includes(key))).map(([key]) => key);
+  let attributes: CreatureProjection;
+  try { attributes = validateCreatureProjection(raw); }
+  catch { attributes = raw as CreatureProjection; if (!missingFields.includes("statBlock")) missingFields.push("statBlock"); }
+  const metadataEvidenceText = creatureMetadataEvidence(metadata);
+  const citations = missingFields.length === 0 ? [
+    { fieldPath: "$.title", quote: detail.normalized.title, sourceUrl: detail.sourceUrl },
+    { fieldPath: "$.body", quote: body, sourceUrl: detail.sourceUrl },
+    ...creatureEvidenceCitations(attributes, body, metadataEvidenceText, detail.sourceUrl, detail.indexSource.url),
+  ] : [];
+  return { schemaVersion: 1, kind: "snapshotCreatureCandidate", externalId: detail.externalId, sourceUrl: detail.sourceUrl,
+    sha256: detail.sha256, parserVersion: detail.parserVersion, title: detail.normalized.title, aliases, body, attributes,
+    sourceVersion: { url: detail.sourceUrl, sha256: detail.sha256, rawBlobPath: detail.blobPath, fetchedAt: detail.fetchedAt,
+      index: { url: detail.indexSource.url, sha256: detail.indexSource.fingerprintSha256, rawBlobPath: detail.indexSource.rawBlobPath,
+        fetchedAt: detail.indexSource.fetchedAt, cardFingerprintSha256: detail.indexSource.cardFingerprintSha256, metadataEvidenceText } },
+    citations, extraction: { status: missingFields.length ? "needs_review" : "ready", missingFields } };
+}
+
+export function creatureMetadataEvidence(metadata: Readonly<Record<string, unknown>>): string {
+  return ["window.LIST bestiary card metadata", ...["title_en", "size", "type", "challenge_rating", "challenge", "cr"]
+    .filter((key) => key in metadata).map((key) => `${key}=${JSON.stringify(metadata[key])}`)].join("\n");
+}
+
+function labelledCreatureValue(text: string, labels: readonly string[]): string | null {
+  for (const line of text.split("\n")) {
+    for (const label of [...labels].sort((left, right) => right.length - left.length)) {
+      const match = line.match(new RegExp(`^${escapeRegExp(label)}\\s*:?\\s*(.+)$`, "iu"));
+      if (match?.[1]?.trim()) return match[1].trim();
+    }
+  }
+  return null;
+}
+function parseSpeeds(value: string): CreatureProjection["speeds"] { return value.split(/[,;]/).flatMap((part, index) => { const match = part.trim().match(/(?:(walk|burrow|climb|fly|swim|ходьба|копая|лазая|л[её]тая|плавая)\s*)?(\d+)\s*(ft|feet|фут(?:ов|а)?|m|м)\.?\s*(?:\(([^)]+)\))?/iu); if (!match) return []; const aliases: Record<string, CreatureProjection["speeds"][number]["mode"]> = { walk: "walk", burrow: "burrow", climb: "climb", fly: "fly", swim: "swim", ходьба: "walk", копая: "burrow", лазая: "climb", летая: "fly", лётая: "fly", плавая: "swim" }; return [{ mode: aliases[match[1]?.toLocaleLowerCase("und") ?? "walk"] ?? (index === 0 ? "walk" : "walk"), distance: Number(match[2]), unit: /^m|м$/iu.test(match[3]) ? "m" : "ft", ...(match[4] ? { note: match[4].trim() } : {}) }]; }); }
+function parseModifiers(value: string): Record<string, number> { return Object.fromEntries([...value.matchAll(/([\p{L}][\p{L} ]*?)\s*([+-]\d+)/gu)].map((match) => [match[1].trim(), Number(match[2])])); }
+function splitList(value: string): string[] { return value.split(/[,;]/).map((item) => item.trim()).filter((item) => item && !/^(?:-|—|none|нет)$/iu.test(item)); }
+function parseSectionBlocks(text: string, headings: readonly string[], endHeadings: readonly string[]): CreatureBlock[] {
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  const heading = new RegExp(`^(?:${headings.map(escapeRegExp).join("|")})\\s*:?$`, "iu");
+  const ending = endHeadings.length ? new RegExp(`^(?:${endHeadings.map(escapeRegExp).join("|")})\\s*:?$`, "iu") : null;
+  const start = lines.findIndex((line) => heading.test(line));
+  if (start < 0) return [];
+  const remaining = lines.slice(start + 1);
+  const end = ending ? remaining.findIndex((line) => ending.test(line)) : -1;
+  const section = end < 0 ? remaining : remaining.slice(0, end);
+  const blocks: CreatureBlock[] = [];
+  for (let index = 0; index < section.length; index++) {
+    const match = section[index].match(/^(.{1,300}?[.!?])\s+(.+)$/u);
+    if (match) blocks.push({ name: match[1].replace(/[.!?]$/, "").trim(), text: match[2].trim() });
+    else if (section[index].length <= 300 && section[index + 1]) blocks.push({ name: section[index].replace(/[.!?]$/, ""), text: section[++index] });
+  }
+  return blocks;
+}
+function scalarMetadata(metadata: Readonly<Record<string, unknown>>, keys: readonly string[]): string | null { for (const key of keys) if (typeof metadata[key] === "string" || typeof metadata[key] === "number") return String(metadata[key]); return null; }
+export function creatureEvidenceCitations(projection: CreatureProjection, body: string, metadata: string, sourceUrl: string, indexUrl: string): readonly Readonly<{ fieldPath: string; quote: string; sourceUrl: string }>[] {
+  return creatureEvidencePaths(projection).map((fieldPath) => {
+    const value = creatureValueAtPath(projection, fieldPath);
+    const quote = creatureEvidenceQuote(fieldPath, body, metadata, value);
+    assertCreatureEvidence(fieldPath, value, quote);
+    return { fieldPath, quote, sourceUrl: body.includes(quote) ? sourceUrl : indexUrl };
+  });
+}
+
+function creatureEvidenceQuote(path: string, body: string, metadata: string, value: unknown): string {
+  const key = path.match(/^\$\.attributes\.([A-Za-z]+)/)?.[1] ?? "";
+  const labels: Record<string, string[]> = { armorClass: ["Armor Class", "Класс Доспеха", "КД"], hitPoints: ["Hit Points", "Хиты"], speeds: ["Speed", "Скорость"], challengeRating: ["Challenge Rating", "Challenge", "Опасность", "Показатель опасности"], saves: ["Saving Throws", "Спасброски"], skills: ["Skills", "Навыки"], damageResistances: ["Damage Resistances", "Сопротивление урону"], damageImmunities: ["Damage Immunities", "Иммунитет к урону"], conditionImmunities: ["Condition Immunities", "Иммунитет к состояниям"], senses: ["Senses", "Чувства"], passivePerception: ["Senses", "Чувства"], languages: ["Languages", "Языки"] };
+  if (["size", "creatureType", "alignment"].includes(key)) return body.split("\n").find((line) => /\b(Tiny|Small|Medium|Large|Huge|Gargantuan)\b/i.test(line)) ?? "";
+  if (key === "abilities") return abilityEvidenceQuote(body, path.split(".").at(-1) ?? "") ?? "";
+  if (["traits", "actions", "bonusActions", "reactions", "legendaryActions"].includes(key) && isRecord(value)) return body.split("\n").find((line) => line.includes(String(value.name)) && line.includes(String(value.text))) ?? "";
+  const line = body.split("\n").find((candidate) => (labels[key] ?? []).some((label) => new RegExp(`^${escapeRegExp(label)}(?:\\s|:)`, "iu").test(candidate)));
+  if (line && key === "speeds" && isRecord(value)) return speedEvidenceQuote(line, String(value.mode)) ?? "";
+  if (line && key === "passivePerception") return passivePerceptionEvidenceQuote(line) ?? "";
+  if (line) return line;
+  if (key === "challengeRating") return metadata.split("\n").find((candidate) => /^(?:challenge_rating|challenge|cr)=/.test(candidate)) ?? "";
+  return hasScalarValues(value) ? "" : body;
+}
+
+function creatureValueAtPath(projection: CreatureProjection, path: string): unknown {
+  const parts = path.replace(/^\$\.attributes\./, "").replace(/\[([0-9]+)\]/g, ".$1").split(".");
+  return parts.reduce<unknown>((value, part) => Array.isArray(value) ? value[Number(part)] : isRecord(value) ? value[part] : undefined, projection);
+}
+
+function assertCreatureEvidence(path: string, value: unknown, quote: string): void {
+  if (!quote) throw new Error(`Creature field ${path} has no exact immutable evidence line.`);
+  if (!creatureFieldEvidenceSupports(path, value, quote)) throw new Error(`Creature field ${path} is unsupported by its evidence line.`);
+}
+
+function scalarCreatureValues(value: unknown): (string | number)[] { if (Array.isArray(value)) return value.flatMap(scalarCreatureValues); if (isRecord(value)) return Object.values(value).flatMap(scalarCreatureValues); return typeof value === "string" || typeof value === "number" ? [value] : []; }
+function hasScalarValues(value: unknown): boolean { return scalarCreatureValues(value).length > 0; }
+function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
 function labelledValue(text: string, labels: readonly string[]): string | null {
   for (const label of labels) {
     const match = text.match(new RegExp(`(?:^|\\s)${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:\\s*([^.;]+[.;]?)`, "iu"));
@@ -224,6 +483,7 @@ function stringIds(value: unknown, prefix: string): string[] {
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 
 export function spellMetadataEvidence(metadata: Readonly<Record<string, unknown>>): string {
   const tags = record(metadata.item_tags);

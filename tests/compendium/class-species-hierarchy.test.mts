@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { classifyCandidatePublication, projectSnapshotHierarchyCandidate } from "../../src/server/compendium/candidate-publication.ts";
 import { parseDeterministicChunk } from "../../src/server/compendium/candidate-parsers.ts";
+import { EXTRACTION_PARSER_VERSION, EXTRACTION_PROMPT_VERSION } from "../../src/server/compendium/candidate-schema.ts";
 import { validateClassProjection, validateSpeciesProjection } from "../../src/server/compendium/hierarchy-schema.ts";
 import { canonicalEntryId, collectorCandidateKey } from "../../src/server/compendium/identity.ts";
 import { nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
@@ -35,7 +36,7 @@ test("representative hierarchy validates completeness, overrides, and reserved a
 test("PDF parser only classifies a complete cited 1-20 class as publishable",()=>{
   const text=completeClassPdfText();const chunk={id:"33333333-3333-4333-8333-333333333333",chunkIndex:0,pageNumber:10,sectionHeading:"Fighter",quoteText:text};
   const [parsed]=parseDeterministicChunk(chunk,"en");assert.equal((parsed.wire.attributes.progressionRows as unknown[]).length,20);
-  const envelope={...parsed.wire,schemaVersion:1,provenance:{sourceId,fileId,generationId:"44444444-4444-4444-8444-444444444444",edition:"5.5e",language:"en",accessTier:"open",shared:false,ownerUserId:null},extraction:{method:parsed.method,parserVersion:"2",promptVersion:"2",modelVersion:"deterministic"},review:{status:"ready",reasons:[]}};
+  const envelope={...parsed.wire,schemaVersion:1,provenance:{sourceId,fileId,generationId:"44444444-4444-4444-8444-444444444444",edition:"5.5e",language:"en",accessTier:"open",shared:false,ownerUserId:null},extraction:{method:parsed.method,parserVersion:EXTRACTION_PARSER_VERSION,promptVersion:EXTRACTION_PROMPT_VERSION,modelVersion:"deterministic"},review:{status:"ready",reasons:[]}};
   assert.equal(classifyCandidatePublication(envelope,{candidateKey:parsed.wire.candidateKey,entryType:"class",sourceId,fileId,generationId:envelope.provenance.generationId,edition:"5.5e",language:"en",accessTier:"open",shared:false,ownerUserId:null,chunk}).publicationCapability,"publishable");
   const incomplete={...envelope,attributes:{...envelope.attributes,progressionRows:[]}};
   assert.equal(classifyCandidatePublication(incomplete,{candidateKey:parsed.wire.candidateKey,entryType:"class",sourceId,fileId,generationId:envelope.provenance.generationId,edition:"5.5e",language:"en",accessTier:"open",shared:false,ownerUserId:null,chunk}).publicationCapability,"requires_extraction");

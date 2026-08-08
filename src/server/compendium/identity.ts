@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 const STABLE_ID = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
-const ENTRY_TYPES = new Set(["spell", "creature", "item", "class", "feature", "species", "background", "feat", "equipment", "guide"]);
+const ENTRY_TYPES = new Set(["spell", "creature", "item", "class", "feature", "species", "background", "feat", "equipment", "glossary", "guide"]);
 const CYRILLIC: Readonly<Record<string, string>> = {
   а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ё: "e", ж: "zh", з: "z", и: "i", й: "i", к: "k", л: "l", м: "m",
   н: "n", о: "o", п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f", х: "kh", ц: "ts", ч: "ch", ш: "sh", щ: "shch",

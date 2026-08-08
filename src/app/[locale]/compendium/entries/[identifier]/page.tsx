@@ -6,18 +6,22 @@ import { AppLayout } from "../../../../../components/ui/app-layout";
 import { requireUser } from "../../../../../server/auth/session";
 import { isGuideLocale } from "../../../../../server/compendium/guides";
 import { categoryByEntryType } from "../../../../../server/compendium/landing";
+import { parseSelection } from "../../../../../server/compendium/http";
 import { CompendiumNotFoundError, CompendiumReadService } from "../../../../../server/compendium/read-service";
 import { citationPreviewHref } from "../../../../../server/citations/preview";
 
-export default async function EntryPage({ params }: { params: Promise<{ locale: string; identifier: string }> }) {
+export default async function EntryPage({ params, searchParams }: { params: Promise<{ locale: string; identifier: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const { locale, identifier } = await params;
   if (!isGuideLocale(locale)) notFound();
   const user = await requireUser();
   let entry;
   try {
+    const url = new URL("/compendium/entries", "http://local");
+    for (const [key, value] of Object.entries(await searchParams)) for (const item of Array.isArray(value) ? value : value === undefined ? [] : [value]) url.searchParams.append(key, item);
+    const selection = parseSelection(url);
     entry = await new CompendiumReadService().getEntry(
       { role: user.role, userId: user.id }, identifier,
-      { edition: "5.5e", language: locale },
+      { edition: selection.edition ?? "5.5e", language: selection.language ?? locale, category: selection.category },
     );
   } catch (error) {
     if (error instanceof CompendiumNotFoundError) notFound();

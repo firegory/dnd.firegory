@@ -6,11 +6,14 @@ import test from "node:test";
 import type { CanonicalRevision } from "../../src/server/content-storage/repository.ts";
 import { assertCanonicalRevision, loadResolvedCanonicalRevisions } from "../../src/server/content-storage/validation.ts";
 import {
+  activateManagedGeneration,
   buildSyncPlan,
   expandAffectedSourceClosure,
   claimContentIndexRun,
+  cleanupRemovedNfsFile,
   heartbeatContentIndexRun,
   reconcileManagedProjectionRows,
+  resolveNfsManagedSourceAndFile,
   synchronizeContentIndex,
 } from "../../src/server/content-index/sync.ts";
 import {
@@ -205,6 +208,200 @@ test("projection reconciliation refuses deterministic collisions with unmanaged 
   );
   assert.equal(queries, 1);
 });
+
+test("canonical source and file reuse avoids unique inserts and records non-ownership", async () => {
+  const resolved = await loadResolvedCanonicalRevisions(dataRoot);
+  const entry = projectCanonicalRevisions(resolved.manifest.repositoryId, resolved.revisions, resolved.sourceFiles)[0];
+  const originalSourceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const previousGenerationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const incrementalGenerationId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  assert.notEqual(originalSourceId, entry.sourceUuid); assert.notEqual(entry.file.fileId, entry.fileUuid);
+  const calls: Array<{ text: string; params: readonly unknown[] }> = [];
+  let mappingRepositoryId: string | null = null;
+  let retainedPrevious: string | null = null;
+  let activeGenerationId = previousGenerationId;
+  const binding = await resolveNfsManagedSourceAndFile({ async query(text: string, params: readonly unknown[] = []) {
+    calls.push({ text, params });
+    if (text.includes("FROM sources s LEFT JOIN")) return result([sourceDatabaseRow(entry, originalSourceId)]);
+    if (text.includes("FROM files f LEFT JOIN")) return result([{ id: entry.file.fileId, source_id: originalSourceId, mime_type: entry.file.mediaType, checksum_sha256: entry.file.contentHash.slice(7), byte_size: entry.file.byteSize, active_generation_id: activeGenerationId, deleted_at: null, mapping_repository_id: mappingRepositoryId, owns_file: false, previous_active_generation_id: retainedPrevious, last_nfs_generation_id: null }]);
+    if (text.includes("INSERT INTO nfs_index_managed_files")) {
+      mappingRepositoryId = String(params[2]);
+      retainedPrevious ??= params[5] as string | null;
+    }
+    return result([]);
+  } } as never, resolved.manifest.repositoryId, entry);
+  assert.deepEqual(binding, { sourceId: originalSourceId, fileId: entry.file.fileId, ownsSource: false, ownsFile: false });
+  assert.equal(calls.some(({ text }) => /^\s*INSERT INTO sources/.test(text)), false);
+  assert.equal(calls.some(({ text }) => /^\s*INSERT INTO files/.test(text)), false);
+  assert.ok(calls.some(({ text, params }) => text.includes("nfs_index_managed_sources") && params.at(-1) === false));
+  const fileMapping = calls.find(({ text }) => text.includes("INSERT INTO nfs_index_managed_files"));
+  assert.equal(fileMapping?.params[4], false);
+  assert.equal(fileMapping?.params[5], previousGenerationId);
+  assert.match(fileMapping!.text, /previous_active_generation_id=nfs_index_managed_files\.previous_active_generation_id/);
+  assert.match(fileMapping!.text, /last_nfs_generation_id=nfs_index_managed_files\.last_nfs_generation_id/);
+  activeGenerationId = incrementalGenerationId;
+  await resolveNfsManagedSourceAndFile({ async query(text: string, params: readonly unknown[] = []) {
+    if (text.includes("FROM sources s LEFT JOIN")) return result([sourceDatabaseRow(entry, originalSourceId)]);
+    if (text.includes("FROM files f LEFT JOIN")) return result([{ id: entry.file.fileId, source_id: originalSourceId, mime_type: entry.file.mediaType, checksum_sha256: entry.file.contentHash.slice(7), byte_size: entry.file.byteSize, active_generation_id: activeGenerationId, deleted_at: null, mapping_repository_id: mappingRepositoryId, owns_file: false, previous_active_generation_id: retainedPrevious, last_nfs_generation_id: null }]);
+    if (text.includes("INSERT INTO nfs_index_managed_files")) retainedPrevious ??= params[5] as string | null;
+    return result([]);
+  } } as never, resolved.manifest.repositoryId, entry);
+  assert.equal(retainedPrevious, previousGenerationId);
+});
+
+test("absent canonical identities create owned mappings", async () => {
+  const resolved = await loadResolvedCanonicalRevisions(dataRoot);
+  const entry = projectCanonicalRevisions(resolved.manifest.repositoryId, resolved.revisions, resolved.sourceFiles)[0];
+  const calls: Array<{ text: string; params: readonly unknown[] }> = [];
+  const binding = await resolveNfsManagedSourceAndFile({ async query(text: string, params: readonly unknown[] = []) { calls.push({ text, params }); return result([]); } } as never, resolved.manifest.repositoryId, entry);
+  assert.deepEqual(binding, { sourceId: entry.sourceUuid, fileId: entry.fileUuid, ownsSource: true, ownsFile: true });
+  assert.ok(calls.some(({ text }) => /^\s*INSERT INTO sources/.test(text)));
+  assert.ok(calls.some(({ text }) => /^\s*INSERT INTO files/.test(text)));
+  assert.ok(calls.some(({ text, params }) => text.includes("nfs_index_managed_sources") && params.at(-1) === true));
+  assert.ok(calls.some(({ text, params }) => text.includes("INSERT INTO nfs_index_managed_files") && params[4] === true && params[5] === null));
+});
+
+test("conflicting canonical source access and publication metadata fails before mapping", async () => {
+  const resolved = await loadResolvedCanonicalRevisions(dataRoot);
+  const entry = projectCanonicalRevisions(resolved.manifest.repositoryId, resolved.revisions, resolved.sourceFiles)[0];
+  let mappings = 0;
+  await assert.rejects(resolveNfsManagedSourceAndFile({ async query(text: string) {
+    if (text.includes("FROM sources s LEFT JOIN")) return result([{ ...sourceDatabaseRow(entry, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), access_tier: entry.source.accessTier === "open" ? "premium" : "open" }]);
+    if (text.includes("nfs_index_managed_")) mappings++;
+    return result([]);
+  } } as never, resolved.manifest.repositoryId, entry), /conflicts on access_tier/);
+  assert.equal(mappings, 0);
+});
+
+test("reused-file activation fences first and incremental NFS generations", async () => {
+  const resolved = await loadResolvedCanonicalRevisions(dataRoot);
+  const projected = projectCanonicalRevisions(resolved.manifest.repositoryId, resolved.revisions, resolved.sourceFiles)[0];
+  const previousId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const firstId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const nextId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const state: ActivationFixture = { active: previousId, previous: previousId, last: null, ownsFile: false, generations: new Map([[previousId, "active"]]), archives: 0, casFails: false };
+  const binding = { sourceId: projected.sourceUuid, fileId: projected.fileUuid, ownsSource: false, ownsFile: false };
+  await activateManagedGeneration(activationClient(state) as never, resolved.manifest.repositoryId, { ...projected, generationId: firstId }, binding);
+  assert.equal(state.active, firstId);
+  assert.equal(state.last, firstId);
+  assert.equal(state.generations.get(previousId), "archived");
+  await activateManagedGeneration(activationClient(state) as never, resolved.manifest.repositoryId, { ...projected, generationId: nextId }, binding);
+  assert.equal(state.active, nextId);
+  assert.equal(state.last, nextId);
+  assert.equal(state.generations.get(firstId), "archived");
+  assert.equal(state.generations.get(nextId), "active");
+});
+
+test("external activation between NFS generations rejects before archive or pointer mutation", async () => {
+  const resolved = await loadResolvedCanonicalRevisions(dataRoot);
+  const projected = projectCanonicalRevisions(resolved.manifest.repositoryId, resolved.revisions, resolved.sourceFiles)[0];
+  const previousId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", firstId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const externalId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", nextId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const state: ActivationFixture = { active: previousId, previous: previousId, last: null, ownsFile: false, generations: new Map([[previousId, "active"]]), archives: 0, casFails: false };
+  const binding = { sourceId: projected.sourceUuid, fileId: projected.fileUuid, ownsSource: false, ownsFile: false };
+  await activateManagedGeneration(activationClient(state) as never, resolved.manifest.repositoryId, { ...projected, generationId: firstId }, binding);
+  state.generations.set(firstId, "archived");
+  state.generations.set(externalId, "active");
+  state.active = externalId;
+  const archivesBefore = state.archives;
+  await assert.rejects(activateManagedGeneration(activationClient(state) as never, resolved.manifest.repositoryId, { ...projected, generationId: nextId }, binding), /changed outside NFS synchronization/);
+  assert.equal(state.active, externalId);
+  assert.equal(state.last, firstId);
+  assert.equal(state.generations.has(nextId), false);
+  assert.equal(state.archives, archivesBefore);
+});
+
+test("reused-file activation rolls back when the generation mapping CAS loses", async () => {
+  const resolved = await loadResolvedCanonicalRevisions(dataRoot);
+  const projected = projectCanonicalRevisions(resolved.manifest.repositoryId, resolved.revisions, resolved.sourceFiles)[0];
+  const previousId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", candidateId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const state: ActivationFixture = { active: previousId, previous: previousId, last: null, ownsFile: false, generations: new Map([[previousId, "active"]]), archives: 0, casFails: true };
+  const binding = { sourceId: projected.sourceUuid, fileId: projected.fileUuid, ownsSource: false, ownsFile: false };
+  await assert.rejects(mockActivationTransaction(state, (client) => activateManagedGeneration(client as never, resolved.manifest.repositoryId, { ...projected, generationId: candidateId }, binding)), /claim changed concurrently/);
+  assert.equal(state.active, previousId);
+  assert.equal(state.last, null);
+  assert.deepEqual([...state.generations], [[previousId, "active"]]);
+  assert.equal(state.archives, 0);
+});
+
+test("reused-file cleanup restores the retained generation and removes stale NFS retrieval rows idempotently", async () => {
+  const repositoryId = "repo", fileId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sourceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const previousId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", nfsId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", staleNfsId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const state = { active: nfsId as string | null, previous: previousId as string | null, last: nfsId as string | null, nfsIds: [staleNfsId,nfsId], entries: true, file: true, generations: new Map([[previousId,"archived"],[staleNfsId,"archived"],[nfsId,"active"]]), documents: true, pages: true, chunks: true };
+  const client = cleanupClient(state, { repositoryId, fileId, sourceId, ownsFile: false });
+  await cleanupRemovedNfsFile(client as never, repositoryId, fileId);
+  assert.equal(state.active, previousId); assert.equal(state.generations.get(previousId), "active"); assert.equal(state.generations.has(nfsId), false); assert.equal(state.generations.has(staleNfsId), false);
+  assert.equal(state.entries, false); assert.equal(state.documents, false); assert.equal(state.pages, false); assert.equal(state.chunks, false); assert.equal(state.file, true);
+  await cleanupRemovedNfsFile(client as never, repositoryId, fileId);
+  assert.equal(state.active, previousId); assert.equal(state.file, true);
+});
+
+test("reused-file cleanup fails closed when active generation changed externally", async () => {
+  const repositoryId = "repo", fileId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sourceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const state = { active: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" as string | null, previous: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" as string | null, last: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" as string | null, nfsIds: ["dddddddd-dddd-4ddd-8ddd-dddddddddddd"], entries: true, file: true, generations: new Map<string,string>(), documents: true, pages: true, chunks: true };
+  await assert.rejects(cleanupRemovedNfsFile(cleanupClient(state, { repositoryId, fileId, sourceId, ownsFile: false }) as never, repositoryId, fileId), /changed outside NFS synchronization/);
+  assert.equal(state.entries, true); assert.equal(state.file, true);
+});
+
+test("reused-file cleanup restores NULL when the retained generation is invalid", async () => {
+  const repositoryId = "repo", fileId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sourceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const nfsId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const state = { active: nfsId as string | null, previous: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" as string | null, last: nfsId as string | null, nfsIds: [nfsId], entries: true, file: true, generations: new Map([[nfsId,"active"]]), documents: true, pages: true, chunks: true };
+  await cleanupRemovedNfsFile(cleanupClient(state, { repositoryId, fileId, sourceId, ownsFile: false }) as never, repositoryId, fileId);
+  assert.equal(state.active, null);
+  assert.equal(state.previous, null);
+  assert.equal(state.generations.has(nfsId), false);
+  assert.equal(state.entries, false);
+  assert.equal(state.file, true);
+});
+
+test("owned-file cleanup deletes the file and cascades NFS artifacts", async () => {
+  const repositoryId = "repo", fileId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", sourceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", nfsId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const state = { active: nfsId as string | null, previous: null, last: nfsId as string | null, nfsIds: [nfsId], entries: true, file: true, generations: new Map([[nfsId,"active"]]), documents: true, pages: true, chunks: true };
+  await cleanupRemovedNfsFile(cleanupClient(state, { repositoryId, fileId, sourceId, ownsFile: true }) as never, repositoryId, fileId);
+  assert.equal(state.file, false); assert.equal(state.entries, false); assert.equal(state.generations.size, 0); assert.equal(state.documents, false); assert.equal(state.pages, false); assert.equal(state.chunks, false);
+});
+
+type CleanupState = { active:string|null;previous:string|null;last:string|null;nfsIds:string[];entries:boolean;file:boolean;generations:Map<string,string>;documents:boolean;pages:boolean;chunks:boolean };
+function cleanupClient(state:CleanupState, ids:{repositoryId:string;fileId:string;sourceId:string;ownsFile:boolean}) { return { async query(text:string,params:readonly unknown[]=[]){
+  if(text.includes("SELECT file.source_id")) return result(state.file ? [{source_id:ids.sourceId,active_generation_id:state.active,owns_file:ids.ownsFile,previous_active_generation_id:state.previous,last_nfs_generation_id:state.last,nfs_generation_ids:state.entries?state.nfsIds:[]}] : []);
+  if(text.startsWith("SELECT id FROM ingestion_generations")) return result(state.previous&&state.generations.has(state.previous)?[{id:state.previous}]:[]);
+  if(text.startsWith("UPDATE ingestion_generations SET status='archived'")){for(const id of params[0] as string[])state.generations.set(id,"archived");return changed(1);}
+  if(text.startsWith("UPDATE ingestion_generations SET status='active'")){state.generations.set(String(params[0]),"active");return changed(1);}
+  if(text.startsWith("UPDATE files SET active_generation_id")){if(state.active!==params[1])return changed(0);state.active=params[2] as string|null;return changed(1);}
+  if(text.startsWith("DELETE FROM nfs_index_entries")){state.entries=false;return changed(1);}
+  if(text.startsWith("DELETE FROM ingestion_generations")){for(const id of params[0] as string[]){state.generations.delete(id);if(state.last===id)state.last=null;}state.documents=false;state.pages=false;state.chunks=false;state.nfsIds=[];return changed(1);}
+  if(text.startsWith("DELETE FROM files")){state.file=false;state.entries=false;state.generations.clear();state.documents=false;state.pages=false;state.chunks=false;return changed(1);}
+  if(text.startsWith("UPDATE nfs_index_managed_files SET previous")){state.previous=null;return changed(1);} throw new Error(`Unexpected cleanup SQL: ${text}`);
+} }; }
+function changed(rowCount:number){return {rows:rowCount?[{id:"changed"}]:[],rowCount,command:"UPDATE",oid:0,fields:[]} as never;}
+
+type ActivationFixture = { active: string | null; previous: string | null; last: string | null; ownsFile: boolean; generations: Map<string, string>; archives: number; casFails: boolean };
+function activationClient(state: ActivationFixture) { return { async query(text: string, params: readonly unknown[] = []) {
+  if (text.includes("SELECT file.active_generation_id")) return result([{ active_generation_id: state.active, owns_file: state.ownsFile, previous_active_generation_id: state.previous, last_nfs_generation_id: state.last }]);
+  if (text.startsWith("INSERT INTO ingestion_generations") && text.includes("'staged'")) { if (!state.generations.has(String(params[0]))) state.generations.set(String(params[0]), "staged"); return changed(1); }
+  if (text.startsWith("UPDATE nfs_index_managed_files SET last_nfs_generation_id")) {
+    if (state.casFails || state.last !== params[3]) return changed(0);
+    state.last = String(params[2]); return changed(1);
+  }
+  if (text.startsWith("UPDATE ingestion_generations SET status='archived'")) { for (const [id, status] of state.generations) if (status === "active" && id !== params[1]) { state.generations.set(id, "archived"); state.archives++; } return changed(1); }
+  if (text.startsWith("UPDATE ingestion_generations SET status='active'")) { state.generations.set(String(params[0]), "active"); return changed(1); }
+  if (text.startsWith("UPDATE files SET active_generation_id")) { if (state.active !== params[1]) return changed(0); state.active = String(params[2]); return changed(1); }
+  throw new Error(`Unexpected activation SQL: ${text}`);
+} }; }
+async function mockActivationTransaction(state: ActivationFixture, operation: (client: ReturnType<typeof activationClient>) => Promise<void>) {
+  const snapshot = { active: state.active, previous: state.previous, last: state.last, generations: new Map(state.generations), archives: state.archives };
+  try { await operation(activationClient(state)); } catch (error) {
+    state.active = snapshot.active; state.previous = snapshot.previous; state.last = snapshot.last;
+    state.generations = snapshot.generations; state.archives = snapshot.archives;
+    throw error;
+  }
+}
+
+function sourceDatabaseRow(entry: ReturnType<typeof projectCanonicalRevisions>[number], id: string) {
+  return { id, title: entry.source.title, category: entry.source.category, edition: entry.source.edition, language: entry.source.language, access_tier: entry.source.accessTier, shared: entry.source.shared, owner_user_id: entry.source.ownerUserId, publication_code: entry.source.publication.code, publication_title: entry.source.publication.title, publisher: entry.source.publication.publisher, release_year: entry.source.publication.releaseYear, publication_revision: entry.source.publication.revision ?? null, external_origin_url: entry.source.publication.origin?.url ?? null, external_origin_id: entry.source.publication.origin?.id ?? null, attribution: entry.source.publication.attribution ?? null, source_priority: entry.source.publication.sourcePriority, canonical_book_id: entry.source.publication.canonicalBookId, license: entry.source.license ?? null, deleted_at: null, mapping_repository_id: null, owns_source: null };
+}
+function result(rows: readonly Record<string, unknown>[]) { return { rows, rowCount: rows.length, command: "SELECT", oid: 0, fields: [] } as never; }
 
 test("validate mode completes without any database access", async () => {
   let queried = false;

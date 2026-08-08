@@ -12,7 +12,7 @@ export const NEXT_DND_CATEGORIES = {
   backgrounds: { path: "/backgrounds/", entryType: "background" },
   feats: { path: "/feats/", entryType: "feat" },
   spells: { path: "/spells/", entryType: "spell" },
-  glossary: { path: "/glossary/", entryType: "feature" },
+  glossary: { path: "/glossary/", entryType: "glossary" },
   bestiary: { path: "/bestiary/", entryType: "creature" },
   items: { path: "/items/", entryType: "item" },
   equipment: { path: "/equipment/", entryType: "equipment" },
@@ -119,7 +119,12 @@ export function parseNextDndDetail(html: string, cardCategory: string, externalI
       if (href && !safeLink(href)) $(element).removeAttr("href");
     }
   });
-  const contentText = card.text().replace(/\s+/g, " ").trim();
+  const textCard = card.clone();
+  textCard.find("br").replaceWith("\n");
+  textCard.find("h1,h2,h3,h4,h5,h6,p,li,dt,dd,tr,blockquote,pre,section").each((_, element) => {
+    $(element).append("\n");
+  });
+  const contentText = textCard.text().replace(/[^\S\n]+/g, " ").replace(/ *\n */g, "\n").replace(/\n{2,}/g, "\n").trim();
   if (!title || !contentText) throw new Error(`Detail card ${cardCategory}:${externalId} has no normalized content.`);
   return { title, contentHtml: $.html(card), contentText };
 }
