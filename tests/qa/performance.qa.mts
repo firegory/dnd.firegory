@@ -33,8 +33,8 @@ test("QA integration: mixed representative corpus records bounded list, count, a
          jsonb_build_object('key','school','value',(ARRAY['evocation','abjuration','illusion'])[(n%3)+1]),
          jsonb_build_object('key','casting-time','value','1 action'),
          jsonb_build_object('key','range','value',(30+n%90)||' feet'),
-         jsonb_build_object('key','duration','Instantaneous'),
-         jsonb_build_object('key','components','V, S'),
+          jsonb_build_object('key','duration','value','Instantaneous'),
+          jsonb_build_object('key','components','value','V, S'),
          jsonb_build_object('key','classes','value',jsonb_build_array('class:'||(n%20))),
          jsonb_build_object('key','concentration','value',n%2=0),
          jsonb_build_object('key','ritual','value',n%3=0)
