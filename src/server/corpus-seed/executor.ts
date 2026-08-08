@@ -1,11 +1,10 @@
-import { basename } from "node:path";
-
 import type { QueryResultRow } from "pg";
 
 import { withTransaction } from "../db/client.ts";
 import { CompendiumImportRunService } from "../compendium/import-runs.ts";
-import { feedNextDndSnapshotToImportRun } from "../compendium/next-dnd/import-adapter.ts";
-import { installSeedSource } from "./source-installer.ts";
+import { loadResolvedRepositoryManifest } from "../content-storage/validation.ts";
+import { installSeedSource, verifySeedSource } from "./source-installer.ts";
+import { seedImportBatch } from "./batch.ts";
 import { canonicalJson, type PreparedSeed, type PreparedSeedSlot } from "./model.ts";
 
 export type SeedTypeCounts = Readonly<{ discovered: number; imported: number; reviewed: number; published: number; indexed: number; failures: number }>;
@@ -45,9 +44,10 @@ export async function loadPreparedSeed(prepared: PreparedSeed, dependencies: See
     let leaseToken: string | null = null;
     let operation: SeedSlotResult["operation"] = "loaded";
     try {
-      const boundary = await ensureSourceBoundary(slot, transaction);
+      const blocked = slot.planSlot.dependsOn.find((dependency) => !results.some((result) => result.slotId === dependency && result.operation !== "failed"));
+      if (blocked) throw new Error(`Required dependency ${blocked} did not load successfully.`);
+      const boundary = await ensureSourceBoundary(slot, transaction, sourceInstaller, dependencies.dataRoot ?? "test-injected");
       sourceId = boundary.sourceId;
-      await sourceInstaller(slot, boundary.fileId, dependencies.dataRoot ?? "test-injected");
       const run = await runs.createRun({
         sourceId: boundary.sourceId,
         fileId: boundary.fileId,
@@ -67,12 +67,14 @@ export async function loadPreparedSeed(prepared: PreparedSeed, dependencies: See
         leaseToken = claim.leaseToken;
         if (!leaseToken) throw new Error("Claimed seed import run did not return a lease token.");
         operation = run.status === "failed" || run.checkpoint !== "created" ? "resumed" : "loaded";
-        await feedNextDndSnapshotToImportRun(runs, run.id, leaseToken, slot.manifest, "corpus-seed-cli");
+        const batch = seedImportBatch(slot);
+        await runs.recordOccurrences(run.id, leaseToken, batch.occurrences, "corpus-seed-cli");
+        await runs.computeCandidateDiff(run.id, leaseToken, batch.candidates, "corpus-seed-cli");
         await dependencies.afterImport?.(slot);
         await runs.completeRun(run.id, leaseToken, "corpus-seed-cli");
         leaseToken = null;
       }
-      results.push(await resultFromState(slot, db, sourceId, runId, operation, []));
+      results.push(await resultFromState(slot, db, sourceId, runId, operation, [], dependencies.dataRoot));
     } catch (error) {
       const message = safeError(error);
       if (runId && leaseToken) await runs.failRun(runId, leaseToken, "corpus-seed-cli", message).catch(() => undefined);
@@ -82,11 +84,11 @@ export async function loadPreparedSeed(prepared: PreparedSeed, dependencies: See
   return results;
 }
 
-export async function inspectPreparedSeed(prepared: PreparedSeed, db: Db): Promise<readonly SeedSlotResult[]> {
+export async function inspectPreparedSeed(prepared: PreparedSeed, db: Db, dataRoot: string, verifier = verifySeedSource): Promise<readonly SeedSlotResult[]> {
   const results: SeedSlotResult[] = [];
   for (const slot of prepared.slots) {
-    const row = (await db.query<{ source_id: string; run_id: string; run_status: string }>(
-      `SELECT source.id AS source_id, run.id AS run_id, run.status::text AS run_status
+    const row = (await db.query<{ source_id: string; file_id: string; run_id: string; run_status: string }>(
+      `SELECT source.id AS source_id, file.id AS file_id, run.id AS run_id, run.status::text AS run_status
        FROM sources source
        JOIN files file ON file.source_id = source.id AND file.checksum_sha256 = $2 AND file.deleted_at IS NULL
        JOIN compendium_import_runs run ON run.source_id = source.id AND run.file_id = file.id
@@ -95,14 +97,15 @@ export async function inspectPreparedSeed(prepared: PreparedSeed, db: Db): Promi
        ORDER BY run.created_at DESC LIMIT 1`,
       [slot.input.source.canonicalSourceId, slot.manifestDigest, slot.inputDigest],
     )).rows[0];
-    const operation = row?.run_status === "succeeded" ? "noop" : row?.run_status === "failed" ? "failed" : "pending";
-    const failures = row?.run_status === "failed" ? ["Durable import run is failed and remains retryable."] : [];
-    results.push(row ? await resultFromState(slot, db, row.source_id, row.run_id, operation, failures) : baseResult(slot, null, null, "absent", []));
+    let operation: SeedSlotResult["operation"] = row?.run_status === "succeeded" ? "noop" : row?.run_status === "failed" ? "failed" : row ? "pending" : "absent";
+    const failures: string[] = row?.run_status === "failed" ? ["Durable import run is failed and remains retryable."] : [];
+    if (row) try { await verifier(slot, row.file_id, dataRoot); } catch (error) { operation = "failed"; failures.push(safeError(error)); }
+    results.push(row ? await resultFromState(slot, db, row.source_id, row.run_id, operation, failures, dataRoot) : baseResult(slot, null, null, "absent", ["Required seed slot has no durable import run."]));
   }
   return results;
 }
 
-async function ensureSourceBoundary(slot: PreparedSeedSlot, transaction: Transaction): Promise<{ sourceId: string; fileId: string }> {
+async function ensureSourceBoundary(slot: PreparedSeedSlot, transaction: Transaction, installer: NonNullable<SeedExecutionDependencies["sourceInstaller"]>, dataRoot: string): Promise<{ sourceId: string; fileId: string }> {
   return transaction(async (client) => {
     const source = slot.input.source;
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`corpus-seed:${source.canonicalSourceId}`]);
@@ -115,7 +118,7 @@ async function ensureSourceBoundary(slot: PreparedSeedSlot, transaction: Transac
        ON CONFLICT (canonical_source_id) WHERE canonical_source_id IS NOT NULL DO NOTHING`,
       [source.canonicalSourceId, source.title, source.category, source.language, source.accessTier, source.accessTier === "premium",
         source.publicationCode, source.publisher, source.revision, source.originUrl, source.originId, source.attribution,
-        source.canonicalBookId, source.license, JSON.stringify({ corpusSeed: { slotId: slot.planSlot.id, licenseApproval: source.licenseApproval } })],
+        source.canonicalBookId, source.license, JSON.stringify({ corpusSeed: { inputSlotId: slot.planSlot.inputSlotId, licenseApproval: source.licenseApproval } })],
     );
     const persisted = (await client.query<{
       id: string; title: string; category: string; edition: string; language: string; access_tier: string; publication_code: string;
@@ -129,7 +132,7 @@ async function ensureSourceBoundary(slot: PreparedSeedSlot, transaction: Transac
       || persisted.publisher !== source.publisher || persisted.release_year !== 2024 || persisted.publication_revision !== source.revision
       || persisted.external_origin_url !== source.originUrl || persisted.external_origin_id !== source.originId || persisted.attribution !== source.attribution
       || persisted.canonical_book_id !== source.canonicalBookId || persisted.license !== source.license
-      || canonicalJson(persisted.metadata?.corpusSeed ?? null) !== canonicalJson({ slotId: slot.planSlot.id, licenseApproval: source.licenseApproval })) {
+      || canonicalJson(persisted.metadata?.corpusSeed ?? null) !== canonicalJson({ inputSlotId: slot.planSlot.inputSlotId, licenseApproval: source.licenseApproval })) {
       throw new Error(`Canonical source ${source.canonicalSourceId} already exists with different approved provenance or access metadata.`);
     }
     const insertedFile = (await client.query<{ id: string }>(
@@ -137,7 +140,7 @@ async function ensureSourceBoundary(slot: PreparedSeedSlot, transaction: Transac
        VALUES ($1,$2,'application/vnd.dnd-firegory.snapshot+json',$3,$4,$5)
        ON CONFLICT (source_id,checksum_sha256) WHERE deleted_at IS NULL DO NOTHING
        RETURNING id`,
-      [persisted.id, `${slot.planSlot.id}-${basename(slot.manifestPath)}`, slot.manifestDigest, slot.manifestByteLength, slot.manifestPath],
+      [persisted.id, `${slot.planSlot.inputSlotId}-snapshot-manifest.json`, slot.manifestDigest, slot.manifestByteLength, `canonical-seed:sha256:${slot.manifestDigest}`],
     )).rows[0];
     const file = insertedFile ?? (await client.query<{ id: string; byte_size: string; mime_type: string }>(
       `SELECT id,byte_size,mime_type FROM files WHERE source_id=$1 AND checksum_sha256=$2 AND deleted_at IS NULL FOR SHARE`,
@@ -146,22 +149,36 @@ async function ensureSourceBoundary(slot: PreparedSeedSlot, transaction: Transac
     if (file && (Number("byte_size" in file ? file.byte_size : slot.manifestByteLength) !== slot.manifestByteLength
       || ("mime_type" in file && file.mime_type !== "application/vnd.dnd-firegory.snapshot+json"))) throw new Error(`Seed file boundary for slot ${slot.planSlot.id} conflicts with durable metadata.`);
     if (!file) throw new Error(`Unable to establish seed file boundary for slot ${slot.planSlot.id}.`);
+    await installer(slot, file.id, dataRoot);
     return { sourceId: persisted.id, fileId: file.id };
   });
 }
 
-async function resultFromState(slot: PreparedSeedSlot, db: Db, sourceId: string | null, runId: string | null, operation: SeedSlotResult["operation"], failures: readonly string[]): Promise<SeedSlotResult> {
+async function resultFromState(slot: PreparedSeedSlot, db: Db, sourceId: string | null, runId: string | null, operation: SeedSlotResult["operation"], failures: readonly string[], dataRoot?: string): Promise<SeedSlotResult> {
   if (!runId) return baseResult(slot, sourceId, runId, operation, failures);
+  if (!dataRoot || !sourceId) {
+    const imported = Number((await db.query<{ imported: number }>(
+      `SELECT count(*)::integer AS imported FROM compendium_import_candidates WHERE import_run_id=$1 AND entry_type::text=$2`,
+      [runId, slot.planSlot.contentType],
+    )).rows[0]?.imported ?? 0);
+    return { ...baseResult(slot, sourceId, runId, operation, failures), counts: { discovered: slot.discovered, imported, reviewed: 0, published: 0, indexed: 0, failures: failures.length } };
+  }
+  const { manifest, generation } = await loadResolvedRepositoryManifest(dataRoot);
+  const active = manifest.entries.map(({ entryId, revisionId }) => ({ entryId, revisionId }));
   const row = (await db.query<{ imported: number; reviewed: number; published: number; indexed: number }>(
-    `SELECT count(DISTINCT candidate.id)::integer AS imported,
-            count(DISTINCT candidate.id) FILTER (WHERE review.decision IS NOT NULL AND review.decision <> 'pending')::integer AS reviewed,
-            count(DISTINCT candidate.id) FILTER (WHERE review.publication_status = 'completed')::integer AS published,
-            count(DISTINCT candidate.id) FILTER (WHERE indexed.entry_id IS NOT NULL)::integer AS indexed
+    `WITH active AS (SELECT * FROM jsonb_to_recordset($6::jsonb) AS item("entryId" text, "revisionId" text))
+      SELECT count(DISTINCT candidate.id)::integer AS imported,
+             count(DISTINCT candidate.id) FILTER (WHERE review.decision IS NOT NULL AND review.decision <> 'pending')::integer AS reviewed,
+             count(DISTINCT candidate.id) FILTER (WHERE review.publication_status = 'completed' AND active."revisionId" = review.canonical_revision_id)::integer AS published,
+             count(DISTINCT candidate.id) FILTER (WHERE indexed.entry_id IS NOT NULL)::integer AS indexed
        FROM compendium_import_candidates candidate
        LEFT JOIN compendium_import_candidate_reviews review ON review.candidate_id = candidate.id
-       LEFT JOIN nfs_index_entries indexed ON indexed.entry_id = candidate.entry_type::text || '-' || candidate.candidate_key AND indexed.lifecycle='active'
+       LEFT JOIN active ON active."entryId" = candidate.entry_type::text || '-' || candidate.candidate_key
+       LEFT JOIN nfs_index_entries indexed ON indexed.repository_id=$3 AND indexed.entry_id=active."entryId"
+         AND indexed.revision_id=active."revisionId" AND indexed.source_id=$4 AND indexed.file_id=candidate.file_id AND indexed.lifecycle='active'
+         AND (SELECT sync.repository_generation FROM nfs_index_sync_runs sync WHERE sync.repository_id=$3 AND sync.status='succeeded' ORDER BY sync.finished_at DESC, sync.id DESC LIMIT 1) IS NOT DISTINCT FROM $5
        WHERE candidate.import_run_id=$1 AND candidate.entry_type::text=$2`,
-    [runId, slot.planSlot.contentType],
+    [runId, slot.planSlot.contentType, manifest.repositoryId, sourceId, generation, JSON.stringify(active)],
   )).rows[0];
   return { ...baseResult(slot, sourceId, runId, operation, failures), counts: { discovered: slot.discovered, imported: Number(row?.imported ?? 0), reviewed: Number(row?.reviewed ?? 0), published: Number(row?.published ?? 0), indexed: Number(row?.indexed ?? 0), failures: failures.length } };
 }
@@ -171,7 +188,7 @@ function baseResult(slot: PreparedSeedSlot, sourceId: string | null, importRunId
   return {
     slotId: slot.planSlot.id, contentType: slot.planSlot.contentType, sourceId, importRunId, operation,
     counts: { discovered: slot.discovered, imported: 0, reviewed: 0, published: 0, indexed: 0, failures: failures.length }, failures,
-    provenance: { canonicalSourceId: source.canonicalSourceId, originUrl: source.originUrl, originId: source.originId, attribution: source.attribution, license: source.license, evidenceReference: source.licenseApproval.evidenceReference },
+    provenance: { canonicalSourceId: source.canonicalSourceId, originUrl: source.originUrl, originId: source.originId, attribution: source.attribution, license: source.license, evidenceReference: source.licenseApproval.evidenceUri },
   };
 }
 

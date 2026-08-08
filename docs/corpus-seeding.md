@@ -1,6 +1,6 @@
 # 2024 Corpus Seeding
 
-`config/corpus-seed-2024.json` is the approved initial 2024 plan. It requires one operator-supplied collector snapshot for each supported type: class, species, background, feat, spell, glossary, creature, item, and equipment. The plan excludes older rules, adventures, narrative, media, partner/user/homebrew/premium/personal material, robots-disallowed material, and anything without explicit provenance, attribution, license basis, and operator approval.
+`config/corpus-seed-2024.json` is the approved initial 2024 plan. It requires every supported type: feature, class, species, background, feat, spell, glossary, creature, item, and equipment. Class features are deterministically derived from the approved class snapshot, loaded first, and the class slot explicitly depends on them. The plan excludes older rules, adventures, narrative, media, partner/user/homebrew/premium/personal material, robots-disallowed material, and anything without explicit provenance, attribution, license basis, and operator approval.
 
 No source document or real corpus is stored in this repository. `tests/fixtures/corpus-seed` contains only original synthetic test prose. A full seed requires external licensed snapshots, PostgreSQL 16 with migrations, Redis/publication spool, canonical NFS, and an operator evidence record; absence of any of these is an evidence gap, not a successful corpus load.
 
@@ -35,7 +35,7 @@ npm run collect:next-dnd -- --output "$SNAPSHOT_ROOT/item" --category items --al
 npm run collect:next-dnd -- --output "$SNAPSHOT_ROOT/equipment" --category equipment --allow-network
 ```
 
-Create `/srv/dnd-firegory/seed-inputs/inputs.json` with `schemaVersion: 1`, `planId: "approved-2024-corpus-v1"`, and exactly nine `slots`. Each slot has this shape; `manifestPath` is relative to `inputs.json` and every string must be a real operator value, not a placeholder:
+Create `/srv/dnd-firegory/seed-inputs/inputs.json` with `schemaVersion: 1`, `planId: "approved-2024-corpus-v1"`, and exactly nine external input `slots`. The class input supplies both the derived `feature` output and dependent `class` output. Each slot has this shape; `manifestPath` is relative to `inputs.json` and every string must be a real operator value, not a placeholder:
 
 ```json
 {
@@ -57,9 +57,11 @@ Create `/srv/dnd-firegory/seed-inputs/inputs.json` with `schemaVersion: 1`, `pla
     "attribution": "Required attribution text",
     "license": "Operator-verified license or permission basis",
     "licenseApproval": {
-      "approvedBy": "responsible-operator-id",
+      "basis": "operator-permission",
+      "approvedBy": "corpus-legal-reviewer",
       "approvedAt": "2026-08-08T00:00:00.000Z",
-      "evidenceReference": "external-ticket-or-record-id"
+      "evidenceUri": "https://legal.example.invalid/approvals/real-record-id",
+      "evidenceSha256": "<sha256-of-external-approval-record>"
     }
   }
 }
@@ -90,7 +92,7 @@ npm run corpus-seed -- load \
   --manifest /srv/dnd-firegory/seed-runs/load.json
 ```
 
-`load` never calls review or publication APIs. It fails unless explicitly run in the worker writer role, validates the repository bootstrap, creates or verifies exact source metadata, atomically installs the hash-verified external manifest and matching `source.json` as immutable canonical evidence, creates/claims the existing durable import run, records occurrences/candidates, and completes the run. A crash after source installation is retryable because identical files are verified rather than replaced. A failed run is lease-reclaimable and immutable phases replay exactly. An identical successful input resolves the succeeded DB run and reports `operation: "noop"`; the output file is not used as authority.
+`load` never calls review or publication APIs. `CORPUS_SEED_WRITER_ROLE=worker` is only a defense-in-depth assertion, not authorization. Authorization is the deployment boundary: the process must run under the worker OS identity with canonical storage mounted read-write; application and agent containers retain read-only mounts. The loader probes and fsyncs that writable boundary and fails otherwise. It validates the repository bootstrap, creates or verifies exact source metadata, atomically installs all hash-verified raw evidence, then the durable external manifest and matching `source.json`, creates/claims the existing durable import run, records occurrences/candidates, and completes the run. A crash after source installation is retryable because identical files are verified rather than replaced. A failed run is lease-reclaimable and immutable phases replay exactly. An identical successful input resolves the succeeded DB run and reports `operation: "noop"`; the output file is not used as authority.
 
 A changed snapshot or approval record must use a new `canonicalSourceId` and `canonicalBookId` revision boundary. Existing canonical source records and file lists are immutable because published revisions embed and validate the complete source record. The loader fails rather than appending changed bytes to an already-published source.
 
@@ -103,6 +105,7 @@ npm run corpus-seed -- status \
 ```
 
 Each manifest has plan/input SHA-256 digests, start/finish/status, per-type discovered/imported/reviewed/published/indexed/failure counts, durable source/import IDs, operations, safe provenance, failures, and `autoPublished: false`.
+`status` verifies every installed raw evidence blob and fails with a nonzero exit for any absent, pending, failed, partial, stale-revision, stale-index-generation, or evidence-missing required slot. A non-success manifest is still written atomically.
 
 ## Review And Publish
 
@@ -116,13 +119,14 @@ export COOKIE_JAR='/secure/operator-admin-cookie.jar'
 curl --fail-with-body --silent --show-error --cookie "$COOKIE_JAR" \
   "$APP_ORIGIN/api/admin/compendium/import-runs/$RUN_ID" > /secure/review-run.json
 
-jq '{action:"approve",candidateIds:[.candidates[]|select(.publicationCapability=="publishable" and (.diffStatus=="new" or .diffStatus=="changed" or .diffStatus=="unchanged"))|.id],activeRevisionTokens:(reduce (.candidates[]|select(.publicationCapability=="publishable" and (.diffStatus=="new" or .diffStatus=="changed" or .diffStatus=="unchanged"))) as $candidate ({}; .[$candidate.id]=$candidate.activeRevisionToken))}' \
-  /secure/review-run.json > /secure/review-action.json
+jq -c '[.candidates[]|select(.publicationCapability=="publishable" and (.diffStatus=="new" or .diffStatus=="changed" or .diffStatus=="unchanged"))] | _nwise(200) | {action:"approve",candidateIds:map(.id),activeRevisionTokens:(map({key:.id,value:.activeRevisionToken})|from_entries)}' \
+  /secure/review-run.json > /secure/review-actions.jsonl
 
-curl --fail-with-body --silent --show-error --cookie "$COOKIE_JAR" \
-  --header "Origin: $APP_ORIGIN" --header 'Content-Type: application/json' \
-  --data-binary @/secure/review-action.json \
-  "$APP_ORIGIN/api/admin/compendium/import-runs/$RUN_ID/actions"
+while IFS= read -r action; do
+  curl --fail-with-body --silent --show-error --cookie "$COOKIE_JAR" \
+    --header "Origin: $APP_ORIGIN" --header 'Content-Type: application/json' \
+    --data-binary "$action" "$APP_ORIGIN/api/admin/compendium/import-runs/$RUN_ID/actions"
+done < /secure/review-actions.jsonl
 ```
 
 The administrator must inspect provenance, diff, typed fields, citations, and payload capability before submitting. Do not bulk approve an empty selection. `requires_extraction`, invalid, or duplicate candidates fail closed and need supported repair/rejection; they are not auto-published. Wait for worker terminal outcomes, then run `corpus-seed status` again.
@@ -175,4 +179,4 @@ Wait for the worker outcome, then run canonical validation and incremental sync.
 
 ## Evidence Gate
 
-A production seed claim requires all of the following external evidence: successful validation/load/status manifests, nine approved source authorization records, admin review audit, worker publication completion, canonical validation, successful index sync, expected per-type counts, and embedding evidence if embeddings are claimed. This repository run cannot supply licensed inputs, production NFS, PostgreSQL, Redis, or provider access, so it must not be cited as proof that the full corpus was loaded.
+A production seed claim requires all of the following external evidence: successful validation/load/status manifests, nine approved external source authorization records covering all ten output types, admin review audit, worker publication completion, canonical validation, successful index sync, expected per-type counts, and embedding evidence if embeddings are claimed. This repository run cannot supply licensed inputs, production NFS, PostgreSQL, Redis, or provider access, so it must not be cited as proof that the full corpus was loaded.

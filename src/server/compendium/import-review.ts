@@ -19,6 +19,8 @@ import {
   projectExtractedCandidate,
   projectSnapshotCreatureCandidate,
   projectSnapshotFlatCandidate,
+  projectSnapshotFeatureCandidate,
+  projectSnapshotHierarchyCandidate,
   projectSnapshotSpellCandidate,
   type SnapshotSpellEvidence,
   type CandidatePublicationCapability,
@@ -574,6 +576,20 @@ async function buildRevision(client: DbClient, candidate: CandidateRow, content:
       throw error;
     }
   }
+  if (isSnapshotHierarchyContent(content)) {
+    const evidence = currentSnapshotEvidence(candidate);
+    if (!evidence || (candidate.entry_type !== "class" && candidate.entry_type !== "species")) throw new ImportReviewError("Collector hierarchy has no complete typed occurrence and database file evidence.", 409);
+    try { return projectSnapshotHierarchyCandidate(content, { candidateKey: candidate.candidate_key, entryType: candidate.entry_type,
+      createdAt: iso(candidate.created_at), source, fileId: candidate.file_id, evidence }); }
+    catch (error) { if (error instanceof CandidateProjectionError) throw new ImportReviewError(error.message); throw error; }
+  }
+  if (isSnapshotFeatureContent(content)) {
+    const evidence = currentSnapshotEvidence(candidate);
+    if (!evidence || candidate.entry_type !== "feature") throw new ImportReviewError("Collector feature has no complete typed occurrence and database file evidence.", 409);
+    try { return projectSnapshotFeatureCandidate(content, { candidateKey: candidate.candidate_key,
+      createdAt: iso(candidate.created_at), source, fileId: candidate.file_id, evidence }); }
+    catch (error) { if (error instanceof CandidateProjectionError) throw new ImportReviewError(error.message); throw error; }
+  }
   if (!candidate.entry_type || !candidate.generation_id || !candidate.chunk_id || candidate.chunk_index === null || !candidate.quote_text) {
     throw new ImportReviewError("Publishable extracted candidates require typed source, generation, and chunk provenance.");
   }
@@ -746,8 +762,8 @@ function snapshotEvidence(
 ): SnapshotSpellEvidence | null {
   if (!sourceUrl || !fingerprintSha256 || !rawBlobPath || !fetchedAt || !fileChecksumSha256 || !indexUrl
       || !indexFingerprintSha256 || !rawIndexBlobPath || !indexFetchedAt || !indexCardFingerprintSha256
-      || !metadataEvidenceText || rawBlobPath !== `blobs/${fingerprintSha256}.html`
-      || rawIndexBlobPath !== `blobs/${indexFingerprintSha256}.html`) return null;
+      || !metadataEvidenceText || !validSnapshotBlobPath(rawBlobPath, fingerprintSha256)
+      || !validSnapshotBlobPath(rawIndexBlobPath, indexFingerprintSha256)) return null;
   return {
     sourceUrl, fingerprintSha256, rawBlobPath, fetchedAt: iso(fetchedAt), fileChecksumSha256,
     indexUrl, indexFingerprintSha256, rawIndexBlobPath, indexFetchedAt: iso(indexFetchedAt),
@@ -873,7 +889,10 @@ function recordValue(value: unknown): Record<string, unknown> { if (!isRecord(va
 function isSnapshotSpellContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotSpellCandidate" && value.schemaVersion === 1; }
 function isSnapshotCreatureContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotCreatureCandidate" && value.schemaVersion === 1; }
 function isSnapshotFlatContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotFlatCandidate" && value.schemaVersion === 1; }
-function isSnapshotCollectorContent(value: Record<string, unknown>): boolean { return isSnapshotSpellContent(value) || isSnapshotCreatureContent(value) || isSnapshotFlatContent(value); }
+function isSnapshotHierarchyContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotHierarchyCandidate" && value.schemaVersion === 1; }
+function isSnapshotFeatureContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotFeatureCandidate" && value.schemaVersion === 1; }
+function isSnapshotCollectorContent(value: Record<string, unknown>): boolean { return isSnapshotSpellContent(value) || isSnapshotCreatureContent(value) || isSnapshotFlatContent(value) || isSnapshotHierarchyContent(value) || isSnapshotFeatureContent(value); }
+function validSnapshotBlobPath(path: string, hash: string): boolean { return path === `blobs/${hash}.html` || /^sources\/[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?\/evidence\/[0-9a-f]{64}\.html$/.test(path) && path.endsWith(`/${hash}.html`); }
 function number(value: unknown): number { return Number(value ?? 0); }
 function iso(value: unknown): string { return value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString(); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message.slice(0, 4000) : "Publication failed."; }

@@ -23,8 +23,22 @@ test("package and operator/agent docs expose the same seed boundaries and comman
 
 test("approved plan enumerates every supported type and explicit exclusions", async () => {
   const plan = JSON.parse(await readFile("config/corpus-seed-2024.json", "utf8"));
-  assert.deepEqual(plan.slots.map((slot: { contentType: string }) => slot.contentType).sort(), ["background", "class", "creature", "equipment", "feat", "glossary", "item", "species", "spell"]);
+  assert.deepEqual(plan.slots.map((slot: { contentType: string }) => slot.contentType).sort(), ["background", "class", "creature", "equipment", "feat", "feature", "glossary", "item", "species", "spell"]);
   assert.ok(plan.slots.every((slot: { required: boolean }) => slot.required));
+  assert.ok(plan.slots.every((slot: { inputSlotId: string; dependsOn: string[] }) => slot.inputSlotId && Array.isArray(slot.dependsOn)));
+  assert.deepEqual(plan.slots.find((slot: { id: string }) => slot.id === "class").dependsOn, ["feature"]);
   assert.ok(plan.exclusions.length >= 5);
   assert.equal(plan.sourceRequirements.licenseApprovalRequired, true);
+  assert.ok(plan.sourceRequirements.allowedLicenseBases.length > 0);
+  assert.ok(plan.sourceRequirements.approvedBy.length > 0);
+});
+
+test("status counts bind current review, canonical revision, source file, and index generation", async () => {
+  const executor = await readFile("src/server/corpus-seed/executor.ts", "utf8");
+  assert.match(executor, /review\.canonical_revision_id/);
+  assert.match(executor, /indexed\.revision_id=active\."revisionId"/);
+  assert.match(executor, /indexed\.source_id=\$4 AND indexed\.file_id=candidate\.file_id/);
+  assert.match(executor, /sync\.repository_generation[\s\S]*sync\.status='succeeded'/);
+  assert.match(executor, /indexed\.repository_id=\$3/);
+  assert.doesNotMatch(executor, /publication_status = 'completed'\)::integer AS published/);
 });

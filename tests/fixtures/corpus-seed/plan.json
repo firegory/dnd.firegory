@@ -4,14 +4,17 @@
   "edition": "5.5e",
   "description": "Synthetic test-only glossary seed.",
   "slots": [
-    { "id": "glossary", "contentType": "glossary", "snapshotCategory": "glossary", "required": true }
+    { "id": "glossary", "contentType": "glossary", "snapshotCategory": "glossary", "inputSlotId": "glossary", "dependsOn": [], "required": true }
   ],
   "sourceRequirements": {
     "format": "next-dnd-snapshot-v2",
     "operatorSupplied": true,
     "licenseApprovalRequired": true,
     "attributionRequired": true,
-    "provenanceRequired": true
+    "provenanceRequired": true,
+    "allowedLicenseBases": ["cc0-1.0"],
+    "approvedBy": ["synthetic-fixture-reviewer"],
+    "evidenceSchemes": ["urn:"]
   },
   "exclusions": ["All non-synthetic content"]
 }

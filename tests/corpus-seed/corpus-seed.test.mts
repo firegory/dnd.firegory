@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -7,6 +7,9 @@ import test from "node:test";
 import { loadPreparedSeed } from "../../src/server/corpus-seed/executor.ts";
 import { prepareSeed, redact, validatePlan, writeManifestAtomic } from "../../src/server/corpus-seed/model.ts";
 import { installSeedSource } from "../../src/server/corpus-seed/source-installer.ts";
+import { reviewActionBatches, seedImportBatch } from "../../src/server/corpus-seed/batch.ts";
+import { seedCommandIncomplete } from "../../src/server/corpus-seed/status.ts";
+import { hierarchyDetailsFixture } from "../fixtures/character-options.mts";
 
 const fixture = resolve("tests/fixtures/corpus-seed");
 
@@ -15,7 +18,7 @@ test("synthetic approved input validates with provenance and stable digests", as
   assert.equal(prepared.slots[0].discovered, 1);
   assert.match(prepared.planDigest, /^[0-9a-f]{64}$/);
   assert.match(prepared.inputDigest, /^[0-9a-f]{64}$/);
-  assert.equal(prepared.slots[0].manifestDigest, "0899a8636745a274aa0da39782d27f5435dfcdfb425b053c6bfbb539d6e9a024");
+  assert.equal(prepared.slots[0].manifestDigest, "f6b2708b17effd1b29117bd646d0320736bef96421ecae8a7e21eab1ecf78f22");
 });
 
 test("input and source digest changes are observable", async () => {
@@ -87,8 +90,7 @@ test("worker source installation is immutable, retryable, and publication-ready"
   const dataRoot = await mkdtemp(join(tmpdir(), "corpus-seed-source-"));
   await cp("content-repository", dataRoot, { recursive: true });
   const fileId = "10000000-0000-4000-8000-000000000009";
-  await installSeedSource(prepared.slots[0], fileId, dataRoot);
-  await installSeedSource(prepared.slots[0], fileId, dataRoot);
+  await Promise.all(Array.from({ length: 4 }, () => installSeedSource(prepared.slots[0], fileId, dataRoot)));
   const source = JSON.parse(await readFile(join(dataRoot, "sources/synthetic-glossary-2024/source.json"), "utf8"));
   assert.equal(source.files[0].contentHash, `sha256:${prepared.slots[0].manifestDigest}`);
   assert.equal(source.files[0].mediaType, "application/vnd.dnd-firegory.snapshot+json");
@@ -118,6 +120,71 @@ test("generic redaction removes nested credentials without dropping provenance",
   });
 });
 
+test("review actions honor the API maximum for more than 200 candidates", () => {
+  const candidates = Array.from({ length: 451 }, (_, index) => ({ id: `candidate-${index}`, activeRevisionToken: index % 2 ? null : `rev-${"a".repeat(64)}` }));
+  const batches = reviewActionBatches(candidates);
+  assert.deepEqual(batches.map(({ candidateIds }) => candidateIds.length), [200, 200, 51]);
+  assert.deepEqual(batches.flatMap(({ candidateIds }) => candidateIds), candidates.map(({ id }) => id));
+  assert.ok(batches.every(({ candidateIds, activeRevisionTokens }) => Object.keys(activeRevisionTokens).length === candidateIds.length));
+});
+
+test("class snapshots produce separate feature candidates before dependent classes", () => {
+  const detail = hierarchyDetailsFixture()[0];
+  const manifest = { schemaVersion: 2, parserVersion: "next-dnd-2024-v3", status: "complete", collectedAt: detail.fetchedAt,
+    robots: { userAgent: "fixture", snapshot: {} as never, rules: [], evaluations: [] },
+    categories: [{ requestedCategory: "class", discoveredCategory: "class", entryCount: 1, index: {} as never, details: [detail] }], parserFailures: [], diagnostics: [] };
+  const common = { input: {} as never, manifest, manifestBytes: Buffer.alloc(0), manifestDigest: "a".repeat(64), manifestByteLength: 0,
+    inputManifestDigest: "b".repeat(64), evidenceFiles: [], inputDigest: "c".repeat(64), discovered: 1 };
+  const features = seedImportBatch({ ...common, planSlot: { id: "feature", contentType: "feature", snapshotCategory: "class", inputSlotId: "class", dependsOn: [], required: true } } as never);
+  const classes = seedImportBatch({ ...common, planSlot: { id: "class", contentType: "class", snapshotCategory: "class", inputSlotId: "class", dependsOn: ["feature"], required: true } } as never);
+  assert.equal(features.candidates.length, 2);
+  assert.ok(features.candidates.every(({ entryType, content }) => entryType === "feature" && content.kind === "snapshotFeatureCandidate"));
+  assert.deepEqual(features.occurrences.map(({ occurrenceIndex }) => occurrenceIndex), [0, 1]);
+  assert.equal(classes.candidates.length, 1);
+  assert.equal(classes.candidates[0].entryType, "class");
+});
+
+test("status fails closed for absent, pending, partial, stale publication, and stale index counts", () => {
+  const result = (operation: "absent" | "pending" | "noop", counts: Partial<ReturnType<typeof baseCounts>> = {}) => ({
+    slotId: "class", contentType: "class", sourceId: null, importRunId: null, operation,
+    counts: { ...baseCounts(), ...counts }, failures: [], provenance: { canonicalSourceId: "source", originUrl: "https://next.dnd.su/class/", originId: "id", attribution: "test", license: "test", evidenceReference: "urn:test" },
+  });
+  assert.equal(seedCommandIncomplete("status", [result("absent")]), true);
+  assert.equal(seedCommandIncomplete("status", [result("pending")]), true);
+  for (const field of ["imported", "reviewed", "published", "indexed"] as const) assert.equal(seedCommandIncomplete("status", [result("noop", { [field]: 0 })]), true);
+  assert.equal(seedCommandIncomplete("status", [result("noop")]), false);
+});
+
+test("snapshot roots and blob evidence reject symbolic links", async () => {
+  const root = await mkdtemp(join(tmpdir(), "corpus-seed-links-"));
+  await cp(fixture, join(root, "actual"), { recursive: true });
+  await symlink(join(root, "actual"), join(root, "linked"));
+  const linkedInputs = JSON.parse(await readFile(join(root, "actual/inputs.json"), "utf8"));
+  linkedInputs.slots[0].snapshotRoot = "../linked";
+  linkedInputs.slots[0].manifestPath = "../linked/manifest.json";
+  await writeFile(join(root, "actual/inputs.json"), JSON.stringify(linkedInputs));
+  await assert.rejects(prepareSeed(join(root, "actual/plan.json"), join(root, "actual/inputs.json")), /symbolic link|aliases|escapes/);
+
+  const copied = join(root, "copied"); await cp(fixture, copied, { recursive: true });
+  const manifest = JSON.parse(await readFile(join(copied, "manifest.json"), "utf8"));
+  const blob = join(copied, manifest.categories[0].details[0].blobPath);
+  const external = join(root, "external.html"); await writeFile(external, await readFile(blob)); await unlink(blob); await symlink(external, blob);
+  await assert.rejects(prepareSeed(join(copied, "plan.json"), join(copied, "inputs.json")), /symbolic link/);
+});
+
+test("approval policy and redaction fail closed on adversarial values", async () => {
+  const root = await mkdtemp(join(tmpdir(), "corpus-seed-approval-")); await cp(fixture, root, { recursive: true });
+  const inputs = JSON.parse(await readFile(join(root, "inputs.json"), "utf8"));
+  inputs.slots[0].source.licenseApproval.approvedAt = "2999-01-01T00:00:00.000Z";
+  await writeFile(join(root, "inputs.json"), JSON.stringify(inputs));
+  await assert.rejects(prepareSeed(join(root, "plan.json"), join(root, "inputs.json")), /future/);
+  const redacted = redact({ Api_Key: "secret", clientSecretValue: "secret", message: "Basic dXNlcjpwYXNz eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature ghp_abcdefghijklmnop https://user:pass@example.test/path?access_token=secret&safe=yes" }) as Record<string, unknown>;
+  assert.equal(redacted.Api_Key, "[REDACTED]"); assert.equal(redacted.clientSecretValue, "[REDACTED]");
+  assert.doesNotMatch(String(redacted.message), /dXNlc|eyJ|ghp_|user:pass|access_token=secret/);
+});
+
+function baseCounts() { return { discovered: 1, imported: 1, reviewed: 1, published: 1, indexed: 1, failures: 0 }; }
+
 function fakeDependencies() {
   const state = { completed: false, failed: false, diffCalls: 0, publicationCalls: 0 };
   const sourceRow = {
@@ -125,7 +192,7 @@ function fakeDependencies() {
     access_tier: "open", publication_code: "SYN-2024", publisher: "Test Fixture Authors", release_year: 2024,
     publication_revision: "synthetic-v1", external_origin_url: "https://next.dnd.su/glossary/", external_origin_id: "synthetic-fixture",
     attribution: "Synthetic fixture authored for this repository.", canonical_book_id: "synthetic-glossary", license: "CC0-1.0 synthetic fixture",
-    metadata: { corpusSeed: { slotId: "glossary", licenseApproval: { approvedBy: "test-suite", approvedAt: "2026-08-08T00:00:00.000Z", evidenceReference: "repository:test-fixture" } } },
+    metadata: { corpusSeed: { inputSlotId: "glossary", licenseApproval: { basis: "cc0-1.0", approvedBy: "synthetic-fixture-reviewer", approvedAt: "2026-08-08T00:00:00.000Z", evidenceUri: "urn:dnd-firegory:synthetic-fixture", evidenceSha256: "0899a8636745a274aa0da39782d27f5435dfcdfb425b053c6bfbb539d6e9a024" } } },
   };
   const run = { id: "10000000-0000-4000-8000-000000000003", sourceId: sourceRow.id, fileId: "10000000-0000-4000-8000-000000000002", generationId: null, status: "pending" as "pending" | "failed" | "succeeded", checkpoint: "created" as "created" | "diffed" | "completed" };
   const lease = "10000000-0000-4000-8000-000000000004";

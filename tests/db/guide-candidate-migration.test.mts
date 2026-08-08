@@ -14,7 +14,7 @@ test("guide review candidates use a registered additive enum migration", () => {
 });
 
 test("merged registry orders editor through trigger and exact-lookup fixes", () => {
-  assert.deepEqual(MIGRATION_FILENAMES.slice(-8), [
+  assert.deepEqual(MIGRATION_FILENAMES.slice(-9), [
     "0014_compendium_entry_editor.sql",
     "0015_spells_vertical_slice.sql",
     "0016_compendium_guide_candidate_type.sql",
@@ -23,6 +23,7 @@ test("merged registry orders editor through trigger and exact-lookup fixes", () 
     "0019_class_species_hierarchy.sql",
     "0020_active_revision_trigger_fix.sql",
     "0021_nfs_exact_lookup_indexes.sql",
+    "0022_import_review_canonical_revision.sql",
   ]);
   assert.deepEqual(MIGRATION_FILENAMES, [...MIGRATION_FILENAMES].sort());
 });

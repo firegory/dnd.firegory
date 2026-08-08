@@ -786,7 +786,7 @@ function validateRawOccurrenceEvidence(input: ImportOccurrenceInput): void {
   const path = input.rawBlobPath ?? null;
   const fetchedAt = input.sourceFetchedAt ?? null;
   if ((path === null) !== (fetchedAt === null)) throw new CompendiumValidationError("rawBlobPath and sourceFetchedAt must be supplied together.");
-  if (path !== null && path !== `blobs/${input.fingerprintSha256}.html`) throw new CompendiumValidationError("rawBlobPath must match the occurrence fingerprint.");
+  if (path !== null && !validRawEvidencePath(path, input.fingerprintSha256)) throw new CompendiumValidationError("rawBlobPath must match the occurrence fingerprint in cache or canonical evidence.");
   if (fetchedAt !== null && (!Number.isFinite(Date.parse(fetchedAt)) || new Date(fetchedAt).toISOString() !== fetchedAt)) {
     throw new CompendiumValidationError("sourceFetchedAt must be a canonical date-time.");
   }
@@ -800,7 +800,7 @@ function validateRawOccurrenceEvidence(input: ImportOccurrenceInput): void {
     requireHash(input.indexCardFingerprintSha256!, "indexCardFingerprintSha256");
     requireText(input.indexLocator!, "indexLocator");
     requireText(input.metadataEvidenceText!, "metadataEvidenceText");
-    if (input.rawIndexBlobPath !== `blobs/${input.indexFingerprintSha256}.html`) {
+    if (!validRawEvidencePath(input.rawIndexBlobPath!, input.indexFingerprintSha256)) {
       throw new CompendiumValidationError("rawIndexBlobPath must match the index fingerprint.");
     }
     if (!Number.isFinite(Date.parse(input.indexSourceFetchedAt!)) || new Date(input.indexSourceFetchedAt!).toISOString() !== input.indexSourceFetchedAt) {
@@ -808,6 +808,7 @@ function validateRawOccurrenceEvidence(input: ImportOccurrenceInput): void {
     }
   }
 }
+function validRawEvidencePath(path: string, hash: string): boolean { return path === `blobs/${hash}.html` || /^sources\/[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?\/evidence\/[0-9a-f]{64}\.html$/.test(path) && path.endsWith(`/${hash}.html`); }
 
 function sha256Json(value: unknown): string { return createHash("sha256").update(canonicalJson(value)).digest("hex"); }
 function candidateIdentity(type: ImportCandidateEntryType, key: string): string { return `${type}:${key}`; }

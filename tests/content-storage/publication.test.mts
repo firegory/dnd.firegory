@@ -852,7 +852,7 @@ test("publication processor records review outcomes as worker-owned state", asyn
     recordOutcome: async (...args) => { outcomes.push(args); },
     queue: actions.queue,
   }), "completed");
-  assert.deepEqual(outcomes, [["review-worker-outcome", "completed", null]]);
+  assert.deepEqual(outcomes, [["review-worker-outcome", "completed", null, revision.revisionId]]);
 });
 
 test("unpublication is worker-only, idempotent, and preserves the active entry before activation", async (t) => {

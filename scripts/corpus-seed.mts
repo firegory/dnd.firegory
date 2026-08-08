@@ -6,6 +6,7 @@ import { parseArgs } from "node:util";
 import { getPool } from "../src/server/db/client.ts";
 import { inspectPreparedSeed, loadPreparedSeed, type SeedSlotResult } from "../src/server/corpus-seed/executor.ts";
 import { canonicalJson, prepareSeed, sha256, validatePlan, writeManifestAtomic } from "../src/server/corpus-seed/model.ts";
+import { seedCommandIncomplete } from "../src/server/corpus-seed/status.ts";
 
 const usage = `Usage:
   npm run corpus-seed -- validate --inputs <operator-inputs.json> --manifest <run-manifest.json>
@@ -16,7 +17,7 @@ validate is filesystem-only. load and status require DATABASE_URL and applied mi
 load creates review candidates only; it never reviews or publishes them.`;
 
 const manifestArgument = argumentValue("--manifest");
-const approvedTypes = ["background", "class", "creature", "equipment", "feat", "glossary", "item", "species", "spell"];
+const approvedTypes = ["background", "class", "creature", "equipment", "feat", "feature", "glossary", "item", "species", "spell"].sort();
 const startedAt = new Date().toISOString();
 let manifestPath = manifestArgument ? resolve(manifestArgument) : null;
 let command = process.argv[2] ?? null;
@@ -77,7 +78,7 @@ try {
       originId: slot.input.source.originId,
       attribution: slot.input.source.attribution,
       license: slot.input.source.license,
-      evidenceReference: slot.input.source.licenseApproval.evidenceReference,
+      evidenceReference: slot.input.source.licenseApproval.evidenceUri,
     },
   }));
   if (command === "load") {
@@ -86,11 +87,14 @@ try {
     databaseUsed = true;
     results = await loadPreparedSeed(prepared, { dataRoot: process.env.DND_DATA_ROOT });
   }
-  else if (command === "status") { databaseUsed = true; results = await inspectPreparedSeed(prepared, getPool()); }
-  const failed = results.some(({ operation }) => operation === "failed");
-  await emitManifest(failed ? "failed" : "succeeded", failed ? "One or more seed slots failed and remain retryable." : null);
-  console.log(JSON.stringify({ status: failed ? "failed" : "succeeded", manifest: manifestPath, planDigest, inputDigest, slots: results.length }, null, 2));
-  if (failed) process.exitCode = 2;
+  else if (command === "status") {
+    if (!process.env.DND_DATA_ROOT) throw new Error("status requires DND_DATA_ROOT to verify installed canonical evidence.");
+    databaseUsed = true; results = await inspectPreparedSeed(prepared, getPool(), process.env.DND_DATA_ROOT);
+  }
+  const incomplete = seedCommandIncomplete(command, results);
+  await emitManifest(incomplete ? "failed" : "succeeded", incomplete ? "One or more required seed slots are absent, pending, failed, partial, or missing evidence." : null);
+  console.log(JSON.stringify({ status: incomplete ? "failed" : "succeeded", manifest: manifestPath, planDigest, inputDigest, slots: results.length }, null, 2));
+  if (incomplete) process.exitCode = 2;
 } catch (error) {
   const message = safeError(error);
   if (manifestPath) {

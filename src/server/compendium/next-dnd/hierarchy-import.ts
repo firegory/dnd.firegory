@@ -22,6 +22,15 @@ export type SnapshotHierarchyCandidate = Readonly<{
   extraction: Readonly<{ status: "ready"; missingFields: readonly [] }>;
 }>;
 
+export type SnapshotFeatureCandidate = Readonly<{
+  schemaVersion: 1; kind: "snapshotFeatureCandidate"; entryType: "feature"; externalId: string; canonicalId: string;
+  classCandidateKey: string; sourceUrl: string; sha256: string; parserVersion: string; title: string; aliases: readonly string[];
+  body: string; attributes: Readonly<{ level: number; featureKind: "class"; anchor: string }>;
+  sourceVersion: SnapshotHierarchyCandidate["sourceVersion"];
+  citations: readonly Readonly<{ fieldPath: string; quote: string; sourceUrl: string }>[];
+  extraction: Readonly<{ status: "ready"; missingFields: readonly [] }>;
+}>;
+
 /** Deterministically maps collector metadata; no HTML or inferred rules enter review. */
 export function hierarchyCandidate(detail: SnapshotDetail): SnapshotHierarchyCandidate {
   if (detail.category !== "class" && detail.category !== "species") throw new Error("Hierarchy projection only accepts class and species details.");
@@ -46,6 +55,27 @@ export function hierarchyCandidate(detail: SnapshotDetail): SnapshotHierarchyCan
 
 export function hierarchyMetadataEvidence(attributes: ClassProjection | SpeciesProjection): string {
   return ["window.LIST hierarchy metadata", ...Object.entries(attributes).map(([key, value]) => `${key}=${JSON.stringify(value)}`)].join("\n");
+}
+
+export function featureCandidates(detail: SnapshotDetail): readonly SnapshotFeatureCandidate[] {
+  if (detail.category !== "class") throw new Error("Feature projection requires a class detail.");
+  const hierarchy = hierarchyCandidate(detail);
+  const attributes = hierarchy.attributes as ClassProjection;
+  return attributes.features.map((feature) => {
+    const externalId = feature.canonicalId.slice("feature-".length);
+    const typed = { level: feature.level, featureKind: "class" as const, anchor: feature.anchor };
+    return {
+      schemaVersion: 1, kind: "snapshotFeatureCandidate", entryType: "feature", externalId, canonicalId: feature.canonicalId,
+      classCandidateKey: collectorCanonicalEntryId("class", detail.externalId), sourceUrl: detail.sourceUrl, sha256: detail.sha256,
+      parserVersion: detail.parserVersion, title: feature.title, aliases: [], body: feature.body, attributes: typed,
+      sourceVersion: hierarchy.sourceVersion,
+      citations: [
+        { fieldPath: "$.title", quote: feature.title, sourceUrl: detail.indexSource.url },
+        { fieldPath: "$.body", quote: feature.body, sourceUrl: detail.indexSource.url },
+        ...Object.entries(typed).map(([key, value]) => ({ fieldPath: `$.attributes.${key}`, quote: JSON.stringify(value), sourceUrl: detail.indexSource.url })),
+      ], extraction: { status: "ready", missingFields: [] },
+    };
+  });
 }
 
 function classAttributes(metadata: Readonly<Record<string, unknown>>): ClassProjection {
