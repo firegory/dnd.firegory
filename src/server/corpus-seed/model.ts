@@ -11,6 +11,7 @@ import { featureCandidates } from "../compendium/next-dnd/hierarchy-import.ts";
 export const SEED_SCHEMA_VERSION = 1;
 const HASH = /^[0-9a-f]{64}$/;
 const SLOT_ID = /^[a-z][a-z0-9-]{0,62}$/;
+const SOURCE_ID = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
 const CONTENT_TYPES: ReadonlySet<string> = new Set([...Object.values(NEXT_DND_CATEGORIES).map(({ entryType }) => entryType), "feature"]);
 const LICENSE_BASES = new Set(["cc-by-4.0", "cc0-1.0", "operator-permission"]);
 
@@ -156,7 +157,7 @@ export function validateInputs(value: unknown, plan: SeedPlan, now = new Date())
     const source = record(slot.source, `Input slot ${slot.slotId} source must be an object.`);
     exactKeys(source, ["canonicalSourceId", "title", "language", "category", "accessTier", "publicationCode", "publisher", "revision", "canonicalBookId", "originUrl", "originId", "attribution", "license", "licenseApproval"], `input slot ${slot.slotId} source`);
     for (const field of ["canonicalSourceId", "title", "publicationCode", "publisher", "revision", "canonicalBookId", "originUrl", "originId", "attribution", "license"] as const) text(source[field], field);
-    if (!SLOT_ID.test(source.canonicalSourceId as string) || !SLOT_ID.test(source.canonicalBookId as string)) throw new Error(`Input slot ${slot.slotId} canonical source identifiers are invalid.`);
+    if (!SOURCE_ID.test(source.canonicalSourceId as string) || !SOURCE_ID.test(source.canonicalBookId as string)) throw new Error(`Input slot ${slot.slotId} canonical source identifiers are invalid.`);
     if (!['en', 'ru'].includes(source.language as string) || !['core_rules', 'official_supplement'].includes(source.category as string) || source.accessTier !== 'open') throw new Error(`Input slot ${slot.slotId} source corpus fields are unapproved.`);
     const origin = new URL(source.originUrl as string);
     if (origin.href !== source.originUrl || origin.protocol !== "https:" || origin.username || origin.password || origin.search || origin.hash) throw new Error(`Input slot ${slot.slotId} originUrl must be canonical credential-free HTTPS without query or fragment.`);
