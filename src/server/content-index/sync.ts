@@ -307,7 +307,7 @@ async function applySnapshot(
     if (!affectedFiles.has(entries[0].fileUuid)) continue;
     const binding = await resolveNfsManagedSourceAndFile(client, repositoryId, entries[0]);
     desiredBoundFileIds.add(binding.fileId);
-    await activateManagedGeneration(client, entries[0], binding);
+    await activateManagedGeneration(client, repositoryId, entries[0], binding);
     await upsertFileIndexRows(client, repositoryId, entries, binding);
   }
 
@@ -385,7 +385,7 @@ export async function resolveNfsManagedSourceAndFile(
 
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended('nfs-canonical-file:' || $1, 0))", [entry.file.fileId]);
   const fileResult = await client.query<Record<string, unknown> & QueryResultRow>(
-    `SELECT f.*, mapping.repository_id AS mapping_repository_id, mapping.owns_file, mapping.previous_active_generation_id
+    `SELECT f.*, mapping.repository_id AS mapping_repository_id, mapping.owns_file, mapping.previous_active_generation_id, mapping.last_nfs_generation_id
      FROM files f LEFT JOIN nfs_index_managed_files mapping ON mapping.file_id = f.id
      WHERE f.id::text = $1 FOR UPDATE OF f`, [entry.file.fileId],
   );
@@ -415,11 +415,12 @@ export async function resolveNfsManagedSourceAndFile(
     previousActiveGenerationId = null;
   }
   await client.query(
-    `INSERT INTO nfs_index_managed_files (file_id, source_id, repository_id, canonical_file_id, owns_file, previous_active_generation_id)
-     VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (file_id) DO UPDATE SET
+    `INSERT INTO nfs_index_managed_files (file_id, source_id, repository_id, canonical_file_id, owns_file, previous_active_generation_id, last_nfs_generation_id)
+     VALUES ($1,$2,$3,$4,$5,$6,NULL) ON CONFLICT (file_id) DO UPDATE SET
        source_id=EXCLUDED.source_id, repository_id=EXCLUDED.repository_id,
        canonical_file_id=EXCLUDED.canonical_file_id, owns_file=nfs_index_managed_files.owns_file,
-       previous_active_generation_id=nfs_index_managed_files.previous_active_generation_id
+       previous_active_generation_id=nfs_index_managed_files.previous_active_generation_id,
+       last_nfs_generation_id=nfs_index_managed_files.last_nfs_generation_id
      WHERE nfs_index_managed_files.repository_id=EXCLUDED.repository_id`,
     [fileId, sourceId, repositoryId, entry.file.fileId, ownsFile, previousActiveGenerationId],
   );
@@ -428,12 +429,12 @@ export async function resolveNfsManagedSourceAndFile(
 
 type RemovedFileState = QueryResultRow & Readonly<{
   source_id: string; active_generation_id: string | null; owns_file: boolean;
-  previous_active_generation_id: string | null; nfs_generation_ids: string[];
+  previous_active_generation_id: string | null; last_nfs_generation_id: string | null; nfs_generation_ids: string[];
 }>;
 
 export async function cleanupRemovedNfsFile(client: Queryable, repositoryId: string, fileId: string): Promise<void> {
   const state = await client.query<RemovedFileState>(
-    `SELECT file.source_id, file.active_generation_id, mapping.owns_file, mapping.previous_active_generation_id,
+    `SELECT file.source_id, file.active_generation_id, mapping.owns_file, mapping.previous_active_generation_id, mapping.last_nfs_generation_id,
        ARRAY(SELECT DISTINCT owned.generation_id FROM (
          SELECT entry.generation_id FROM nfs_index_entries entry
            WHERE entry.file_id = mapping.file_id AND entry.repository_id = mapping.repository_id
@@ -450,11 +451,13 @@ export async function cleanupRemovedNfsFile(client: Queryable, repositoryId: str
   );
   const row = state.rows[0];
   if (!row) return;
-  const nfsGenerationIds = row.nfs_generation_ids.map(String);
+  const lastNfsId = row.last_nfs_generation_id == null ? null : String(row.last_nfs_generation_id);
+  const nfsGenerationIds = [...new Set([...row.nfs_generation_ids.map(String), ...(lastNfsId === null ? [] : [lastNfsId])])];
   const activeId = row.active_generation_id == null ? null : String(row.active_generation_id);
   const previousId = row.previous_active_generation_id == null ? null : String(row.previous_active_generation_id);
-  const activeIsNfs = activeId !== null && nfsGenerationIds.includes(activeId);
-  if (!row.owns_file && nfsGenerationIds.length > 0 && !activeIsNfs) throw new Error(`Reused file ${fileId} active generation changed outside NFS synchronization.`);
+  const activeIsNfs = activeId !== null && activeId === lastNfsId;
+  if (!row.owns_file && lastNfsId !== null && !activeIsNfs) throw new Error(`Reused file ${fileId} active generation changed outside NFS synchronization.`);
+  if (!row.owns_file && lastNfsId === null && nfsGenerationIds.length > 0) throw new Error(`Reused file ${fileId} has untracked NFS generations.`);
   if (!row.owns_file && nfsGenerationIds.length === 0 && activeId !== previousId) throw new Error(`Reused file ${fileId} active generation changed after NFS cleanup.`);
 
   if (row.owns_file) {
@@ -511,7 +514,59 @@ function validateReusableFile(row: Record<string, unknown>, sourceId: string, en
   if (Number(row.byte_size) !== entry.file.byteSize) throw new Error(`Canonical file ${entry.file.fileId} conflicts on byte_size; refusing to reuse incompatible file content.`);
 }
 
-async function activateManagedGeneration(client: Queryable, entry: IndexedEntryProjection, binding: NfsManagedBinding): Promise<void> {
+type ActivationState = QueryResultRow & Readonly<{
+  active_generation_id: string | null; owns_file: boolean;
+  previous_active_generation_id: string | null; last_nfs_generation_id: string | null;
+}>;
+
+export async function activateManagedGeneration(
+  client: Queryable,
+  repositoryId: string,
+  entry: IndexedEntryProjection,
+  binding: NfsManagedBinding,
+): Promise<void> {
+  const state = await client.query<ActivationState>(
+    `SELECT file.active_generation_id, mapping.owns_file, mapping.previous_active_generation_id, mapping.last_nfs_generation_id
+     FROM nfs_index_managed_files mapping JOIN files file ON file.id = mapping.file_id
+     WHERE mapping.file_id=$1 AND mapping.repository_id=$2 FOR UPDATE OF file, mapping`,
+    [binding.fileId, repositoryId],
+  );
+  const row = state.rows[0];
+  if (!row) throw new Error(`Managed file ${binding.fileId} mapping disappeared before activation.`);
+  if (!row.owns_file) {
+    const activeId = row.active_generation_id == null ? null : String(row.active_generation_id);
+    const previousId = row.previous_active_generation_id == null ? null : String(row.previous_active_generation_id);
+    const lastNfsId = row.last_nfs_generation_id == null ? null : String(row.last_nfs_generation_id);
+    const expectedActiveId = lastNfsId ?? previousId;
+    if (activeId !== expectedActiveId) throw new Error(`Reused file ${binding.fileId} active generation changed outside NFS synchronization.`);
+    await client.query(
+      `INSERT INTO ingestion_generations (id, source_id, file_id, status)
+       VALUES ($1,$2,$3,'staged') ON CONFLICT (id) DO NOTHING`,
+      [entry.generationId, binding.sourceId, binding.fileId],
+    );
+    const claimed = await client.query(
+      `UPDATE nfs_index_managed_files SET last_nfs_generation_id=$3
+       WHERE file_id=$1 AND repository_id=$2 AND last_nfs_generation_id IS NOT DISTINCT FROM $4 RETURNING file_id`,
+      [binding.fileId, repositoryId, entry.generationId, lastNfsId],
+    );
+    if (claimed.rowCount !== 1) throw new Error(`Reused file ${binding.fileId} NFS generation claim changed concurrently.`);
+    await client.query(
+      `UPDATE ingestion_generations SET status='archived', archived_at=now()
+       WHERE file_id=$1 AND status='active' AND id<>$2`,
+      [binding.fileId, entry.generationId],
+    );
+    await client.query(
+      `UPDATE ingestion_generations SET status='active', activated_at=coalesce(activated_at,now()), archived_at=NULL
+       WHERE id=$1 AND source_id=$2 AND file_id=$3`,
+      [entry.generationId, binding.sourceId, binding.fileId],
+    );
+    const activated = await client.query(
+      "UPDATE files SET active_generation_id=$3, deleted_at=NULL WHERE id=$1 AND active_generation_id IS NOT DISTINCT FROM $2 RETURNING id",
+      [binding.fileId, activeId, entry.generationId],
+    );
+    if (activated.rowCount !== 1) throw new Error(`Reused file ${binding.fileId} active generation changed during NFS activation.`);
+    return;
+  }
   await client.query(
     `UPDATE ingestion_generations SET status='archived', archived_at=now()
      WHERE file_id=$1 AND status='active' AND id<>$2`,
