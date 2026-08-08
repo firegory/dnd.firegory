@@ -188,12 +188,12 @@ const LEGACY_REVISION_ID = "61000000-0000-4000-8000-000000000099";
 const LEGACY_FILE_ID = "30000000-0000-4000-8000-000000000099";
 
 async function seedPre0014Compendium(client: import("pg").PoolClient): Promise<void> {
-  await client.query("BEGIN");
+  // 0007's function cannot resolve its table-specific NEW fields. Disable only
+  // those two fixture triggers while committing otherwise constraint-valid data.
+  await client.query("ALTER TABLE compendium_versions DISABLE TRIGGER compendium_versions_active_revision_valid");
+  await client.query("ALTER TABLE compendium_revisions DISABLE TRIGGER compendium_revisions_active_revision_valid");
   try {
-    // 0007's function cannot resolve its table-specific NEW fields. Disable only
-    // those two fixture triggers while committing otherwise constraint-valid data.
-    await client.query("ALTER TABLE compendium_versions DISABLE TRIGGER compendium_versions_active_revision_valid");
-    await client.query("ALTER TABLE compendium_revisions DISABLE TRIGGER compendium_revisions_active_revision_valid");
+    await client.query("BEGIN");
     await client.query(
       `INSERT INTO files(id,source_id,original_filename,mime_type,checksum_sha256,byte_size,storage_path)
        VALUES ($1,$2,'legacy.pdf','application/pdf',$3,128,'/tmp/legacy.pdf')`,
@@ -223,12 +223,13 @@ async function seedPre0014Compendium(client: import("pg").PoolClient): Promise<v
        VALUES ($1,$2,'spell','5e','en','slug','legacy-spell')`,
       [LEGACY_VERSION_ID, LEGACY_ENTRY_ID],
     );
-    await client.query("ALTER TABLE compendium_versions ENABLE TRIGGER compendium_versions_active_revision_valid");
-    await client.query("ALTER TABLE compendium_revisions ENABLE TRIGGER compendium_revisions_active_revision_valid");
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
+  } finally {
+    await client.query("ALTER TABLE compendium_versions ENABLE TRIGGER compendium_versions_active_revision_valid");
+    await client.query("ALTER TABLE compendium_revisions ENABLE TRIGGER compendium_revisions_active_revision_valid");
   }
 }
 
