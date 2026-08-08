@@ -1,7 +1,7 @@
 import type { QueryResultRow } from "pg";
 
 import { withTransaction } from "../db/client.ts";
-import { CompendiumImportRunService } from "../compendium/import-runs.ts";
+import { CompendiumImportRunService, IMPORT_CANDIDATE_ENTRY_TYPES, type ImportCandidateEntryType } from "../compendium/import-runs.ts";
 import { loadResolvedRepositoryManifest } from "../content-storage/validation.ts";
 import { installSeedSource, verifySeedSource } from "./source-installer.ts";
 import { seedImportBatch } from "./batch.ts";
@@ -58,6 +58,7 @@ export async function loadPreparedSeed(prepared: PreparedSeed, dependencies: See
         promptVersion: "none",
         modelVersion: "none",
         inputSha256: slot.inputDigest,
+        allowedReviewEntryTypes: seedReviewEntryTypes(slot),
         actor: "corpus-seed-cli",
       });
       if (run.id !== slot.identities.runId) throw new Error(`Seed import run identity for slot ${slot.planSlot.id} is not deterministic.`);
@@ -84,6 +85,13 @@ export async function loadPreparedSeed(prepared: PreparedSeed, dependencies: See
     }
   }
   return results;
+}
+
+function seedReviewEntryTypes(slot: PreparedSeedSlot): readonly ImportCandidateEntryType[] {
+  const entryType = slot.planSlot.contentType;
+  if (!IMPORT_CANDIDATE_ENTRY_TYPES.includes(entryType as ImportCandidateEntryType)) throw new Error(`Seed slot ${slot.planSlot.id} has no supported review entry-type scope.`);
+  // Subclasses and species variants retain their canonical class/species candidate entry type.
+  return [entryType as ImportCandidateEntryType];
 }
 
 export async function inspectPreparedSeed(prepared: PreparedSeed, db: Db, dataRoot: string, verifier = verifySeedSource): Promise<readonly SeedSlotResult[]> {

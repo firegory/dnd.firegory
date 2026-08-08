@@ -23,6 +23,7 @@ type RunRow = Readonly<{
   status: ImportRunStatus;
   checkpoint: "created" | "occurrences" | "diffed" | "completed";
   lease_token: string | null;
+  allowed_review_entry_types: ImportCandidateEntryType[] | null;
 }>;
 
 export type ImportRun = Readonly<{
@@ -46,6 +47,7 @@ export type CreateImportRunInput = Readonly<{
   promptVersion: string;
   modelVersion: string;
   inputSha256: string;
+  allowedReviewEntryTypes?: readonly ImportCandidateEntryType[] | null;
   actor: string;
 }>;
 
@@ -169,24 +171,25 @@ export class CompendiumImportRunService {
         if (!job) throw new CompendiumValidationError("The ingestion job is outside the requested source boundary.");
       }
 
+      const allowedReviewEntryTypes = input.allowedReviewEntryTypes ? [...input.allowedReviewEntryTypes] : null;
       const values = [
         input.sourceId, input.fileId, input.generationId ?? null, normalizedJobId,
         input.importer.trim(), input.importerVersion.trim(), input.parserVersion.trim(),
-        input.promptVersion.trim(), input.modelVersion.trim(), input.inputSha256, input.id ?? null, input.actor.trim(),
+        input.promptVersion.trim(), input.modelVersion.trim(), input.inputSha256, input.id ?? null, allowedReviewEntryTypes,
       ];
       const inserted = await client.query<RunRow>(
         `INSERT INTO compendium_import_runs
            (id, source_id, file_id, generation_id, ingestion_job_id, importer, importer_version,
-             parser_version, prompt_version, model_version, input_sha256)
-          VALUES (coalesce($11::uuid, gen_random_uuid()),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+              parser_version, prompt_version, model_version, input_sha256, allowed_review_entry_types)
+          VALUES (coalesce($11::uuid, gen_random_uuid()),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$12::compendium_entry_type[])
          ON CONFLICT DO NOTHING
-         RETURNING id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token`,
-        values.slice(0, 11),
+         RETURNING id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token, allowed_review_entry_types`,
+        values,
       );
       let row = inserted.rows[0];
       if (!row) {
         row = (await client.query<RunRow>(
-          `SELECT id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token
+          `SELECT id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token, allowed_review_entry_types
            FROM compendium_import_runs
             WHERE source_id = $1 AND file_id = $2 AND generation_id IS NOT DISTINCT FROM $3
               AND ($3::uuid IS NOT NULL OR ingestion_job_id IS NOT DISTINCT FROM $4)
@@ -196,6 +199,7 @@ export class CompendiumImportRunService {
         )).rows[0];
       }
       if (!row) throw new CompendiumValidationError("The file, generation, or ingestion job is outside the requested source boundary.");
+      if (!sameReviewScope(row.allowed_review_entry_types ?? null, allowedReviewEntryTypes)) throw new CompendiumValidationError("The existing import run has a different allowed review entry-type scope.");
       if (inserted.rows[0]) {
         await client.query(
           `INSERT INTO compendium_import_audit (import_run_id, event_type, to_status, actor, details)
@@ -219,7 +223,7 @@ export class CompendiumImportRunService {
     }
     return this.transaction(async (client) => {
       const current = requiredRow((await client.query<RunRow & { lease_active: boolean }>(
-        `SELECT id, source_id, file_id, generation_id, status, checkpoint, lease_token,
+        `SELECT id, source_id, file_id, generation_id, status, checkpoint, lease_token, allowed_review_entry_types,
                 coalesce(lease_expires_at > now(), false) AS lease_active
          FROM compendium_import_runs WHERE id = $1 FOR UPDATE`,
         [runId],
@@ -234,7 +238,7 @@ export class CompendiumImportRunService {
              lease_token = gen_random_uuid(), lease_expires_at = now() + $2 * interval '1 millisecond',
              heartbeat_at = now()
          WHERE id = $1
-         RETURNING id, source_id, file_id, generation_id, status, checkpoint, lease_token`,
+         RETURNING id, source_id, file_id, generation_id, status, checkpoint, lease_token, allowed_review_entry_types`,
         [runId, leaseMilliseconds],
       )).rows[0], "Unable to claim import run.");
       await client.query(
@@ -550,7 +554,7 @@ export class CompendiumImportRunService {
 
 async function lockLeasedRun(client: DbClient, runId: string, leaseToken: string): Promise<RunRow> {
   const row = (await client.query<RunRow & { lease_active: boolean }>(
-    `SELECT id, source_id, file_id, generation_id, status, checkpoint, lease_token,
+    `SELECT id, source_id, file_id, generation_id, status, checkpoint, lease_token, allowed_review_entry_types,
             lease_expires_at > now() AS lease_active
      FROM compendium_import_runs WHERE id = $1 FOR UPDATE`,
     [runId],
@@ -626,6 +630,17 @@ function validateRunInput(input: CreateImportRunInput): void {
   if (input.ingestionJobId != null) requireUuid(input.ingestionJobId, "ingestionJobId");
   for (const [field, value] of [["importer", input.importer], ["importerVersion", input.importerVersion], ["parserVersion", input.parserVersion], ["promptVersion", input.promptVersion], ["modelVersion", input.modelVersion], ["actor", input.actor]] as const) requireText(value, field);
   requireHash(input.inputSha256, "inputSha256");
+  if (input.allowedReviewEntryTypes !== undefined && input.allowedReviewEntryTypes !== null) {
+    if (!Array.isArray(input.allowedReviewEntryTypes) || input.allowedReviewEntryTypes.length === 0
+      || new Set(input.allowedReviewEntryTypes).size !== input.allowedReviewEntryTypes.length
+      || input.allowedReviewEntryTypes.some((entryType) => !IMPORT_CANDIDATE_ENTRY_TYPES.includes(entryType))) {
+      throw new CompendiumValidationError("allowedReviewEntryTypes must contain unique supported candidate entry types.");
+    }
+  }
+  const hasReviewScope = input.allowedReviewEntryTypes !== undefined && input.allowedReviewEntryTypes !== null;
+  if ((input.importer.trim() === "approved-2024-corpus-seed") !== hasReviewScope) {
+    throw new CompendiumValidationError("Only approved corpus seed runs require an explicit allowed review entry-type scope.");
+  }
 }
 
 function validateLeaseArguments(runId: string, leaseToken: string, actor: string): void {
@@ -634,6 +649,10 @@ function validateLeaseArguments(runId: string, leaseToken: string, actor: string
 
 function runFromRow(row: RunRow): ImportRun {
   return { id: row.id, sourceId: row.source_id, fileId: row.file_id, generationId: row.generation_id, status: row.status, checkpoint: row.checkpoint };
+}
+
+function sameReviewScope(left: readonly ImportCandidateEntryType[] | null, right: readonly ImportCandidateEntryType[] | null): boolean {
+  return left === null ? right === null : right !== null && left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function canonicalJson(value: unknown): string {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { handleImportReviewAction } from "../../src/app/api/admin/compendium/import-runs/[runId]/actions/route.ts";
 import { CompendiumImportRunService, ImportRunConflictError } from "../../src/server/compendium/import-runs.ts";
 import { projectSnapshotFlatCandidate } from "../../src/server/compendium/candidate-publication.ts";
 import { CompendiumImportReviewService } from "../../src/server/compendium/import-review.ts";
@@ -230,7 +231,8 @@ test("QA integration: shared feature and class snapshots never cross-synthesize 
   const runs = new CompendiumImportRunService(transaction as never);
   const runInput = (id: "feature" | "class") => ({ id: id === "feature" ? "71000000-0000-4000-8000-000000000003" : "71000000-0000-4000-8000-000000000004",
     sourceId, fileId, importer: "approved-2024-corpus-seed", importerVersion: "1", parserVersion: "next-dnd-2024-v3",
-    promptVersion: "none", modelVersion: "none", inputSha256: id === "feature" ? "1".repeat(64) : "2".repeat(64), actor: "qa-corpus-seed" });
+    promptVersion: "none", modelVersion: "none", inputSha256: id === "feature" ? "1".repeat(64) : "2".repeat(64),
+    allowedReviewEntryTypes: [id], actor: "qa-corpus-seed" });
   const load = async (id: "feature" | "class", batch: typeof featureBatch) => {
     const run = await runs.createRun(runInput(id)); const claim = await runs.claimRun(run.id, "qa-corpus-seed"); assert.ok(claim.leaseToken);
     await runs.recordOccurrences(run.id, claim.leaseToken, batch.occurrences, "qa-corpus-seed");
@@ -256,9 +258,28 @@ test("QA integration: shared feature and class snapshots never cross-synthesize 
   }, async (entryIds) => new Map(entryIds.map((entryId) => [entryId, null])));
   const admin = { userId: "71000000-0000-4000-8000-000000000005", role: "admin" } as const;
   const featureReview = await review.getRun(admin, feature.run.id), classReview = await review.getRun(admin, classes.run.id);
+  assert.deepEqual(featureReview.run.allowedReviewEntryTypes, ["feature"]);
+  assert.deepEqual(classReview.run.allowedReviewEntryTypes, ["class"]);
   assert.equal([...featureReview.candidates, ...classReview.candidates].some(({ publicationCapability }) => publicationCapability === "can_unpublish"), false);
   const featureCandidates = featureReview.candidates.filter(({ entryType }) => entryType === "feature");
   const classCandidates = classReview.candidates.filter(({ entryType }) => entryType === "class");
+  const classInFeatureRun = featureReview.candidates.find(({ entryType }) => entryType === "class")!;
+  const featureInClassRun = classReview.candidates.find(({ entryType }) => entryType === "feature")!;
+  assert.equal(classInFeatureRun.publicationCapability, "requires_extraction");
+  assert.match(classInFeatureRun.publicationBlockReason!, /outside this import run's allowed review scope/);
+  assert.equal(featureInClassRun.publicationCapability, "requires_extraction");
+  const apiResponse = await handleImportReviewAction(new Request("https://dnd.example/api/admin/compendium/import-runs/run/actions", {
+    method: "POST", headers: { Origin: "https://dnd.example", "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "approve", candidateIds: [classInFeatureRun.id], activeRevisionTokens: { [classInFeatureRun.id]: null } }),
+  }), { params: Promise.resolve({ runId: feature.run.id }) }, { resolveAdmin: async () => admin, review });
+  assert.equal(apiResponse.status, 409);
+  assert.match(String((await apiResponse.json()).error), /outside this import run's allowed review scope/);
+  await assert.rejects(review.act(admin, classes.run.id, { action: "approve", candidateIds: [featureInClassRun.id],
+    activeRevisionTokens: { [featureInClassRun.id]: null } }), /outside this import run's allowed review scope/);
+  assert.equal(submitted.length, 0);
+  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_candidate_reviews")).rows[0].count), 0);
+  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_review_audit")).rows[0].count), 0);
+  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_revisions")).rows[0].count), 0);
   await review.act(admin, feature.run.id, { action: "approve", candidateIds: featureCandidates.map(({ id }) => id),
     activeRevisionTokens: Object.fromEntries(featureCandidates.map(({ id }) => [id, null])) });
   await review.act(admin, classes.run.id, { action: "approve", candidateIds: classCandidates.map(({ id }) => id),

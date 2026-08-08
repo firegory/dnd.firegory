@@ -46,6 +46,7 @@ export type ImportRunSummary = Readonly<{
   status: string;
   createdAt: string;
   finishedAt: string | null;
+  allowedReviewEntryTypes: readonly string[] | null;
   counts: Readonly<Record<string, number>>;
 }>;
 
@@ -160,6 +161,7 @@ type CandidateRow = QueryResultRow & Readonly<{
   last_error: string | null;
   reviewed_by: string | null;
   reviewed_at: Date | string | null;
+  allowed_review_entry_types: string[] | null;
 }>;
 
 type Submitters = Readonly<{
@@ -201,7 +203,7 @@ export class CompendiumImportReviewService {
       const where = options.status ? `WHERE run.status = $${values.push(options.status)}` : "";
       const result = await client.query<QueryResultRow & Record<string, unknown>>(
         `SELECT run.id, run.source_id, source.title AS source_title, run.file_id, run.status,
-                run.created_at, run.finished_at, run.candidate_count, run.new_count,
+                 run.created_at, run.finished_at, run.allowed_review_entry_types, run.candidate_count, run.new_count,
                 run.unchanged_count, run.changed_count, run.missing_count,
                 run.duplicate_count, run.invalid_count, run.diagnostic_count,
                 (run.candidate_count - count(*) FILTER (WHERE review.decision <> 'pending'))::integer AS pending_review_count,
@@ -219,6 +221,7 @@ export class CompendiumImportReviewService {
         id: String(row.id), sourceId: String(row.source_id), sourceTitle: String(row.source_title),
         fileId: String(row.file_id), status: String(row.status), createdAt: iso(row.created_at),
         finishedAt: row.finished_at == null ? null : iso(row.finished_at),
+        allowedReviewEntryTypes: row.allowed_review_entry_types == null ? null : (row.allowed_review_entry_types as string[]),
         counts: {
           candidates: number(row.candidate_count), new: number(row.new_count), unchanged: number(row.unchanged_count),
           changed: number(row.changed_count), missing: number(row.missing_count), duplicate: number(row.duplicate_count),
@@ -326,6 +329,8 @@ export class CompendiumImportReviewService {
     const prepared = await this.transaction(async (client) => {
       const rows = await client.query<CandidateRow>(candidateSelect("AND candidate.id = ANY($2::uuid[]) ORDER BY candidate.id FOR UPDATE OF candidate"), [runId, ids]);
       if (rows.rows.length !== ids.length) throw new ImportReviewError("One or more candidates were not found in this run.", 404);
+      const outsideScope = rows.rows.find((row) => reviewScopeError(row));
+      if (outsideScope) throw new ImportReviewError(reviewScopeError(outsideScope)!, 409);
       const publicationContents = new Map(rows.rows.map((row) => {
         const resolved = input.action === "merge" ? input.resolvedContents?.[row.id] ?? input.resolvedContent : null;
         return [row.id, input.action === "merge" && isRecord(resolved) ? lockCollectorMerge(row, resolved) : row.content] as const;
@@ -441,7 +446,7 @@ export class CompendiumImportReviewService {
   private async listRunsWithClient(client: DbClient, runId: string): Promise<readonly ImportRunSummary[]> {
     const result = await client.query<QueryResultRow & Record<string, unknown>>(
       `SELECT run.id, run.source_id, source.title AS source_title, run.file_id, run.status,
-              run.created_at, run.finished_at, run.candidate_count, run.new_count, run.unchanged_count,
+               run.created_at, run.finished_at, run.allowed_review_entry_types, run.candidate_count, run.new_count, run.unchanged_count,
               run.changed_count, run.missing_count, run.duplicate_count, run.invalid_count, run.diagnostic_count,
               (run.candidate_count - count(*) FILTER (WHERE review.decision <> 'pending'))::integer AS pending_review_count,
               count(*) FILTER (WHERE review.publication_status = 'failed')::integer AS failed_publication_count
@@ -449,14 +454,14 @@ export class CompendiumImportReviewService {
        LEFT JOIN compendium_import_candidate_reviews review ON review.import_run_id = run.id
        WHERE run.id = $1 GROUP BY run.id, source.title`, [runId],
     );
-    return result.rows.map((row) => ({ id: String(row.id), sourceId: String(row.source_id), sourceTitle: String(row.source_title), fileId: String(row.file_id), status: String(row.status), createdAt: iso(row.created_at), finishedAt: row.finished_at == null ? null : iso(row.finished_at), counts: { candidates: number(row.candidate_count), new: number(row.new_count), unchanged: number(row.unchanged_count), changed: number(row.changed_count), missing: number(row.missing_count), duplicate: number(row.duplicate_count), invalid: number(row.invalid_count), diagnostics: number(row.diagnostic_count), pending: number(row.pending_review_count), publicationFailed: number(row.failed_publication_count) } }));
+    return result.rows.map((row) => ({ id: String(row.id), sourceId: String(row.source_id), sourceTitle: String(row.source_title), fileId: String(row.file_id), status: String(row.status), createdAt: iso(row.created_at), finishedAt: row.finished_at == null ? null : iso(row.finished_at), allowedReviewEntryTypes: row.allowed_review_entry_types == null ? null : row.allowed_review_entry_types as string[], counts: { candidates: number(row.candidate_count), new: number(row.new_count), unchanged: number(row.unchanged_count), changed: number(row.changed_count), missing: number(row.missing_count), duplicate: number(row.duplicate_count), invalid: number(row.invalid_count), diagnostics: number(row.diagnostic_count), pending: number(row.pending_review_count), publicationFailed: number(row.failed_publication_count) } }));
   }
 }
 
 function candidateSelect(suffix: string): string {
   return `SELECT candidate.id, candidate.import_run_id, candidate.occurrence_id, candidate.previous_candidate_id,
                  candidate.source_id, candidate.file_id, candidate.generation_id,
-                 candidate.candidate_key, candidate.entry_type,
+                  candidate.candidate_key, candidate.entry_type, run.allowed_review_entry_types,
                  source.edition, source.language, source.access_tier, source.shared, source.owner_user_id,
                  candidate.diff_status, candidate.content, candidate.content_sha256,
                  previous.content AS previous_content, previous.content_sha256 AS previous_content_sha256,
@@ -667,8 +672,15 @@ function mapCandidate(row: CandidateRow): ImportCandidateReview {
 }
 
 function candidateCapability(row: CandidateRow): CandidatePublicationCapability {
-  if (row.diff_status === "missing") return missingCandidateCapability(row);
-  return classifyCandidatePublication(row.content, capabilityContext(row, currentEvidence(row)));
+  const capability = row.diff_status === "missing" ? missingCandidateCapability(row)
+    : classifyCandidatePublication(row.content, capabilityContext(row, currentEvidence(row)));
+  const scopeError = reviewScopeError(row);
+  return scopeError ? blockedCapability(capability, scopeError) : capability;
+}
+
+function reviewScopeError(row: Pick<CandidateRow, "allowed_review_entry_types" | "entry_type">): string | null {
+  if (row.allowed_review_entry_types == null || row.entry_type !== null && row.allowed_review_entry_types.includes(row.entry_type)) return null;
+  return `Candidate entry type ${row.entry_type ?? "unknown"} is outside this import run's allowed review scope (${row.allowed_review_entry_types.join(", ")}).`;
 }
 
 function missingCandidateCapability(row: CandidateRow): CandidatePublicationCapability {
