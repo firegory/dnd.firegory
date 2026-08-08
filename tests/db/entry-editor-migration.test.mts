@@ -14,6 +14,7 @@ test("migration 0014 is registered, additive, and rerunnable", () => {
   assert.match(sql,/EXCEPTION WHEN duplicate_object THEN NULL/);
   assert.doesNotMatch(sql,/DELETE FROM compendium_/i);
   assert.match(sql,/UPDATE compendium_versions SET editor_head_revision_id = active_revision_id/);
+  assert.match(sql,/UPDATE compendium_versions[\s\S]*SET CONSTRAINTS compendium_versions_active_revision_valid IMMEDIATE;[\s\S]*ALTER TABLE compendium_versions ALTER COLUMN editor_head_revision_id SET NOT NULL/);
   assert.ok(
     sql.indexOf("CREATE OR REPLACE FUNCTION compendium_validate_active_revision()")
       < sql.indexOf("UPDATE compendium_versions SET editor_head_revision_id"),

@@ -51,6 +51,9 @@ ALTER TABLE compendium_revisions ADD COLUMN IF NOT EXISTS created_by text;
 ALTER TABLE compendium_revisions ADD COLUMN IF NOT EXISTS change_reason text;
 ALTER TABLE compendium_versions ADD COLUMN IF NOT EXISTS editor_head_revision_id uuid;
 UPDATE compendium_versions SET editor_head_revision_id = active_revision_id WHERE editor_head_revision_id IS NULL;
+-- Evaluate the repaired deferred trigger before the following ALTER TABLE;
+-- PostgreSQL does not permit that DDL while backfill trigger events are pending.
+SET CONSTRAINTS compendium_versions_active_revision_valid IMMEDIATE;
 ALTER TABLE compendium_versions ALTER COLUMN editor_head_revision_id SET NOT NULL;
 
 ALTER TABLE compendium_revisions DROP CONSTRAINT IF EXISTS compendium_revisions_editor_metadata;
