@@ -45,6 +45,7 @@ type ActiveRow = {
   file_id: string;
   generation_id?: string;
 };
+export type NfsManagedBinding = Readonly<{ sourceId: string; fileId: string; ownsSource: boolean; ownsFile: boolean }>;
 
 export type SyncDependencies = Readonly<{
   execute?: typeof query;
@@ -297,15 +298,17 @@ async function applySnapshot(
   );
 
   const desiredByFile = Map.groupBy(projections, (entry) => entry.fileUuid);
+  const desiredBoundFileIds = new Set<string>();
   const changedEntries = new Set([...plan.additions, ...plan.updates, ...plan.removals]);
   const affectedFiles = new Set(active.filter((entry) => changedEntries.has(entry.entry_id)).map((entry) => entry.file_id));
   for (const entry of projections) if (changedEntries.has(entry.entryId)) affectedFiles.add(entry.fileUuid);
 
   for (const entries of desiredByFile.values()) {
     if (!affectedFiles.has(entries[0].fileUuid)) continue;
-    await upsertManagedSourceAndFile(client, repositoryId, entries[0]);
-    await activateManagedGeneration(client, entries[0]);
-    await upsertFileIndexRows(client, repositoryId, entries);
+    const binding = await resolveNfsManagedSourceAndFile(client, repositoryId, entries[0]);
+    desiredBoundFileIds.add(binding.fileId);
+    await activateManagedGeneration(client, repositoryId, entries[0], binding);
+    await upsertFileIndexRows(client, repositoryId, entries, binding);
   }
 
   if (plan.removals.length > 0) {
@@ -316,17 +319,12 @@ async function applySnapshot(
     );
   }
   for (const fileId of affectedFiles) {
-    if (desiredByFile.has(fileId)) continue;
-    await client.query(
-      `UPDATE ingestion_generations SET status = 'archived', archived_at = now()
-       WHERE id = (SELECT active_generation_id FROM files WHERE id = $1) AND status = 'active'`,
-      [fileId],
-    );
-    await client.query("UPDATE files SET active_generation_id = NULL, deleted_at = now() WHERE id = $1", [fileId]);
+    if (desiredByFile.has(fileId) || desiredBoundFileIds.has(fileId)) continue;
+    await cleanupRemovedNfsFile(client, repositoryId, fileId);
   }
   await client.query(
-    `UPDATE sources s SET deleted_at = now()
-     WHERE EXISTS (SELECT 1 FROM nfs_index_managed_sources ms WHERE ms.source_id = s.id AND ms.repository_id = $1)
+    `DELETE FROM sources s
+      WHERE EXISTS (SELECT 1 FROM nfs_index_managed_sources ms WHERE ms.source_id = s.id AND ms.repository_id = $1 AND ms.owns_source)
        AND NOT EXISTS (SELECT 1 FROM files f WHERE f.source_id = s.id AND f.deleted_at IS NULL)`,
     [repositoryId],
   );
@@ -337,92 +335,257 @@ async function applySnapshot(
   );
 }
 
-async function upsertManagedSourceAndFile(
+export async function resolveNfsManagedSourceAndFile(
   client: Queryable,
   repositoryId: string,
   entry: IndexedEntryProjection,
-): Promise<void> {
+): Promise<NfsManagedBinding> {
   const source = entry.source;
-  const ownership = await client.query<{ source_conflict: boolean; file_conflict: boolean }>(
-    `SELECT
-       EXISTS (
-         SELECT 1 FROM sources s WHERE s.id = $1
-           AND NOT EXISTS (SELECT 1 FROM nfs_index_managed_sources ms WHERE ms.source_id = s.id AND ms.repository_id = $3)
-       ) AS source_conflict,
-       EXISTS (
-         SELECT 1 FROM files f WHERE f.id = $2
-           AND NOT EXISTS (SELECT 1 FROM nfs_index_managed_files mf WHERE mf.file_id = f.id AND mf.repository_id = $3)
-       ) AS file_conflict`,
-    [entry.sourceUuid, entry.fileUuid, repositoryId],
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('nfs-canonical-source:' || $1, 0))", [source.sourceId]);
+  const sourceResult = await client.query<Record<string, unknown> & QueryResultRow>(
+    `SELECT s.*, mapping.repository_id AS mapping_repository_id, mapping.owns_source
+     FROM sources s LEFT JOIN nfs_index_managed_sources mapping ON mapping.source_id = s.id
+     WHERE s.canonical_source_id = $1 FOR UPDATE OF s`, [source.sourceId],
   );
-  if (ownership.rows[0]?.source_conflict || ownership.rows[0]?.file_conflict) {
-    throw new Error(`Deterministic NFS identity for ${entry.entryId} conflicts with unmanaged content`);
-  }
-  await client.query(
+  let sourceId: string;
+  let ownsSource: boolean;
+  if (sourceResult.rows[0]) {
+    validateReusableSource(sourceResult.rows[0], source);
+    if (sourceResult.rows[0].mapping_repository_id != null && sourceResult.rows[0].mapping_repository_id !== repositoryId) throw new Error(`Canonical source ${source.sourceId} is managed by another repository.`);
+    sourceId = String(sourceResult.rows[0].id);
+    ownsSource = sourceResult.rows[0].mapping_repository_id === repositoryId && sourceResult.rows[0].owns_source === true;
+  } else {
+    const collision = await client.query("SELECT id FROM sources WHERE id = $1 FOR UPDATE", [entry.sourceUuid]);
+    if (collision.rows[0]) throw new Error(`Deterministic NFS source identity for ${entry.entryId} conflicts with existing content.`);
+    await client.query(
     `INSERT INTO sources
        (id, title, category, edition, language, access_tier, shared, owner_user_id, metadata,
         canonical_source_id, publication_code, publication_title, publisher, release_year,
         publication_revision, external_origin_url, external_origin_id, attribution, source_priority,
         canonical_book_id, license, deleted_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NULL)
-     ON CONFLICT (id) DO UPDATE SET
-       title=EXCLUDED.title, category=EXCLUDED.category, edition=EXCLUDED.edition,
-       language=EXCLUDED.language, access_tier=EXCLUDED.access_tier, shared=EXCLUDED.shared,
-       owner_user_id=EXCLUDED.owner_user_id, metadata=EXCLUDED.metadata,
-       publication_code=EXCLUDED.publication_code, publication_title=EXCLUDED.publication_title,
-       publisher=EXCLUDED.publisher, release_year=EXCLUDED.release_year,
-       publication_revision=EXCLUDED.publication_revision, external_origin_url=EXCLUDED.external_origin_url,
-       external_origin_id=EXCLUDED.external_origin_id, attribution=EXCLUDED.attribution,
-       source_priority=EXCLUDED.source_priority, canonical_book_id=EXCLUDED.canonical_book_id,
-       license=EXCLUDED.license, deleted_at=NULL, updated_at=now()`,
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,NULL)`,
     [entry.sourceUuid, source.title, source.category, source.edition, source.language, source.accessTier,
       source.shared, source.ownerUserId, JSON.stringify({ managedBy: "nfs-content-index", repositoryId }),
       source.sourceId, source.publication.code, source.publication.title, source.publication.publisher,
       source.publication.releaseYear, source.publication.revision ?? null, source.publication.origin?.url ?? null,
       source.publication.origin?.id ?? null, source.publication.attribution ?? null,
       source.publication.sourcePriority, source.publication.canonicalBookId, source.license ?? null],
-  );
+    );
+    sourceId = entry.sourceUuid;
+    ownsSource = true;
+  }
   await client.query(
-    `INSERT INTO nfs_index_managed_sources (source_id, repository_id, canonical_source_id)
-     VALUES ($1,$2,$3) ON CONFLICT (source_id) DO NOTHING`,
-    [entry.sourceUuid, repositoryId, source.sourceId],
+    `INSERT INTO nfs_index_managed_sources (source_id, repository_id, canonical_source_id, owns_source)
+     VALUES ($1,$2,$3,$4) ON CONFLICT (source_id) DO UPDATE SET
+       repository_id=EXCLUDED.repository_id, canonical_source_id=EXCLUDED.canonical_source_id,
+       owns_source=nfs_index_managed_sources.owns_source
+     WHERE nfs_index_managed_sources.repository_id=EXCLUDED.repository_id`,
+    [sourceId, repositoryId, source.sourceId, ownsSource],
   );
-  await client.query(
+
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('nfs-canonical-file:' || $1, 0))", [entry.file.fileId]);
+  const fileResult = await client.query<Record<string, unknown> & QueryResultRow>(
+    `SELECT f.*, mapping.repository_id AS mapping_repository_id, mapping.owns_file, mapping.previous_active_generation_id, mapping.last_nfs_generation_id
+     FROM files f LEFT JOIN nfs_index_managed_files mapping ON mapping.file_id = f.id
+     WHERE f.id::text = $1 FOR UPDATE OF f`, [entry.file.fileId],
+  );
+  let fileId: string;
+  let ownsFile: boolean;
+  let previousActiveGenerationId: string | null;
+  if (fileResult.rows[0]) {
+    validateReusableFile(fileResult.rows[0], sourceId, entry);
+    if (fileResult.rows[0].mapping_repository_id != null && fileResult.rows[0].mapping_repository_id !== repositoryId) throw new Error(`Canonical file ${entry.file.fileId} is managed by another repository.`);
+    fileId = String(fileResult.rows[0].id);
+    ownsFile = fileResult.rows[0].mapping_repository_id === repositoryId && fileResult.rows[0].owns_file === true;
+    previousActiveGenerationId = fileResult.rows[0].mapping_repository_id === repositoryId
+      ? fileResult.rows[0].previous_active_generation_id == null ? null : String(fileResult.rows[0].previous_active_generation_id)
+      : fileResult.rows[0].active_generation_id == null ? null : String(fileResult.rows[0].active_generation_id);
+  } else {
+    const collision = await client.query("SELECT id FROM files WHERE id = $1 FOR UPDATE", [entry.fileUuid]);
+    if (collision.rows[0]) throw new Error(`Deterministic NFS file identity for ${entry.entryId} conflicts with existing content.`);
+    await client.query(
     `INSERT INTO files
        (id, source_id, original_filename, mime_type, checksum_sha256, byte_size, storage_path, deleted_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,NULL)
-     ON CONFLICT (id) DO UPDATE SET original_filename=EXCLUDED.original_filename,
-       mime_type=EXCLUDED.mime_type, checksum_sha256=EXCLUDED.checksum_sha256,
-       byte_size=EXCLUDED.byte_size, storage_path=EXCLUDED.storage_path, deleted_at=NULL`,
-    [entry.fileUuid, entry.sourceUuid, sourceFilename(entry.file.path), entry.file.mediaType,
-      entry.file.contentHash.slice("sha256:".length), entry.file.byteSize, entry.file.path],
-  );
+      VALUES ($1,$2,$3,$4,$5,$6,$7,NULL)`,
+    [entry.fileUuid, sourceId, sourceFilename(entry.file.path), entry.file.mediaType,
+       entry.file.contentHash.slice("sha256:".length), entry.file.byteSize, entry.file.path],
+    );
+    fileId = entry.fileUuid;
+    ownsFile = true;
+    previousActiveGenerationId = null;
+  }
   await client.query(
-    `INSERT INTO nfs_index_managed_files (file_id, source_id, repository_id, canonical_file_id)
-     VALUES ($1,$2,$3,$4) ON CONFLICT (file_id) DO NOTHING`,
-    [entry.fileUuid, entry.sourceUuid, repositoryId, entry.file.fileId],
+    `INSERT INTO nfs_index_managed_files (file_id, source_id, repository_id, canonical_file_id, owns_file, previous_active_generation_id, last_nfs_generation_id)
+     VALUES ($1,$2,$3,$4,$5,$6,NULL) ON CONFLICT (file_id) DO UPDATE SET
+       source_id=EXCLUDED.source_id, repository_id=EXCLUDED.repository_id,
+       canonical_file_id=EXCLUDED.canonical_file_id, owns_file=nfs_index_managed_files.owns_file,
+       previous_active_generation_id=nfs_index_managed_files.previous_active_generation_id,
+       last_nfs_generation_id=nfs_index_managed_files.last_nfs_generation_id
+     WHERE nfs_index_managed_files.repository_id=EXCLUDED.repository_id`,
+    [fileId, sourceId, repositoryId, entry.file.fileId, ownsFile, previousActiveGenerationId],
   );
+  return { sourceId, fileId, ownsSource, ownsFile };
 }
 
-async function activateManagedGeneration(client: Queryable, entry: IndexedEntryProjection): Promise<void> {
+type RemovedFileState = QueryResultRow & Readonly<{
+  source_id: string; active_generation_id: string | null; owns_file: boolean;
+  previous_active_generation_id: string | null; last_nfs_generation_id: string | null; nfs_generation_ids: string[];
+}>;
+
+export async function cleanupRemovedNfsFile(client: Queryable, repositoryId: string, fileId: string): Promise<void> {
+  const state = await client.query<RemovedFileState>(
+    `SELECT file.source_id, file.active_generation_id, mapping.owns_file, mapping.previous_active_generation_id, mapping.last_nfs_generation_id,
+       ARRAY(SELECT DISTINCT owned.generation_id FROM (
+         SELECT entry.generation_id FROM nfs_index_entries entry
+           WHERE entry.file_id = mapping.file_id AND entry.repository_id = mapping.repository_id
+         UNION ALL SELECT document.generation_id FROM documents document
+           WHERE document.file_id = mapping.file_id AND document.metadata->>'managedBy' = 'nfs-content-index' AND document.metadata->>'repositoryId' = mapping.repository_id
+         UNION ALL SELECT page.generation_id FROM pages page
+           WHERE page.file_id = mapping.file_id AND page.metadata->>'managedBy' = 'nfs-content-index' AND page.metadata->>'repositoryId' = mapping.repository_id
+         UNION ALL SELECT chunk.generation_id FROM chunks chunk
+           WHERE chunk.file_id = mapping.file_id AND chunk.metadata->>'managedBy' = 'nfs-content-index' AND chunk.metadata->>'repositoryId' = mapping.repository_id
+       ) owned) AS nfs_generation_ids
+     FROM nfs_index_managed_files mapping JOIN files file ON file.id = mapping.file_id
+     WHERE mapping.file_id = $1 AND mapping.repository_id = $2
+     FOR UPDATE OF file, mapping`, [fileId, repositoryId],
+  );
+  const row = state.rows[0];
+  if (!row) return;
+  const lastNfsId = row.last_nfs_generation_id == null ? null : String(row.last_nfs_generation_id);
+  const nfsGenerationIds = [...new Set([...row.nfs_generation_ids.map(String), ...(lastNfsId === null ? [] : [lastNfsId])])];
+  const activeId = row.active_generation_id == null ? null : String(row.active_generation_id);
+  const previousId = row.previous_active_generation_id == null ? null : String(row.previous_active_generation_id);
+  const activeIsNfs = activeId !== null && activeId === lastNfsId;
+  if (!row.owns_file && lastNfsId !== null && !activeIsNfs) throw new Error(`Reused file ${fileId} active generation changed outside NFS synchronization.`);
+  if (!row.owns_file && lastNfsId === null && nfsGenerationIds.length > 0) throw new Error(`Reused file ${fileId} has untracked NFS generations.`);
+  if (!row.owns_file && nfsGenerationIds.length === 0 && activeId !== previousId) throw new Error(`Reused file ${fileId} active generation changed after NFS cleanup.`);
+
+  if (row.owns_file) {
+    await client.query("DELETE FROM nfs_index_entries WHERE repository_id = $1 AND file_id = $2", [repositoryId, fileId]);
+    await client.query("DELETE FROM files WHERE id = $1", [fileId]);
+    return;
+  }
+  if (nfsGenerationIds.length === 0) return;
+
+  let restoreId: string | null = null;
+  if (previousId !== null) {
+    const previous = await client.query<{ id: string } & QueryResultRow>(
+      "SELECT id FROM ingestion_generations WHERE id = $1 AND file_id = $2 AND source_id = $3 AND status IN ('active','archived') FOR UPDATE",
+      [previousId, fileId, row.source_id],
+    );
+    restoreId = previous.rows[0]?.id ?? null;
+    if (restoreId === null) await client.query("UPDATE nfs_index_managed_files SET previous_active_generation_id=NULL WHERE file_id=$1 AND repository_id=$2", [fileId, repositoryId]);
+  }
+  if (activeIsNfs) {
+    await client.query("UPDATE ingestion_generations SET status='archived', archived_at=now() WHERE id = ANY($1::uuid[]) AND status='active'", [nfsGenerationIds]);
+    if (restoreId !== null) await client.query("UPDATE ingestion_generations SET status='active', activated_at=coalesce(activated_at,now()), archived_at=NULL WHERE id=$1", [restoreId]);
+    const restored = await client.query(
+      "UPDATE files SET active_generation_id=$3 WHERE id=$1 AND active_generation_id=$2 RETURNING id",
+      [fileId, activeId, restoreId],
+    );
+    if (restored.rowCount !== 1) throw new Error(`Reused file ${fileId} active generation changed during NFS cleanup.`);
+  }
+  await client.query("DELETE FROM nfs_index_entries WHERE repository_id = $1 AND file_id = $2", [repositoryId, fileId]);
+  if (nfsGenerationIds.length > 0) await client.query("DELETE FROM ingestion_generations WHERE id = ANY($1::uuid[])", [nfsGenerationIds]);
+}
+
+function validateReusableSource(row: Record<string, unknown>, source: IndexedEntryProjection["source"]): void {
+  const expected: Readonly<Record<string, unknown>> = {
+    title: source.title, category: source.category, edition: source.edition, language: source.language,
+    access_tier: source.accessTier, shared: source.shared, owner_user_id: source.ownerUserId,
+    publication_code: source.publication.code, publication_title: source.publication.title,
+    publisher: source.publication.publisher, release_year: source.publication.releaseYear,
+    publication_revision: source.publication.revision ?? null, external_origin_url: source.publication.origin?.url ?? null,
+    external_origin_id: source.publication.origin?.id ?? null, attribution: source.publication.attribution ?? null,
+    source_priority: source.publication.sourcePriority, canonical_book_id: source.publication.canonicalBookId,
+    license: source.license ?? null, deleted_at: null,
+  };
+  const conflict = Object.entries(expected).find(([key, value]) => row[key] !== value);
+  if (conflict) throw new Error(`Canonical source ${source.sourceId} conflicts on ${conflict[0]}; refusing to co-mingle source metadata or access.`);
+}
+
+function validateReusableFile(row: Record<string, unknown>, sourceId: string, entry: IndexedEntryProjection): void {
+  const expected: Readonly<Record<string, unknown>> = {
+    source_id: sourceId, mime_type: entry.file.mediaType,
+    checksum_sha256: entry.file.contentHash.slice("sha256:".length), deleted_at: null,
+  };
+  const conflict = Object.entries(expected).find(([key, value]) => row[key] !== value);
+  if (conflict) throw new Error(`Canonical file ${entry.file.fileId} conflicts on ${conflict[0]}; refusing to reuse incompatible file content.`);
+  if (Number(row.byte_size) !== entry.file.byteSize) throw new Error(`Canonical file ${entry.file.fileId} conflicts on byte_size; refusing to reuse incompatible file content.`);
+}
+
+type ActivationState = QueryResultRow & Readonly<{
+  active_generation_id: string | null; owns_file: boolean;
+  previous_active_generation_id: string | null; last_nfs_generation_id: string | null;
+}>;
+
+export async function activateManagedGeneration(
+  client: Queryable,
+  repositoryId: string,
+  entry: IndexedEntryProjection,
+  binding: NfsManagedBinding,
+): Promise<void> {
+  const state = await client.query<ActivationState>(
+    `SELECT file.active_generation_id, mapping.owns_file, mapping.previous_active_generation_id, mapping.last_nfs_generation_id
+     FROM nfs_index_managed_files mapping JOIN files file ON file.id = mapping.file_id
+     WHERE mapping.file_id=$1 AND mapping.repository_id=$2 FOR UPDATE OF file, mapping`,
+    [binding.fileId, repositoryId],
+  );
+  const row = state.rows[0];
+  if (!row) throw new Error(`Managed file ${binding.fileId} mapping disappeared before activation.`);
+  if (!row.owns_file) {
+    const activeId = row.active_generation_id == null ? null : String(row.active_generation_id);
+    const previousId = row.previous_active_generation_id == null ? null : String(row.previous_active_generation_id);
+    const lastNfsId = row.last_nfs_generation_id == null ? null : String(row.last_nfs_generation_id);
+    const expectedActiveId = lastNfsId ?? previousId;
+    if (activeId !== expectedActiveId) throw new Error(`Reused file ${binding.fileId} active generation changed outside NFS synchronization.`);
+    await client.query(
+      `INSERT INTO ingestion_generations (id, source_id, file_id, status)
+       VALUES ($1,$2,$3,'staged') ON CONFLICT (id) DO NOTHING`,
+      [entry.generationId, binding.sourceId, binding.fileId],
+    );
+    const claimed = await client.query(
+      `UPDATE nfs_index_managed_files SET last_nfs_generation_id=$3
+       WHERE file_id=$1 AND repository_id=$2 AND last_nfs_generation_id IS NOT DISTINCT FROM $4 RETURNING file_id`,
+      [binding.fileId, repositoryId, entry.generationId, lastNfsId],
+    );
+    if (claimed.rowCount !== 1) throw new Error(`Reused file ${binding.fileId} NFS generation claim changed concurrently.`);
+    await client.query(
+      `UPDATE ingestion_generations SET status='archived', archived_at=now()
+       WHERE file_id=$1 AND status='active' AND id<>$2`,
+      [binding.fileId, entry.generationId],
+    );
+    await client.query(
+      `UPDATE ingestion_generations SET status='active', activated_at=coalesce(activated_at,now()), archived_at=NULL
+       WHERE id=$1 AND source_id=$2 AND file_id=$3`,
+      [entry.generationId, binding.sourceId, binding.fileId],
+    );
+    const activated = await client.query(
+      "UPDATE files SET active_generation_id=$3, deleted_at=NULL WHERE id=$1 AND active_generation_id IS NOT DISTINCT FROM $2 RETURNING id",
+      [binding.fileId, activeId, entry.generationId],
+    );
+    if (activated.rowCount !== 1) throw new Error(`Reused file ${binding.fileId} active generation changed during NFS activation.`);
+    return;
+  }
   await client.query(
     `UPDATE ingestion_generations SET status='archived', archived_at=now()
      WHERE file_id=$1 AND status='active' AND id<>$2`,
-    [entry.fileUuid, entry.generationId],
+    [binding.fileId, entry.generationId],
   );
   await client.query(
     `INSERT INTO ingestion_generations (id, source_id, file_id, status, activated_at)
      VALUES ($1,$2,$3,'active',now())
      ON CONFLICT (id) DO UPDATE SET status='active', archived_at=NULL`,
-    [entry.generationId, entry.sourceUuid, entry.fileUuid],
+    [entry.generationId, binding.sourceId, binding.fileId],
   );
-  await client.query("UPDATE files SET active_generation_id=$2, deleted_at=NULL WHERE id=$1", [entry.fileUuid, entry.generationId]);
+  await client.query("UPDATE files SET active_generation_id=$2, deleted_at=NULL WHERE id=$1", [binding.fileId, entry.generationId]);
 }
 
 async function upsertFileIndexRows(
   client: Queryable,
   repositoryId: string,
   entries: readonly IndexedEntryProjection[],
+  binding: NfsManagedBinding,
 ): Promise<void> {
   const first = entries[0];
   await reconcileManagedProjectionRows(client, repositoryId, entries);
@@ -433,7 +596,7 @@ async function upsertFileIndexRows(
       `INSERT INTO documents (id, source_id, file_id, generation_id, title, document_type, text, metadata)
        VALUES ($1,$2,$3,$4,$5,'canonical-revision',$6,$7::jsonb)
        ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title, text=EXCLUDED.text, metadata=EXCLUDED.metadata`,
-      [entry.documentId, entry.sourceUuid, entry.fileUuid, entry.generationId, entry.name, entry.plainText,
+       [entry.documentId, binding.sourceId, binding.fileId, entry.generationId, entry.name, entry.plainText,
         JSON.stringify({ managedBy: "nfs-content-index", repositoryId, entryId: entry.entryId, revisionId: entry.revisionId })],
     );
     for (const page of entry.pages) {
@@ -449,7 +612,7 @@ async function upsertFileIndexRows(
       `INSERT INTO pages (id, source_id, file_id, generation_id, page_number, text, metadata)
        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)
        ON CONFLICT (id) DO UPDATE SET text=EXCLUDED.text, metadata=EXCLUDED.metadata`,
-      [pageId, first.sourceUuid, first.fileUuid, first.generationId, pageNumber,
+      [pageId, binding.sourceId, binding.fileId, first.generationId, pageNumber,
         [...new Set(texts)].join("\n\n"), JSON.stringify({
           managedBy: "nfs-content-index",
           repositoryId,
@@ -469,27 +632,29 @@ async function upsertFileIndexRows(
            section_heading=EXCLUDED.section_heading, page_number=EXCLUDED.page_number,
            text_span_start=EXCLUDED.text_span_start, text_span_end=EXCLUDED.text_span_end,
            metadata=EXCLUDED.metadata`,
-        [chunk.id, entry.sourceUuid, entry.fileUuid, entry.documentId,
+        [chunk.id, binding.sourceId, binding.fileId, entry.documentId,
           chunk.pageNumber === null ? null : pageIds.get(chunk.pageNumber) ?? null,
           entry.generationId, chunk.chunkIndex, chunk.text, chunk.quoteText, chunk.sectionHeading,
           chunk.pageNumber, chunk.textSpanStart, chunk.textSpanEnd, JSON.stringify(chunk.metadata)],
       );
     }
     await client.query(
-      `INSERT INTO nfs_index_entries
-         (id, repository_id, entry_id, revision_id, content_hash, entry_type, name, aliases,
-          typed_fields, plain_text, canonical_payload, source_id, file_id, generation_id, document_id,
-          lifecycle, retired_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,$13,$14,$15,'active',NULL)
+       `INSERT INTO nfs_index_entries
+          (id, repository_id, entry_id, revision_id, content_hash, entry_type, name, aliases,
+           typed_fields, plain_text, canonical_payload, source_id, file_id, generation_id, document_id,
+           edition, language, lifecycle, retired_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11::jsonb,$12,$13,$14,$15,$16,$17,'active',NULL)
        ON CONFLICT (repository_id, entry_id) DO UPDATE SET revision_id=EXCLUDED.revision_id,
          content_hash=EXCLUDED.content_hash, entry_type=EXCLUDED.entry_type, name=EXCLUDED.name,
          aliases=EXCLUDED.aliases, typed_fields=EXCLUDED.typed_fields, plain_text=EXCLUDED.plain_text,
-         canonical_payload=EXCLUDED.canonical_payload, source_id=EXCLUDED.source_id,
-         file_id=EXCLUDED.file_id, generation_id=EXCLUDED.generation_id,
-         document_id=EXCLUDED.document_id, lifecycle='active', retired_at=NULL, indexed_at=now()`,
+          canonical_payload=EXCLUDED.canonical_payload, source_id=EXCLUDED.source_id,
+          file_id=EXCLUDED.file_id, generation_id=EXCLUDED.generation_id,
+          document_id=EXCLUDED.document_id, edition=EXCLUDED.edition, language=EXCLUDED.language,
+          lifecycle='active', retired_at=NULL, indexed_at=now()`,
       [row.id, row.repository_id, row.entry_id, row.revision_id, row.content_hash, row.entry_type,
         row.name, JSON.stringify(row.aliases), JSON.stringify(row.typed_fields), row.plain_text,
-        JSON.stringify(row.canonical_payload), row.source_id, row.file_id, row.generation_id, row.document_id],
+         JSON.stringify(row.canonical_payload), binding.sourceId, binding.fileId, row.generation_id, row.document_id,
+        row.edition, row.language],
     );
   }
 }
@@ -500,6 +665,7 @@ export function nfsIndexEntryRow(repositoryId: string, entry: IndexedEntryProjec
     content_hash: entry.contentHash, entry_type: entry.entryType, name: entry.name, aliases: entry.aliases,
     typed_fields: entry.typedFields, plain_text: entry.plainText, canonical_payload: entry.canonicalPayload,
     source_id: entry.sourceUuid, file_id: entry.fileUuid, generation_id: entry.generationId, document_id: entry.documentId,
+    edition: entry.source.edition, language: entry.source.language,
   } as const;
 }
 

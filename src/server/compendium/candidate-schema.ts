@@ -2,6 +2,7 @@ import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
 import type { CompendiumEdition, CompendiumEntryType, CompendiumLanguage } from "./service.ts";
+import { canonicalFlatAttributes, FLAT_ENTRY_TYPES, type FlatEntryType } from "./flat-schema.ts";
 
 export const EXTRACTION_SCHEMA_VERSION = 1 as const;
 export const EXTRACTION_PARSER_VERSION = "2";
@@ -103,7 +104,7 @@ const attributesByType = {
   },
   equipment: {
     type: "object", additionalProperties: false,
-    required: ["category", "costCp", "weightLb"],
+    required: ["category"],
     properties: {
       category: { enum: ["adventuring_gear", "ammunition", "armor", "focus", "mount", "tool", "vehicle", "weapon", "other"] },
       costCp: nullableIntegerField,
@@ -139,16 +140,24 @@ const attributesByType = {
   background: {
     type: "object", additionalProperties: false,
     required: ["abilityScores", "skillProficiencies"],
-    properties: { abilityScores: stringField, skillProficiencies: stringField },
+    properties: {
+      abilityScores: { type: "array", minItems: 1, items: stringField, uniqueItems: true },
+      skillProficiencies: { type: "array", minItems: 1, items: stringField, uniqueItems: true },
+    },
   },
   feat: {
     type: "object", additionalProperties: false,
-    required: ["category", "prerequisiteLevel", "prerequisiteText", "repeatable"],
+    required: ["category", "repeatable"],
     properties: {
       category: { enum: ["origin", "general", "fighting_style", "epic_boon"] },
       prerequisiteLevel: { type: ["integer", "null"], minimum: 1, maximum: 20 },
       prerequisiteText: nullableStringField, repeatable: { type: "boolean" },
     },
+  },
+  glossary: {
+    type: "object", additionalProperties: false,
+    required: ["category", "relatedTerms"],
+    properties: { category: stringField, relatedTerms: { type: "array", items: stringField, uniqueItems: true } },
   },
 } as const;
 
@@ -191,7 +200,19 @@ export function validateCandidateWire(value: unknown, chunks: readonly EvidenceC
     throw new CandidateValidationError(`Candidate output failed its type schema: ${ajv.errorsText(validator?.errors ?? [])}`);
   }
 
-  const candidate = value as CandidateWire;
+  const rawCandidate = value as CandidateWire;
+  const flat = FLAT_ENTRY_TYPES.includes(rawCandidate.entryType as FlatEntryType);
+  const attributes = flat
+    ? canonicalFlatAttributes(rawCandidate.entryType as FlatEntryType, rawCandidate.attributes)
+    : rawCandidate.attributes;
+  const citations = rawCandidate.citations.filter((citation) => !citation.fieldPath.startsWith("$.attributes.")
+    || Object.hasOwn(attributes, citation.fieldPath.slice("$.attributes.".length)));
+  const changed = flat && (citations.length !== rawCandidate.citations.length || JSON.stringify(attributes) !== JSON.stringify(rawCandidate.attributes));
+  const candidate: CandidateWire = changed ? {
+    ...rawCandidate,
+    attributes,
+    citations,
+  } : rawCandidate;
   const chunksById = new Map(chunks.map((chunk) => [chunk.id, chunk]));
   const requiredPaths = new Set([
     "$.entryType", "$.candidateKey", "$.title", "$.body",
@@ -276,6 +297,7 @@ function supportsEntryType(entryType: CompendiumEntryType, quote: string): boole
     species: /(?:species|вид|раса)/iu,
     background: /(?:background|предыстори)/iu,
     feat: /(?:feat|черта)/iu,
+    glossary: /(?:glossary|term|словар|термин)/iu,
   };
   return patterns[entryType].test(quote);
 }

@@ -48,6 +48,7 @@ const PROJECTION_KEYS: Readonly<Record<CompendiumEntryType, readonly string[]>> 
   background: ["abilityScores", "skillProficiencies", "type"],
   feat: ["category", "prerequisiteLevel", "prerequisiteText", "repeatable", "type"],
   equipment: ["category", "costCp", "type", "weightLb"],
+  glossary: ["category", "relatedTerms", "type"],
 };
 const CITATION_KEYS = ["blockOrder", "chunkId", "fieldPath", "generationId", "kind", "quote", "quoteSpanEnd", "quoteSpanStart"];
 

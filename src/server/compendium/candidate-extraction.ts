@@ -185,8 +185,9 @@ function typeSpecificMessages(entryType: CompendiumEntryType, boundary: Extracti
     item: "category and rarity enums; requiresAttunement boolean",
     class: "hitDie 6|8|10|12; primaryAbility string; spellcastingAbility string|null",
     species: "size enum; speed positive integer",
-    background: "abilityScores and skillProficiencies strings",
+    background: "abilityScores and skillProficiencies arrays of individual strings",
     feat: "category enum; prerequisiteLevel integer|null; prerequisiteText string|null; repeatable boolean",
+    glossary: "category string; relatedTerms unique string array",
   };
   return [
     {

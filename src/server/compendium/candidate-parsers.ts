@@ -53,7 +53,12 @@ export function classifyChunkType(text: string): CompendiumEntryType | null {
   if (/^(?:Casting Time|Время накладывания|Время сотворения)\s*:/im.test(text)) return "spell";
   if (/^(?:Armor Class|Класс Доспеха)\s*:?[ \t]*\d/im.test(text) && /^(?:Hit Points|Хиты)\s*:?[ \t]*\d/im.test(text)) return "creature";
   if (/\|[^\n]*(?:Cost|Стоимость)[^\n]*\|/i.test(text)) return "equipment";
+  if (/(?:equipment|снаряжение)/iu.test(text) && /(?:cost|стоимость|цена)/iu.test(text)) return "equipment";
   if (/(?:\d+(?:st|nd|rd|th)-Level .* Feature|Умение .* \d+(?:-го|-й) уровня)/i.test(text)) return "feature";
+  if (/(?:\bfeat\b|черта)/iu.test(text)) return "feat";
+  if (/(?:\bbackground\b|предыстори)/iu.test(text)) return "background";
+  if (/(?:magic item|магический предмет|rarity\s*:|редкость\s*:)/iu.test(text)) return "item";
+  if (/(?:glossary|rules term|словар|термин правил)/iu.test(text)) return "glossary";
   return null;
 }
 
