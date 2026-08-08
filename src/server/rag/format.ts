@@ -5,7 +5,7 @@
  * Safe to import in unit tests with Node test runner.
  */
 
-import type { RetrievalCandidate } from "../retrieval/types";
+import type { EntityEvidence, RetrievalCandidate } from "../retrieval/types";
 
 // ---------- Language type ----------
 
@@ -34,6 +34,8 @@ export type SourceCitation = Readonly<{
   sourceId: string;
   /** Internal chunk ID for precise bbox preview. */
   chunkId: string;
+  /** Citation-backed compendium fields supporting this quote, when present. */
+  entityEvidence?: readonly EntityEvidence[];
 }>;
 
 // ---------- Prompt construction ----------
@@ -58,6 +60,7 @@ You MUST follow these rules:
 3. Start with a concise direct answer (1-3 sentences).
 4. After the answer, provide direct quotes from sources that support it.
 5. For each quote, cite the source title, edition, page, and section.
+6. Omit structured fields or properties unless a provided quote explicitly supports them.
 
 Your response MUST be valid JSON with this exact structure:
 {
@@ -109,6 +112,10 @@ export function formatRetrievalContext(
       }
       lines.push(`Category: ${chunk.sourceCategory}`);
       lines.push(`Quote: "${chunk.quoteText}"`);
+      for (const evidence of chunk.entityEvidence ?? []) {
+        const field = evidence.fieldPath ? ` ${evidence.fieldPath}` : "";
+        lines.push(`Carried ${evidence.citationKind} citation${field}: "${evidence.quote}"`);
+      }
       lines.push("");
       return lines.join("\n");
     })
@@ -225,33 +232,21 @@ export function mapCitations(
     if (raw.sourceTitle) {
       const titleMatches = chunks.filter(
         (c) =>
-          c.sourceTitle.toLowerCase() === raw.sourceTitle!.toLowerCase(),
+          c.sourceTitle.toLowerCase() === raw.sourceTitle!.toLowerCase()
+          && candidateSupportsQuote(c, quoteLower),
       );
 
-      if (titleMatches.length === 1) {
-        matchedChunk = titleMatches[0];
-      } else if (titleMatches.length > 1 && raw.quote) {
-        matchedChunk = titleMatches.find((c) => {
-          const chunkQuoteLower = c.quoteText.toLowerCase();
-          return (
-            chunkQuoteLower.includes(quoteLower.slice(0, 30)) ||
-            quoteLower.includes(chunkQuoteLower.slice(0, 30))
-          );
-        }) ?? titleMatches[0];
-      }
+      matchedChunk = titleMatches[0];
     }
 
     if (!matchedChunk && raw.quote) {
-      matchedChunk = chunks.find((c) => {
-        const chunkQuoteLower = c.quoteText.toLowerCase();
-        return (
-          chunkQuoteLower.includes(quoteLower.slice(0, 30)) ||
-          quoteLower.includes(chunkQuoteLower.slice(0, 30))
-        );
-      });
+      matchedChunk = chunks.find((c) => candidateSupportsQuote(c, quoteLower));
     }
 
     if (matchedChunk) {
+      const entityEvidence = matchedChunk.entityEvidence?.filter((evidence) =>
+        quotesOverlap(evidence.quote.toLowerCase(), quoteLower),
+      );
       citations.push({
         quote: raw.quote,
         sourceTitle: matchedChunk.sourceTitle,
@@ -263,23 +258,29 @@ export function mapCitations(
         fileId: matchedChunk.fileId,
         sourceId: matchedChunk.sourceId,
         chunkId: matchedChunk.chunkId,
-      });
-    } else {
-      // Unmatched citation — still include what the LLM gave us
-      citations.push({
-        quote: raw.quote,
-        sourceTitle: raw.sourceTitle ?? "Unknown",
-        edition: raw.edition ?? "",
-        language: "",
-        page: raw.page ?? null,
-        section: raw.section ?? null,
-        category: "",
-        fileId: "",
-        sourceId: "",
-        chunkId: "",
+        ...(entityEvidence?.length ? { entityEvidence } : {}),
       });
     }
   }
 
   return citations;
+}
+
+function candidateSupportsQuote(candidate: RetrievalCandidate, quoteLower: string): boolean {
+  return quotesOverlap(candidate.quoteText.toLowerCase(), quoteLower)
+    || (candidate.entityEvidence?.some((evidence) =>
+      quotesOverlap(evidence.quote.toLowerCase(), quoteLower),
+    ) ?? false);
+}
+
+function quotesOverlap(left: string, right: string): boolean {
+  const normalizedLeft = left.replaceAll(/\s+/g, " ").trim();
+  const normalizedRight = right.replaceAll(/\s+/g, " ").trim();
+  if (!normalizedLeft || !normalizedRight) return false;
+  if (normalizedLeft === normalizedRight) return true;
+
+  const comparableLength = Math.min(30, normalizedLeft.length, normalizedRight.length);
+  if (comparableLength < 12) return false;
+  return normalizedLeft.includes(normalizedRight.slice(0, comparableLength))
+    || normalizedRight.includes(normalizedLeft.slice(0, comparableLength));
 }

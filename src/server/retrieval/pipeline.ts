@@ -20,6 +20,13 @@ import { rewriteQuery, collectVectorQueries, type RewrittenQuery } from "./rewri
 import { rerankCandidates, type RerankConfig } from "./rerank";
 import type { RetrievalCandidate, RetrievalParams } from "./types";
 import { captureRetrievalSnapshot, type RetrievalSnapshot } from "./snapshot";
+import {
+  enrichRewriteWithEntities,
+  resolveCompendiumEntities,
+  type CompendiumEntryScope,
+  type EntityResolution,
+  type ExactEntityMatch,
+} from "./entity";
 
 export type {
   RetrievalCandidate,
@@ -47,6 +54,8 @@ export type HybridSearchInput = Readonly<{
   mergeConfig?: Omit<HybridMergeConfig, "limit">;
   /** Whether to enable LLM query rewriting. Default: true. */
   rewriteEnabled?: boolean;
+  /** Canonical compendium entry scope for ask-about-entry requests. */
+  entryScope?: CompendiumEntryScope;
 }>;
 
 export type HybridSearchResult = Readonly<{
@@ -64,12 +73,16 @@ export type HybridSearchResult = Readonly<{
    * as canonical and empty bilingual/expanded arrays.
    */
   rewrite: RewrittenQuery | null;
+  /** Authorized exact matches only; safe for diagnostics. */
+  entityMatches: readonly ExactEntityMatch[];
 }>;
 
 export type HybridSearchDependencies = Readonly<{
   captureSnapshot?: (accessSql: string, accessParams: readonly unknown[]) => Promise<RetrievalSnapshot>;
   keyword?: typeof keywordSearch;
   vector?: typeof vectorSearch;
+  resolveEntities?: typeof resolveCompendiumEntities;
+  rewrite?: typeof rewriteQuery;
 }>;
 
 type RewriteOutput = {
@@ -103,10 +116,11 @@ export async function hybridSearch(
     rerankConfig,
     mergeConfig,
     rewriteEnabled = true,
+    entryScope,
   } = input;
 
   if (!searchQuery.trim()) {
-    return { chunks: [], totalMerged: 0, hasMore: false, expansions: [], rewrite: null };
+    return { chunks: [], totalMerged: 0, hasMore: false, expansions: [], rewrite: null, entityMatches: [] };
   }
 
   const safeLimit = Math.min(Math.max(1, limit), 100);
@@ -116,9 +130,18 @@ export async function hybridSearch(
   const { sql: accessSql, params: accessParams } = buildSourceAccessSql(filter);
   const snapshot = await (dependencies.captureSnapshot ?? captureRetrievalSnapshot)(accessSql, accessParams);
 
+  // Entity resolution uses only the fixed authorized snapshot and completes
+  // before any entity names can influence expansion or semantic retrieval.
+  const entityResolution: EntityResolution = await (dependencies.resolveEntities ?? resolveCompendiumEntities)(
+    searchQuery,
+    snapshot.generationIds,
+    entryScope,
+  );
+
   const retrievalParams: RetrievalParams = {
     limit: strategyLimit,
     generationIds: snapshot.generationIds,
+    ...(entryScope ? { chunkIds: entityResolution.candidates.map((candidate) => candidate.chunkId) } : {}),
   };
 
   // 2. Expand query (static glossary for keyword search)
@@ -127,18 +150,25 @@ export async function hybridSearch(
 
   // 3. Rewrite query via LLM (parallel with keyword search)
   const rewritePromise: Promise<RewriteOutput> = rewriteEnabled
-    ? rewriteQuery(searchQuery).then((rewrite) => ({
-        rewrite,
-        vectorQueries: collectVectorQueries(rewrite),
-      }))
+    ? (dependencies.rewrite ?? rewriteQuery)(searchQuery).then((rawRewrite) => {
+        const rewrite = enrichRewriteWithEntities(rawRewrite, entityResolution.matches);
+        return {
+          rewrite,
+          vectorQueries: collectVectorQueries(rewrite),
+        };
+      })
     : Promise.resolve({
         rewrite: { original: searchQuery, canonical: searchQuery, bilingual: [], expanded: [] },
         vectorQueries: [searchQuery],
       });
 
   // 4. Run keyword search in parallel with LLM rewrite + vector search
+  const entityQueryTerms = entityResolution.matches.flatMap((match) => [match.title, ...match.aliases]);
+  const entityExpandedQuery = entityQueryTerms.length > 0
+    ? `${expandedQueryText} OR ${entityQueryTerms.map((term) => `"${term.replaceAll('"', '')}"`).join(" OR ")}`
+    : expandedQueryText;
   const [keywordResults, vectorResults] = await Promise.all([
-    (dependencies.keyword ?? keywordSearch)(expandedQueryText, retrievalParams),
+    (dependencies.keyword ?? keywordSearch)(entityExpandedQuery, retrievalParams),
     rewritePromise.then(({ vectorQueries }) => (dependencies.vector ?? vectorSearch)(vectorQueries, retrievalParams)),
   ]);
 
@@ -147,7 +177,7 @@ export async function hybridSearch(
   // 5. Merge with RRF
   const mergeLimit = safeLimit * 3;
   const merged = mergeCandidates(
-    [keywordResults, vectorResults],
+    [entityResolution.candidates, keywordResults, vectorResults],
     { ...mergeConfig, limit: mergeLimit },
   );
 
@@ -168,5 +198,6 @@ export async function hybridSearch(
       weight: e.weight,
     })),
     rewrite: rewriteEnabled ? rewrite : null,
+    entityMatches: entityResolution.matches,
   };
 }

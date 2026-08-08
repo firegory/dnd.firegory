@@ -224,7 +224,7 @@ describe("RAG pipeline: citation mapping", () => {
     ];
 
     const rawCitations: RawLlmCitation[] = [
-      { quote: "Armor Class is...", sourceTitle: "Basic Rules", page: 42 },
+      { quote: "Armor Class represents how well", sourceTitle: "Basic Rules", page: 42 },
     ];
 
     const citations = mapCitations(rawCitations, chunks);
@@ -256,7 +256,7 @@ describe("RAG pipeline: citation mapping", () => {
     assert.equal(citations[0].sourceTitle, "Monster Manual");
   });
 
-  it("includes unmatched citation with available data", () => {
+  it("omits unmatched citation without available source support", () => {
     const chunks: RetrievalCandidate[] = [];
 
     const rawCitations: RawLlmCitation[] = [
@@ -264,10 +264,7 @@ describe("RAG pipeline: citation mapping", () => {
     ];
 
     const citations = mapCitations(rawCitations, chunks);
-    assert.equal(citations.length, 1);
-    assert.equal(citations[0].sourceTitle, "Unknown Book");
-    assert.equal(citations[0].sourceId, "");
-    assert.equal(citations[0].fileId, "");
+    assert.deepEqual(citations, []);
   });
 
   it("skips citations without quote", () => {
@@ -292,8 +289,8 @@ describe("RAG pipeline: citation mapping", () => {
     ];
 
     const rawCitations: RawLlmCitation[] = [
-      { quote: "AC rule...", sourceTitle: "Basic Rules", page: 42 },
-      { quote: "Spellcasting...", sourceTitle: "Player's Handbook" },
+      { quote: "Armor Class represents how well", sourceTitle: "Basic Rules", page: 42 },
+      { quote: "Armor Class represents how well", sourceTitle: "Player's Handbook" },
     ];
 
     const citations = mapCitations(rawCitations, chunks);

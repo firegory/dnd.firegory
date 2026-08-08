@@ -68,14 +68,16 @@ async function searchByEmbedding(
   embedding: readonly number[],
   params: RetrievalParams,
 ): Promise<readonly RetrievalCandidate[]> {
-  const { limit, generationIds } = params;
+  const { limit, generationIds, chunkIds } = params;
   if (generationIds.length === 0) return [];
+  if (chunkIds && chunkIds.length === 0) return [];
   const safeLimit = Math.min(Math.max(1, limit), 200);
 
   const sqlParams = [
     generationIds,
     `[${embedding.join(",")}]`,
     safeLimit,
+    chunkIds ?? null,
   ];
 
   const result = await query<VectorRow>(
@@ -89,6 +91,7 @@ async function searchByEmbedding(
      WHERE s.deleted_at IS NULL
        AND f.deleted_at IS NULL
        AND c.generation_id = ANY($1::uuid[])
+       AND ($4::uuid[] IS NULL OR c.id = ANY($4::uuid[]))
        AND c.embedding IS NOT NULL
      ORDER BY c.embedding <=> $2::vector
      LIMIT $3`,

@@ -19,11 +19,14 @@ export type RerankConfig = Readonly<{
   sectionMatchBonus?: number;
   /** Source priority weights by category. Higher = preferred. */
   sourcePriority?: Readonly<Record<string, number>>;
+  /** Fixed bonus for citation-backed exact entity candidates. */
+  entityMatchBonus?: number;
 }>;
 
 const DEFAULT_CONFIG: Required<RerankConfig> = {
   enabled: true,
   sectionMatchBonus: 0.1,
+  entityMatchBonus: 0.05,
   sourcePriority: {
     core_rules: 1.0,
     official_supplement: 0.9,
@@ -64,6 +67,10 @@ export function rerankCandidates(
     // Source priority adjustment
     const priority = cfg.sourcePriority[candidate.sourceCategory] ?? 0.8;
     adjustedScore *= priority;
+
+    if (candidate.strategy === "entity") {
+      adjustedScore += cfg.entityMatchBonus;
+    }
 
     // Section heading match bonus
     if (candidate.sectionHeading && queryTerms.length > 0) {

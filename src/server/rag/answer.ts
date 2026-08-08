@@ -16,6 +16,7 @@
 import { hybridSearch, type HybridSearchResult } from "../retrieval/pipeline";
 import { chatCompletion, type ChatMessage, type LlmConfig } from "../llm/client";
 import type { RetrievalUser, RetrievalSelection } from "../access/retrieval-filter";
+import type { CompendiumEntryScope } from "../retrieval/entity";
 import {
   buildSystemPrompt,
   buildUserMessage,
@@ -53,6 +54,8 @@ export type AnswerRequest = Readonly<{
   retrievalLimit?: number;
   /** Optional LLM config overrides. */
   llmConfig?: Partial<LlmConfig>;
+  /** Optional canonical entry scope for ask-about-entry. */
+  entryScope?: CompendiumEntryScope;
 }>;
 
 export type RagAnswer = Readonly<{
@@ -103,6 +106,7 @@ export async function generateAnswer(
     answerLanguage,
     retrievalLimit = 8,
     llmConfig,
+    entryScope,
   } = request;
 
   // 1. Hybrid retrieval
@@ -113,6 +117,7 @@ export async function generateAnswer(
     limit: retrievalLimit,
     expansionConfig: { enabled: true, bilingual: true },
     rerankConfig: { enabled: true },
+    entryScope,
   });
 
   const chunks = retrieval.chunks;
@@ -219,6 +224,7 @@ function buildAnswerGenerationUnavailableAnswer(
       fileId: chunk.fileId,
       sourceId: chunk.sourceId,
       chunkId: chunk.chunkId,
+      ...(chunk.entityEvidence ? { entityEvidence: chunk.entityEvidence } : {}),
     })),
     confident: false,
     retrievedChunks: chunks.length,

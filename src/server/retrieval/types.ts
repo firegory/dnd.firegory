@@ -19,7 +19,20 @@ export type RetrievalCandidate = Readonly<{
   /** Strategy-specific raw score (e.g. ts_rank, cosine distance). */
   score: number;
   /** Which retrieval strategy produced this candidate. */
-  strategy: "keyword" | "vector";
+  strategy: "keyword" | "vector" | "entity";
+  /** Citation-backed compendium fields that caused an exact entity match. */
+  entityEvidence?: readonly EntityEvidence[];
+}>;
+
+export type EntityEvidence = Readonly<{
+  entryId: string;
+  entryType: string;
+  canonicalKey: string;
+  title: string;
+  citationId: string;
+  citationKind: "field" | "block";
+  fieldPath: string | null;
+  quote: string;
 }>;
 
 /** Parameters shared across retrieval strategies. */
@@ -28,4 +41,6 @@ export type RetrievalParams = Readonly<{
   limit: number;
   /** Authorized active generation IDs captured once for this request. */
   generationIds: readonly string[];
+  /** When present, restricts retrieval to citation-backed entity chunks. */
+  chunkIds?: readonly string[];
 }>;

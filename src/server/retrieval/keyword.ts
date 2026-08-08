@@ -27,10 +27,11 @@ export async function keywordSearch(
     return [];
   }
 
-  const { limit, generationIds } = params;
+  const { limit, generationIds, chunkIds } = params;
   if (generationIds.length === 0) return [];
+  if (chunkIds && chunkIds.length === 0) return [];
   const safeLimit = Math.min(Math.max(1, limit), 200);
-  const sqlParams = [generationIds, searchQuery, safeLimit];
+  const sqlParams = [generationIds, searchQuery, safeLimit, chunkIds ?? null];
 
   const result = await query<{
     id: string;
@@ -61,6 +62,7 @@ export async function keywordSearch(
      WHERE s.deleted_at IS NULL
        AND f.deleted_at IS NULL
        AND c.generation_id = ANY($1::uuid[])
+       AND ($4::uuid[] IS NULL OR c.id = ANY($4::uuid[]))
        AND to_tsvector('simple', c.text) @@ websearch_to_tsquery('simple', $2)
      ORDER BY rank DESC
      LIMIT $3`,

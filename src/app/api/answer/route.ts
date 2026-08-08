@@ -14,6 +14,7 @@ import { generateAnswer } from "../../../server/rag/answer";
 import { type AnswerLanguage } from "../../../server/rag/format";
 import { getCurrentUser } from "../../../server/auth/session";
 import type { SourceEdition, SourceLanguage, SourceCategory } from "../../../server/access/retrieval-filter";
+import { isCompendiumEntryScope, type CompendiumEntryScope } from "../../../server/retrieval/entity";
 
 export type AnswerRequestBody = Readonly<{
   query: string;
@@ -22,6 +23,7 @@ export type AnswerRequestBody = Readonly<{
   category?: SourceCategory;
   answerLanguage?: AnswerLanguage;
   limit?: number;
+  entryScope?: CompendiumEntryScope;
 }>;
 
 const MAX_QUERY_LENGTH = 500;
@@ -66,6 +68,10 @@ export async function POST(request: Request): Promise<NextResponse> {
     ? Math.min(Math.max(1, body.limit), 20)
     : undefined;
 
+  if (body.entryScope !== undefined && !isCompendiumEntryScope(body.entryScope)) {
+    return NextResponse.json({ error: "Invalid entry scope." }, { status: 400 });
+  }
+
   try {
     const result = await generateAnswer({
       query: body.query,
@@ -77,6 +83,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       },
       answerLanguage,
       retrievalLimit,
+      entryScope: body.entryScope,
     });
 
     return NextResponse.json({
@@ -92,6 +99,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         fileId: c.fileId,
         sourceId: c.sourceId,
         chunkId: c.chunkId,
+        ...(c.entityEvidence ? { entityEvidence: c.entityEvidence } : {}),
       })),
       confident: result.answer.confident,
       retrievedChunks: result.answer.retrievedChunks,
