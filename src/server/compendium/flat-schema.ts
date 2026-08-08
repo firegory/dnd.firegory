@@ -8,7 +8,7 @@ export function compendiumEntryRoute(type: string, id: string, selection: Requir
     spell: "spells", feat: "feats", background: "backgrounds", item: "items", equipment: "equipment", glossary: "glossary",
   };
   const path = collections[type] ? `/${collections[type]}/${id}` : `/${selection.language}/compendium/entries/${id}`;
-  return `${path}?${new URLSearchParams(selection)}`;
+  return `${path}?${new URLSearchParams({ edition: selection.edition, language: selection.language })}`;
 }
 
 export const FEAT_CATEGORIES = ["origin", "general", "fighting_style", "epic_boon"] as const;

@@ -6,6 +6,7 @@ import { classifyCandidatePublication, projectSnapshotFlatCandidate } from "../.
 import { parseFlatListOptions, parseFlatSelection, parseFlatType } from "../../src/server/compendium/flat-http.ts";
 import { FlatNotFoundError, FlatReadInputError, FlatReadService } from "../../src/server/compendium/flat-read-service.ts";
 import { compendiumEntryRoute, projectionAttributes, validateFlatProjection, type FlatEntryType } from "../../src/server/compendium/flat-schema.ts";
+import { CompendiumReadService } from "../../src/server/compendium/read-service.ts";
 import { flatCandidate, flatMetadataEvidence, nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
 import { classifyChunkType } from "../../src/server/compendium/candidate-parsers.ts";
 import { nextDndCardFingerprint } from "../../src/server/compendium/next-dnd/parser.ts";
@@ -129,7 +130,7 @@ test("flat list count, filters, relation targets, and cursor remain inside one R
   assert.deepEqual(JSON.parse(Buffer.from(result.nextCursor!, "base64url").toString()), { v: 1, edition: "5.5e", language: "ru", title: "observant", id: row.entry_id });
   assert.match(statements[0], /s\.access_tier = 'open'/); assert.match(statements[0], /PARTITION BY n\.entry_id, n\.edition, n\.language/); assert.match(statements[0], /indexed\.typed_fields @>/); assert.match(statements[0], /nfs_index_typed_number\(indexed\.typed_fields/); assert.match(statements[0], /ORDER BY indexed\.edition, indexed\.language, lower\(indexed\.name\) COLLATE "C", indexed\.entry_id/); assert.doesNotMatch(statements[1], /lower\(indexed\.name\) COLLATE "C"[\s\S]*>/);
   const detailStatements: string[] = []; await new FlatReadService({ async query(sql: string) { detailStatements.push(sql); return { rows: [row] }; } }).get({ role: "premium", userId: "33333333-3333-4333-8333-333333333333" }, "feat", row.entry_id);
-  assert.match(detailStatements[0], /compendium_import_links evidence JOIN accessible_relation_evidence authorized/); assert.match(detailStatements[0], /accessible_relation_versions AS MATERIALIZED/); assert.match(detailStatements[0], /accessible_relation_evidence AS MATERIALIZED/); assert.match(detailStatements[0], /JOIN accessible_relation_versions target/); assert.match(detailStatements[0], /CASE WHEN flat\.entry_id .* THEN 0 ELSE 1 END AS identifier_rank/); assert.match(detailStatements[0], /count\(\*\) OVER \(\) AS match_count/); assert.match(detailStatements[0], /flat\.match_count = 1/); assert.match(detailStatements[0], /s\.owner_user_id/);
+  assert.match(detailStatements[0], /compendium_import_links evidence JOIN accessible_relation_evidence authorized/); assert.match(detailStatements[0], /accessible_relation_versions AS MATERIALIZED/); assert.match(detailStatements[0], /PARTITION BY n\.entry_id, n\.source_id, n\.file_id, n\.edition, n\.language/); assert.match(detailStatements[0], /accessible_relation_evidence AS MATERIALIZED/); assert.match(detailStatements[0], /accessible_relational_targets AS MATERIALIZED/); assert.match(detailStatements[0], /LEFT JOIN accessible_relation_versions nfs_target/); assert.match(detailStatements[0], /relational_target\.source_id = flat\.source_id AND relational_target\.file_id = flat\.file_id/); assert.match(detailStatements[0], /authorized\.source_id = flat\.source_id AND authorized\.file_id = flat\.file_id/); assert.match(detailStatements[0], /CASE WHEN relational_target\.entry_type::text IN .* THEN nfs_target\.entry_id ELSE relational_target\.entry_id::text END/); assert.match(detailStatements[0], /CASE WHEN flat\.entry_id .* THEN 0 ELSE 1 END AS identifier_rank/); assert.match(detailStatements[0], /count\(\*\) OVER \(\) AS match_count/); assert.match(detailStatements[0], /flat\.match_count = 1/); assert.match(detailStatements[0], /s\.owner_user_id/);
 });
 
 test("relation route map covers dedicated and generic compendium targets", () => {
@@ -137,6 +138,28 @@ test("relation route map covers dedicated and generic compendium targets", () =>
   assert.equal(compendiumEntryRoute("spell", "spell-shield", selection), "/spells/spell-shield?edition=5.5e&language=ru");
   assert.equal(compendiumEntryRoute("glossary", "glossary-cover", selection), "/glossary/glossary-cover?edition=5.5e&language=ru");
   for (const type of ["creature", "class", "feature", "species", "monster", "classFeature", "other"]) assert.equal(compendiumEntryRoute(type, `${type}-id`, selection), `/ru/compendium/entries/${type}-id?edition=5.5e&language=ru`);
+});
+
+test("generic flat relation UUID resolves through the generic reader in the exact accessible variant", async () => {
+  const targetId = "44444444-4444-4444-8444-444444444444";
+  const base = flatDetailsFixture()[0]; const candidate = flatCandidate(base as never);
+  const revision = projectSnapshotFlatCandidate(candidate, { candidateKey: "feats-201", entryType: "feat", createdAt: base.fetchedAt, source, fileId: fileUuid, evidence: evidence(base) });
+  const [projection] = projectCanonicalRevisions("flat-relation", [revision], [{ sourceId: source.sourceId, fileId: fileUuid, path: source.files[0].path, mediaType: source.files[0].mediaType, contentHash: source.files[0].contentHash, byteSize: 512 }]);
+  const synced = nfsIndexEntryRow("flat-relation", projection);
+  const flatRow = { ...synced, mime_type: source.files[0].mediaType, source_title: source.title, publication_code: source.publication.code, publication_revision: source.publication.revision, source_priority: 10, sort_title: "observant", source_versions: [], relations: [{ type: "references", direction: "outgoing", entryId: targetId, entryType: "creature", title: "Goblin" }] };
+  let flatSql = "";
+  const flat = await new FlatReadService({ async query(sql: string) { flatSql = sql; return { rows: [flatRow] }; } }).get({ role: "user" }, "feat", synced.entry_id, { edition: "5.5e", language: "ru" });
+  assert.equal(flat.relations[0].entryId, targetId);
+  assert.equal(compendiumEntryRoute(flat.relations[0].entryType, flat.relations[0].entryId, flat), `/ru/compendium/entries/${targetId}?edition=5.5e&language=ru`);
+  assert.match(flatSql, /relational_target\.source_id = flat\.source_id/); assert.match(flatSql, /authorized\.edition = flat\.edition AND authorized\.language = flat\.language/); assert.match(flatSql, /s\.access_tier = 'open'/);
+
+  let genericValues: readonly unknown[] = [];
+  const generic = new CompendiumReadService({ async query(_sql: string, values: readonly unknown[] = []) { genericValues = values; return { rows: [{ entry_id: targetId, canonical_key: "goblin", entry_type: "creature", edition: "5.5e", language: "ru", version_id: "55555555-5555-4555-8555-555555555555", revision_id: "66666666-6666-4666-8666-666666666666", slug: "goblin", aliases: [], title: "Goblin", summary: null, body: "A goblin.", extension_data: {}, projection: {}, relations: [], sources: [], citations: [], source_id: sourceUuid, source_title: "Open Rules", source_category: "core_rules", publication_code: "SRD", publication_title: "Open Rules", publisher: null, release_year: 2024, publication_revision: null, external_origin_url: null, attribution: null, license: null }] } as never; } });
+  const resolved = await generic.getEntry({ role: "user" }, flat.relations[0].entryId, { edition: flat.edition as "5.5e", language: flat.language as "ru" });
+  assert.equal(resolved.id, targetId); assert.equal(resolved.slug, "goblin"); assert.ok(genericValues.includes(targetId)); assert.ok(genericValues.includes("5.5e")); assert.ok(genericValues.includes("ru"));
+
+  const hidden = await new FlatReadService({ async query() { return { rows: [{ ...flatRow, relations: [] }] }; } }).get({ role: "user" }, "feat", synced.entry_id, { edition: "5.5e", language: "ru" });
+  assert.deepEqual(hidden.relations, []);
 });
 
 test("detail identity SQL prioritizes exact IDs and rejects ambiguous aliases", async () => {

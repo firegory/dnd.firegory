@@ -80,24 +80,31 @@ export class FlatReadService {
     )
       SELECT flat.*, coalesce((
         SELECT jsonb_agg(jsonb_build_object('type', relation.relation_type, 'direction', relation.direction,
-          'entryId', target.entry_id, 'entryType', target.entry_type, 'title', target.name)
-          ORDER BY target.name, target.entry_id)
+          'entryId', CASE WHEN relational_target.entry_type::text IN ('spell', 'feat', 'background', 'item', 'equipment', 'glossary') THEN nfs_target.entry_id ELSE relational_target.entry_id::text END,
+          'entryType', CASE WHEN relational_target.entry_type::text IN ('spell', 'feat', 'background', 'item', 'equipment', 'glossary') THEN nfs_target.entry_type ELSE relational_target.entry_type::text END,
+          'title', coalesce(nfs_target.name, relational_target.title))
+          ORDER BY coalesce(nfs_target.name, relational_target.title), relational_target.entry_id)
         FROM (
           SELECT rel.relation_type, rel.target_entry_id AS target_id, 'outgoing' AS direction
           FROM compendium_entry_relations rel JOIN compendium_entries owner ON owner.id = rel.source_entry_id
           WHERE owner.entry_type = flat.entry_type::compendium_entry_type
             AND owner.canonical_key = regexp_replace(flat.entry_id, '^[^-]+-', '')
-            AND EXISTS (SELECT 1 FROM compendium_import_links evidence JOIN accessible_relation_evidence authorized ON authorized.version_id = evidence.evidence_version_id WHERE evidence.relation_id = rel.id)
+            AND EXISTS (SELECT 1 FROM compendium_import_links evidence JOIN accessible_relation_evidence authorized ON authorized.version_id = evidence.evidence_version_id WHERE evidence.relation_id = rel.id AND authorized.source_id = flat.source_id AND authorized.file_id = flat.file_id AND authorized.edition = flat.edition AND authorized.language = flat.language)
           UNION ALL
           SELECT rel.relation_type, rel.source_entry_id AS target_id, 'incoming' AS direction
           FROM compendium_entry_relations rel JOIN compendium_entries owner ON owner.id = rel.target_entry_id
           WHERE owner.entry_type = flat.entry_type::compendium_entry_type
             AND owner.canonical_key = regexp_replace(flat.entry_id, '^[^-]+-', '')
-            AND EXISTS (SELECT 1 FROM compendium_import_links evidence JOIN accessible_relation_evidence authorized ON authorized.version_id = evidence.evidence_version_id WHERE evidence.relation_id = rel.id)
+            AND EXISTS (SELECT 1 FROM compendium_import_links evidence JOIN accessible_relation_evidence authorized ON authorized.version_id = evidence.evidence_version_id WHERE evidence.relation_id = rel.id AND authorized.source_id = flat.source_id AND authorized.file_id = flat.file_id AND authorized.edition = flat.edition AND authorized.language = flat.language)
         ) relation
         JOIN compendium_entries target_entry ON target_entry.id = relation.target_id
-        JOIN accessible_relation_versions target ON target.entry_id = target_entry.entry_type::text || '-' || target_entry.canonical_key
-          AND target.edition = flat.edition AND target.language = flat.language AND target.source_rank = 1
+        JOIN accessible_relational_targets relational_target ON relational_target.entry_id = target_entry.id
+          AND relational_target.source_id = flat.source_id AND relational_target.file_id = flat.file_id
+          AND relational_target.edition = flat.edition AND relational_target.language = flat.language
+        LEFT JOIN accessible_relation_versions nfs_target ON nfs_target.entry_id = target_entry.entry_type::text || '-' || target_entry.canonical_key
+          AND nfs_target.source_id = relational_target.source_id AND nfs_target.file_id = relational_target.file_id
+          AND nfs_target.edition = relational_target.edition AND nfs_target.language = relational_target.language AND nfs_target.source_rank = 1
+        WHERE relational_target.entry_type::text NOT IN ('spell', 'feat', 'background', 'item', 'equipment', 'glossary') OR nfs_target.entry_id IS NOT NULL
       ), '[]'::jsonb) AS relations
       FROM selected_flat flat WHERE flat.match_count = 1 LIMIT 1`, boundary.params);
     if (!result.rows[0]) throw new FlatNotFoundError();
@@ -122,15 +129,25 @@ function boundarySql(user: RetrievalUser, type: FlatEntryType, selection: Retrie
     SELECT n.id AS index_id, n.entry_id, n.revision_id, n.entry_type, n.name, n.aliases, n.typed_fields, n.plain_text, n.canonical_payload,
       n.source_id, n.file_id, f.mime_type, s.title AS source_title, s.edition, s.language, s.publication_code,
       s.publication_revision, s.source_priority, lower(n.name) AS sort_title,
-      row_number() OVER (PARTITION BY n.entry_id, n.edition, n.language ORDER BY s.source_priority DESC, n.indexed_at DESC, n.revision_id) AS source_rank
+      row_number() OVER (PARTITION BY n.entry_id, n.source_id, n.file_id, n.edition, n.language ORDER BY n.indexed_at DESC, n.revision_id) AS source_rank
     FROM nfs_index_entries n JOIN sources s ON s.id = n.source_id JOIN files f ON f.id = n.file_id AND f.source_id = s.id
     WHERE ${access.sql} AND s.deleted_at IS NULL AND f.deleted_at IS NULL AND n.lifecycle = 'active'
       AND n.edition = s.edition AND n.language = s.language
   ), accessible_relation_evidence AS MATERIALIZED (
-    SELECT version.id AS version_id FROM compendium_versions version
+    SELECT version.id AS version_id, version.source_id, version.file_id, version.edition, version.language FROM compendium_versions version
     JOIN sources s ON s.id = version.source_id
     JOIN files f ON f.id = version.file_id AND f.source_id = s.id
     WHERE ${access.sql} AND version.lifecycle = 'published' AND s.deleted_at IS NULL AND f.deleted_at IS NULL
+  ), accessible_relational_targets AS MATERIALIZED (
+    SELECT version.entry_id, version.id AS version_id, version.entry_type, version.source_id, version.file_id,
+      version.edition, version.language, revision.title, slug.name AS slug
+    FROM compendium_versions version
+    JOIN compendium_revisions revision ON revision.id = version.active_revision_id AND revision.version_id = version.id
+    JOIN compendium_names slug ON slug.version_id = version.id AND slug.kind = 'slug'
+    JOIN sources s ON s.id = version.source_id
+    JOIN files f ON f.id = version.file_id AND f.source_id = s.id
+    WHERE ${access.sql} AND version.lifecycle = 'published' AND revision.lifecycle = 'published'
+      AND s.deleted_at IS NULL AND f.deleted_at IS NULL
   ), accessible_flat AS MATERIALIZED (
     SELECT flat_version.*, (SELECT jsonb_agg(jsonb_build_object('sourceId', version.source_id, 'title', version.source_title,
       'code', version.publication_code, 'revision', version.publication_revision, 'revisionId', version.revision_id)
