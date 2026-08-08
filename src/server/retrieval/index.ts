@@ -8,5 +8,6 @@ export { vectorSearch } from "./vector";
 export { mergeCandidates, type HybridMergeConfig } from "./hybrid";
 export { expandQuery, combinedExpandedQuery, type ExpansionConfig, type ExpandedQuery } from "./expand";
 export { rewriteQuery, collectVectorQueries, type RewrittenQuery } from "./rewrite";
+export { resolveCompendiumEntities, isCompendiumEntryScope, type CompendiumEntryScope, type ExactEntityMatch } from "./entity";
 export { rerankCandidates, noopRerankConfig, type RerankConfig } from "./rerank";
 export type { RetrievalCandidate, RetrievalParams } from "./types";

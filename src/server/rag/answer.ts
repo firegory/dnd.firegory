@@ -16,14 +16,16 @@
 import { hybridSearch, type HybridSearchResult } from "../retrieval/pipeline";
 import { chatCompletion, type ChatMessage, type LlmConfig } from "../llm/client";
 import type { RetrievalUser, RetrievalSelection } from "../access/retrieval-filter";
+import type { CompendiumEntryScope } from "../retrieval/entity";
 import {
   buildSystemPrompt,
   buildUserMessage,
   parseLlmResponse,
-  mapCitations,
+  citationEntityEvidence,
   type AnswerLanguage,
   type SourceCitation,
 } from "./format";
+import { groundGeneratedAnswer, unsupportedAnswer } from "./ground.ts";
 
 // Re-export format utilities for direct testing
 export {
@@ -53,6 +55,8 @@ export type AnswerRequest = Readonly<{
   retrievalLimit?: number;
   /** Optional LLM config overrides. */
   llmConfig?: Partial<LlmConfig>;
+  /** Optional canonical entry scope for ask-about-entry. */
+  entryScope?: CompendiumEntryScope;
 }>;
 
 export type RagAnswer = Readonly<{
@@ -103,6 +107,7 @@ export async function generateAnswer(
     answerLanguage,
     retrievalLimit = 8,
     llmConfig,
+    entryScope,
   } = request;
 
   // 1. Hybrid retrieval
@@ -113,13 +118,14 @@ export async function generateAnswer(
     limit: retrievalLimit,
     expansionConfig: { enabled: true, bilingual: true },
     rerankConfig: { enabled: true },
+    entryScope,
   });
 
   const chunks = retrieval.chunks;
 
   // 2. Check if we have enough for a confident answer
   if (chunks.length < MIN_CHUNKS_FOR_CONFIDENT_ANSWER) {
-    const noSupportAnswer = buildNoSupportAnswer(answerLanguage);
+    const noSupportAnswer = unsupportedAnswer(answerLanguage, chunks.length);
     return {
       answer: noSupportAnswer,
       retrieval,
@@ -163,14 +169,7 @@ export async function generateAnswer(
 
   // 5. Parse and map
   const parsed = parseLlmResponse(result.content);
-  const citations = mapCitations(parsed.citations, chunks);
-
-  const answer: RagAnswer = {
-    answer: parsed.answer ?? result.content,
-    citations,
-    confident: parsed.confident !== false,
-    retrievedChunks: chunks.length,
-  };
+  const answer: RagAnswer = groundGeneratedAnswer(parsed, chunks, answerLanguage);
 
   return {
     answer,
@@ -183,20 +182,6 @@ export async function generateAnswer(
 /**
  * Builds a "no support found" answer without calling the LLM.
  */
-function buildNoSupportAnswer(language: AnswerLanguage): RagAnswer {
-  const messages: Record<AnswerLanguage, string> = {
-    en: "I could not find relevant information in the available sources for your query.",
-    ru: "Не удалось найти релевантную информацию в доступных источниках по вашему запросу.",
-  };
-
-  return {
-    answer: messages[language],
-    citations: [],
-    confident: false,
-    retrievedChunks: 0,
-  };
-}
-
 function buildAnswerGenerationUnavailableAnswer(
   language: AnswerLanguage,
   chunks: HybridSearchResult["chunks"],
@@ -219,6 +204,9 @@ function buildAnswerGenerationUnavailableAnswer(
       fileId: chunk.fileId,
       sourceId: chunk.sourceId,
       chunkId: chunk.chunkId,
+      ...(chunk.entityEvidence?.length
+        ? { entityEvidence: chunk.entityEvidence.map(citationEntityEvidence) }
+        : {}),
     })),
     confident: false,
     retrievedChunks: chunks.length,

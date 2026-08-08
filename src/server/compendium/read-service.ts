@@ -5,6 +5,8 @@ import {
   buildRetrievalAuthorizationFilter,
   type RetrievalSelection,
   type RetrievalUser,
+  type SourceEdition,
+  type SourceLanguage,
 } from "../access/retrieval-filter.ts";
 import { query } from "../db/client.ts";
 import { COMPENDIUM_ENTRY_TYPES, type CompendiumEntryType } from "./service.ts";
@@ -23,8 +25,8 @@ export type CompendiumListEntry = Readonly<{
   id: string;
   canonicalKey: string;
   entryType: CompendiumEntryType;
-  edition: string;
-  language: string;
+  edition: SourceEdition;
+  language: SourceLanguage;
   versionId: string;
   slug: string;
   aliases: readonly string[];
@@ -39,8 +41,8 @@ export type PublicSource = Readonly<{
   id: string;
   title: string;
   category: string;
-  edition: string;
-  language: string;
+  edition: SourceEdition;
+  language: SourceLanguage;
   publication: Readonly<{
     code: string | null;
     title: string;
@@ -84,8 +86,8 @@ type EntryRow = QueryResultRow & Readonly<{
   entry_id: string;
   canonical_key: string;
   entry_type: CompendiumEntryType;
-  edition: string;
-  language: string;
+  edition: SourceEdition;
+  language: SourceLanguage;
   version_id: string;
   revision_id: string;
   slug: string;
@@ -312,8 +314,8 @@ type SourceRow = Readonly<{
   id: string;
   title: string;
   category: string;
-  edition: string;
-  language: string;
+  edition: SourceEdition;
+  language: SourceLanguage;
   publication_code: string | null;
   publication_title: string;
   publisher: string | null;

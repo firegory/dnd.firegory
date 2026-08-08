@@ -206,6 +206,17 @@ describe("parseLlmResponse", () => {
     assert.equal(result.answer, "Trimmed");
     assert.equal(result.confident, true);
   });
+
+  it("drops model-provided structured claims and invalid field types", () => {
+    const result = parseLlmResponse(JSON.stringify({
+      answer: { range: "Self" },
+      confident: "yes",
+      entity: { range: "Self" },
+      citations: [{ quote: "Range: Self", page: "12", structuredClaim: { range: "Self" } }],
+    }));
+
+    assert.deepEqual(result, { citations: [{ quote: "Range: Self" }] });
+  });
 });
 
 // ---------- mapCitations ----------
@@ -213,7 +224,7 @@ describe("parseLlmResponse", () => {
 describe("mapCitations", () => {
   it("maps citation by exact source title match", () => {
     const chunks = [makeChunk({ sourceTitle: "Basic Rules", sourceId: "src-1", fileId: "file-1" })];
-    const raw = [{ quote: "A reaction...", sourceTitle: "Basic Rules" }];
+    const raw = [{ quote: "A creature can take a reaction", sourceTitle: "Basic Rules" }];
     const result = mapCitations(raw, chunks);
     assert.equal(result.length, 1);
     assert.equal(result[0].sourceTitle, "Basic Rules");
@@ -223,13 +234,13 @@ describe("mapCitations", () => {
 
   it("maps citation by case-insensitive source title", () => {
     const chunks = [makeChunk({ sourceTitle: "Basic Rules" })];
-    const raw = [{ quote: "A reaction...", sourceTitle: "basic rules" }];
+    const raw = [{ quote: "A creature can take a reaction", sourceTitle: "basic rules" }];
     const result = mapCitations(raw, chunks);
     assert.equal(result.length, 1);
     assert.equal(result[0].sourceTitle, "Basic Rules");
   });
 
-  it("falls back to quote overlap matching", () => {
+  it("maps a normalized contiguous quote substring and derives the source quote", () => {
     const chunks = [
       makeChunk({
         sourceTitle: "Player's Handbook",
@@ -240,16 +251,155 @@ describe("mapCitations", () => {
     const result = mapCitations(raw, chunks);
     assert.equal(result.length, 1);
     assert.equal(result[0].sourceTitle, "Player's Handbook");
+    assert.equal(result[0].quote, "A creature can take a reaction on another creature's turn.");
   });
 
-  it("includes unmatched citations with available data", () => {
+  it("omits unmatched citations without source support", () => {
     const chunks = [makeChunk({ sourceTitle: "Basic Rules" })];
     const raw = [{ quote: "Something unrelated", sourceTitle: "Unknown Source" }];
     const result = mapCitations(raw, chunks);
+    assert.deepEqual(result, []);
+  });
+
+  it("does not accept an unsupported short quote by incidental overlap", () => {
+    assert.deepEqual(
+      mapCitations([{ quote: "A", sourceTitle: "Basic Rules" }], [makeChunk()]),
+      [],
+    );
+  });
+
+  it("rejects a divergent quote that only shares a long prefix", () => {
+    const chunk = makeChunk({ quoteText: "A creature can take a reaction on another creature's turn." });
+    assert.deepEqual(
+      mapCitations([{ quote: "A creature can take a reaction that deals damage" }], [chunk]),
+      [],
+    );
+  });
+
+  it("propagates only field evidence supporting the final quote", () => {
+    const chunks = [makeChunk({
+      strategy: "entity",
+      entityEvidence: [
+        {
+          entryId: "entry-1",
+          entryType: "spell",
+          canonicalKey: "shield",
+          title: "Shield",
+          citationId: "citation-1",
+          citationKind: "field",
+          fieldPath: "$.range",
+          quote: "Range: Self",
+        },
+        {
+          entryId: "entry-1",
+          entryType: "spell",
+          canonicalKey: "shield",
+          title: "Shield",
+          citationId: "citation-2",
+          citationKind: "field",
+          fieldPath: "$.duration",
+          quote: "Duration: 1 round",
+        },
+      ],
+    })];
+
+    const result = mapCitations(
+      [{ quote: "Range: Self", sourceTitle: "Basic Rules" }],
+      chunks,
+    );
+
     assert.equal(result.length, 1);
-    assert.equal(result[0].sourceTitle, "Unknown Source");
-    assert.equal(result[0].sourceId, "");
-    assert.equal(result[0].fileId, "");
+    assert.deepEqual(result[0].entityEvidence?.map((evidence) => evidence.fieldPath), ["$.range"]);
+  });
+
+  it("propagates field evidence contained by a full authoritative chunk quote", () => {
+    const chunks = [makeChunk({
+      quoteText: "Range: Self. Duration: 1 round.",
+      strategy: "entity",
+      entityEvidence: [
+        {
+          entryId: "entry-1",
+          entryType: "spell",
+          canonicalKey: "shield",
+          title: "Shield",
+          citationId: "citation-range",
+          citationKind: "field",
+          fieldPath: "$.range",
+          quote: "Range: Self",
+        },
+        {
+          entryId: "entry-1",
+          entryType: "spell",
+          canonicalKey: "shield",
+          title: "Shield",
+          citationId: "citation-damage",
+          citationKind: "field",
+          fieldPath: "$.damage",
+          quote: "Damage: 4d6",
+        },
+      ],
+    })];
+
+    const result = mapCitations(
+      [{ quote: "Range: Self. Duration: 1 round." }],
+      chunks,
+    );
+
+    assert.deepEqual(result[0].entityEvidence?.map((evidence) => evidence.fieldPath), ["$.range"]);
+  });
+
+  it("derives a narrow citation inside field evidence without attaching outside evidence", () => {
+    const chunks = [makeChunk({
+      strategy: "entity",
+      entityEvidence: [
+        {
+          entryId: "entry-1",
+          entryType: "spell",
+          canonicalKey: "shield",
+          title: "Shield",
+          citationId: "citation-range",
+          citationKind: "field",
+          fieldPath: "$.range",
+          quote: "Range: Self",
+        },
+        {
+          entryId: "entry-1",
+          entryType: "spell",
+          canonicalKey: "shield",
+          title: "Shield",
+          citationId: "citation-duration",
+          citationKind: "field",
+          fieldPath: "$.duration",
+          quote: "Duration: 1 round",
+        },
+      ],
+    })];
+
+    const result = mapCitations([{ quote: "Range: Se" }], chunks);
+
+    assert.equal(result[0].quote, "Range: Self");
+    assert.deepEqual(result[0].entityEvidence?.map((evidence) => evidence.fieldPath), ["$.range"]);
+  });
+
+  it("omits an entity field claim without a supporting carried citation", () => {
+    const chunks = [makeChunk({
+      strategy: "entity",
+      entityEvidence: [{
+        entryId: "entry-1",
+        entryType: "spell",
+        canonicalKey: "shield",
+        title: "Shield",
+        citationId: "citation-1",
+        citationKind: "field",
+        fieldPath: "$.range",
+        quote: "Range: Self",
+      }],
+    })];
+
+    assert.deepEqual(
+      mapCitations([{ quote: "Damage: 4d6", sourceTitle: "Basic Rules" }], chunks),
+      [],
+    );
   });
 
   it("skips citations without a quote", () => {
@@ -261,18 +411,18 @@ describe("mapCitations", () => {
 
   it("uses chunk metadata for page/section when LLM omits them", () => {
     const chunks = [makeChunk({ pageNumber: 73, sectionHeading: "Reactions" })];
-    const raw = [{ quote: "A reaction...", sourceTitle: "Basic Rules" }];
+    const raw = [{ quote: "A creature can take a reaction", sourceTitle: "Basic Rules" }];
     const result = mapCitations(raw, chunks);
     assert.equal(result[0].page, 73);
     assert.equal(result[0].section, "Reactions");
   });
 
-  it("prefers LLM-provided page/section over chunk metadata", () => {
+  it("ignores LLM-provided page/section in favor of chunk metadata", () => {
     const chunks = [makeChunk({ pageNumber: 73, sectionHeading: "Reactions" })];
-    const raw = [{ quote: "A reaction...", sourceTitle: "Basic Rules", page: 99, section: "Combat" }];
+    const raw = [{ quote: "A creature can take a reaction", sourceTitle: "Basic Rules", page: 99, section: "Combat" }];
     const result = mapCitations(raw, chunks);
-    assert.equal(result[0].page, 99);
-    assert.equal(result[0].section, "Combat");
+    assert.equal(result[0].page, 73);
+    assert.equal(result[0].section, "Reactions");
   });
 
   it("maps multiple citations to different chunks", () => {
@@ -285,7 +435,7 @@ describe("mapCitations", () => {
       }),
     ];
     const raw = [
-      { quote: "A reaction...", sourceTitle: "Basic Rules" },
+      { quote: "A creature can take a reaction", sourceTitle: "Basic Rules" },
       { quote: "Different text for testing overlap" },
     ];
     const result = mapCitations(raw, chunks);
