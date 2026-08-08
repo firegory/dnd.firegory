@@ -357,9 +357,11 @@ CREATE TABLE IF NOT EXISTS nfs_index_option_relations (
   source_entry_id text NOT NULL,
   source_revision_id text NOT NULL,
   source_id uuid NOT NULL,
+  source_file_id uuid NOT NULL,
   target_entry_id text NOT NULL,
   target_revision_id text NOT NULL,
   target_source_id uuid NOT NULL,
+  target_file_id uuid NOT NULL,
   edition source_edition NOT NULL,
   language source_language NOT NULL,
   relation_kind text NOT NULL CHECK (relation_kind IN ('parent','feature','cross_link','trait_override')),
@@ -379,17 +381,17 @@ CREATE INDEX IF NOT EXISTS nfs_index_option_relations_target_idx ON nfs_index_op
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'nfs_index_entries_exact_version_unique') THEN
     ALTER TABLE nfs_index_entries ADD CONSTRAINT nfs_index_entries_exact_version_unique
-      UNIQUE (repository_id, entry_id, revision_id, source_id);
+      UNIQUE (repository_id, entry_id, revision_id, source_id, file_id);
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'nfs_option_relations_source_fk') THEN
     ALTER TABLE nfs_index_option_relations ADD CONSTRAINT nfs_option_relations_source_fk
-      FOREIGN KEY (repository_id, source_entry_id, source_revision_id, source_id)
-      REFERENCES nfs_index_entries(repository_id, entry_id, revision_id, source_id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+      FOREIGN KEY (repository_id, source_entry_id, source_revision_id, source_id, source_file_id)
+      REFERENCES nfs_index_entries(repository_id, entry_id, revision_id, source_id, file_id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'nfs_option_relations_target_fk') THEN
     ALTER TABLE nfs_index_option_relations ADD CONSTRAINT nfs_option_relations_target_fk
-      FOREIGN KEY (repository_id, target_entry_id, target_revision_id, target_source_id)
-      REFERENCES nfs_index_entries(repository_id, entry_id, revision_id, source_id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+      FOREIGN KEY (repository_id, target_entry_id, target_revision_id, target_source_id, target_file_id)
+      REFERENCES nfs_index_entries(repository_id, entry_id, revision_id, source_id, file_id) ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
   END IF;
 END $$;
 
@@ -416,14 +418,14 @@ BEGIN
   JOIN sources source_meta ON source_meta.id = source.source_id
   JOIN nfs_index_entries target ON target.repository_id = NEW.repository_id
     AND target.entry_id = NEW.target_entry_id AND target.revision_id = NEW.target_revision_id
-    AND target.source_id = NEW.target_source_id
+    AND target.source_id = NEW.target_source_id AND target.file_id = NEW.target_file_id
   JOIN sources target_meta ON target_meta.id = target.source_id
   CROSS JOIN LATERAL (SELECT coalesce(jsonb_object_agg(field->>'key',field->'value'),'{}') AS values
     FROM jsonb_array_elements(target.typed_fields) field) fields
   CROSS JOIN LATERAL (SELECT coalesce(jsonb_object_agg(field->>'key',field->'value'),'{}') AS values
     FROM jsonb_array_elements(source.typed_fields) field) source_fields
   WHERE source.repository_id = NEW.repository_id AND source.entry_id = NEW.source_entry_id
-    AND source.revision_id = NEW.source_revision_id AND source.source_id = NEW.source_id
+    AND source.revision_id = NEW.source_revision_id AND source.source_id = NEW.source_id AND source.file_id = NEW.source_file_id
     AND source.lifecycle = 'active' AND target.lifecycle = 'active'
     AND source.source_id = target.source_id AND source_meta.edition = target_meta.edition
     AND source_meta.language = target_meta.language AND source_meta.edition = NEW.edition
@@ -449,9 +451,11 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM nfs_index_option_relations relation
     JOIN nfs_index_entries source ON source.repository_id = relation.repository_id
-      AND source.entry_id = relation.source_entry_id AND source.revision_id = relation.source_revision_id AND source.source_id = relation.source_id
+      AND source.entry_id = relation.source_entry_id AND source.revision_id = relation.source_revision_id
+      AND source.source_id = relation.source_id AND source.file_id = relation.source_file_id
     JOIN nfs_index_entries target ON target.repository_id = relation.repository_id
-      AND target.entry_id = relation.target_entry_id AND target.revision_id = relation.target_revision_id AND target.source_id = relation.target_source_id
+      AND target.entry_id = relation.target_entry_id AND target.revision_id = relation.target_revision_id
+      AND target.source_id = relation.target_source_id AND target.file_id = relation.target_file_id
     WHERE source.lifecycle <> 'active' OR target.lifecycle <> 'active'
   ) THEN RAISE EXCEPTION 'NFS option relations cannot reference retired or stale entry versions'; END IF;
   RETURN NULL;

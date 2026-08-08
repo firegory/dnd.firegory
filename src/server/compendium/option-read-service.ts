@@ -67,9 +67,11 @@ function boundarySql(type: OptionType, user: RetrievalUser, selection: OptionVer
       ORDER BY relation.relation_kind,relation.position)
      FROM nfs_index_option_relations relation JOIN accessible_entries target
        ON target.repository_id=relation.repository_id AND target.entry_id=relation.target_entry_id
-      AND target.revision_id=relation.target_revision_id AND target.source_id=relation.target_source_id AND target.lifecycle='active'
+      AND target.revision_id=relation.target_revision_id AND target.source_id=relation.target_source_id
+      AND target.file_id=relation.target_file_id AND target.lifecycle='active'
      WHERE relation.repository_id=option_version.repository_id AND relation.source_entry_id=option_version.entry_id
        AND relation.source_revision_id=option_version.revision_id AND relation.source_id=option_version.source_id
+       AND relation.source_file_id=option_version.file_id
        AND relation.edition=option_version.edition AND relation.language=option_version.language
        AND relation.target_lifecycle='active') AS relations,
     (SELECT jsonb_agg(jsonb_build_object('sourceId',v.source_id,'title',v.source_title,'code',v.publication_code,'revision',v.publication_revision,'revisionId',v.revision_id) ORDER BY v.source_priority DESC,v.revision_id) FROM option_versions v WHERE v.entry_id=option_version.entry_id) AS source_versions

@@ -81,6 +81,7 @@ test("same canonical IDs in two sources keep exact NFS relations and reader navi
   const detail=await new OptionReadService({async query(sql:string){statements.push(sql);return{rows:[row]};}}).get("class",{role:"user"},fighterA.entryId);
   assert.deepEqual(detail.accessibleCrossLinks,["species-1"]);assert.equal(detail.relations.every((relation)=>relation.targetSourceId===fighterA.sourceUuid),true);
   assert.match(statements[0],/target\.revision_id=relation\.target_revision_id/);assert.match(statements[0],/target\.source_id=relation\.target_source_id/);
+  assert.match(statements[0],/target\.file_id=relation\.target_file_id/);assert.match(statements[0],/relation\.source_file_id=option_version\.file_id/);
   const noRelations=await new OptionReadService({async query(){return{rows:[{...row,relations:[]}]};}}).get("class",{role:"user"},fighterA.entryId);
   assert.deepEqual(noRelations.crossLinks,[]);assert.deepEqual(noRelations.features,[]);
   const syncSource=await readFile("src/server/content-index/sync.ts","utf8");
