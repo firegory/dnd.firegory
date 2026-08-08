@@ -30,8 +30,21 @@ CREATE TABLE IF NOT EXISTS compendium_glossary (
   CONSTRAINT compendium_glossary_extension_object CHECK (jsonb_typeof(extension_data) = 'object')
 );
 
-CREATE INDEX IF NOT EXISTS compendium_backgrounds_filters_idx
-  ON compendium_backgrounds (ability_scores, skill_proficiencies, revision_id);
+ALTER TABLE compendium_backgrounds DROP CONSTRAINT IF EXISTS compendium_backgrounds_check;
+ALTER TABLE compendium_backgrounds
+  ALTER COLUMN ability_scores TYPE text[] USING regexp_split_to_array(btrim(ability_scores), '\s*[,;]\s*'),
+  ALTER COLUMN skill_proficiencies TYPE text[] USING regexp_split_to_array(btrim(skill_proficiencies), '\s*[,;]\s*');
+ALTER TABLE compendium_backgrounds
+  ADD CONSTRAINT compendium_backgrounds_ability_scores_valid CHECK (
+    cardinality(ability_scores) > 0 AND array_position(ability_scores, NULL) IS NULL AND array_position(ability_scores, '') IS NULL
+  ),
+  ADD CONSTRAINT compendium_backgrounds_skill_proficiencies_valid CHECK (
+    cardinality(skill_proficiencies) > 0 AND array_position(skill_proficiencies, NULL) IS NULL AND array_position(skill_proficiencies, '') IS NULL
+  );
+CREATE INDEX IF NOT EXISTS compendium_backgrounds_ability_scores_idx
+  ON compendium_backgrounds USING gin (ability_scores);
+CREATE INDEX IF NOT EXISTS compendium_backgrounds_skill_proficiencies_idx
+  ON compendium_backgrounds USING gin (skill_proficiencies);
 CREATE INDEX IF NOT EXISTS compendium_feats_filters_idx
   ON compendium_feats (category, prerequisite_level, repeatable, revision_id);
 CREATE INDEX IF NOT EXISTS compendium_items_filters_idx

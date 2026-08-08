@@ -140,7 +140,10 @@ const attributesByType = {
   background: {
     type: "object", additionalProperties: false,
     required: ["abilityScores", "skillProficiencies"],
-    properties: { abilityScores: stringField, skillProficiencies: stringField },
+    properties: {
+      abilityScores: { type: "array", minItems: 1, items: stringField, uniqueItems: true },
+      skillProficiencies: { type: "array", minItems: 1, items: stringField, uniqueItems: true },
+    },
   },
   feat: {
     type: "object", additionalProperties: false,

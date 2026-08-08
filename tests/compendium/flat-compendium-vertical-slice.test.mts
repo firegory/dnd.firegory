@@ -3,9 +3,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { classifyCandidatePublication, projectSnapshotFlatCandidate } from "../../src/server/compendium/candidate-publication.ts";
-import { parseFlatListOptions, parseFlatType } from "../../src/server/compendium/flat-http.ts";
+import { parseFlatListOptions, parseFlatSelection, parseFlatType } from "../../src/server/compendium/flat-http.ts";
 import { FlatNotFoundError, FlatReadInputError, FlatReadService } from "../../src/server/compendium/flat-read-service.ts";
-import { compendiumEntryRoute, projectionAttributes, type FlatEntryType } from "../../src/server/compendium/flat-schema.ts";
+import { compendiumEntryRoute, projectionAttributes, validateFlatProjection, type FlatEntryType } from "../../src/server/compendium/flat-schema.ts";
 import { flatCandidate, flatMetadataEvidence, nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
 import { classifyChunkType } from "../../src/server/compendium/candidate-parsers.ts";
 import { nextDndCardFingerprint } from "../../src/server/compendium/next-dnd/parser.ts";
@@ -90,6 +90,34 @@ test("flat URL filters restore exactly and malformed values fail closed", () => 
   assert.equal(parseFlatType("glossary"), "glossary");
   assert.deepEqual(parseFlatListOptions(new URL("https://example.test/feats?q=alert&category=general&repeatable=false&minLevel=4&maxLevel=8&language=ru")), { query: "alert", entryCategory: "general", repeatable: false, minLevel: 4, maxLevel: 8, language: "ru" });
   assert.throws(() => parseFlatListOptions(new URL("https://example.test/items?attunement=yes")), FlatReadInputError);
+  assert.deepEqual(parseFlatSelection(new URL("https://example.test/equipment/rope?edition=5.5e&language=ru")), { edition: "5.5e", language: "ru" });
+  assert.throws(() => parseFlatSelection(new URL("https://example.test/equipment/rope?edition=2024")), FlatReadInputError);
+});
+
+test("background fields are normalized lists and equipment weight matches numeric(10,3)", () => {
+  assert.deepEqual(validateFlatProjection("background", { abilityScores: [" Dexterity ", "Wisdom", "Dexterity"], skillProficiencies: ["Stealth"] }), { type: "background", abilityScores: ["Dexterity", "Wisdom"], skillProficiencies: ["Stealth"] });
+  assert.throws(() => validateFlatProjection("background", { abilityScores: "Dexterity, Wisdom", skillProficiencies: "Stealth" }), /text list/);
+  assert.equal(validateFlatProjection("equipment", { category: "tool", costCp: 1, weightLb: 1.001 }).weightLb, 1.001);
+  assert.throws(() => validateFlatProjection("equipment", { category: "tool", costCp: 1, weightLb: 1.0001 }), /numeric\(10,3\)/);
+});
+
+test("collector equipment metadata enforces numeric(10,3) before canonical publication", () => {
+  const base = flatDetailsFixture()[3];
+  const detail = (weightLb: number) => {
+    const indexMetadata = { ...base.indexMetadata, typed_fields: { category: "tool", costCp: 1, weightLb } };
+    return { ...base, indexMetadata, indexSource: { ...base.indexSource, cardFingerprintSha256: nextDndCardFingerprint(indexMetadata) } };
+  };
+  assert.equal(flatCandidate(detail(1.001) as never).attributes.weightLb, 1.001);
+  assert.throws(() => flatCandidate(detail(1.0001) as never), /numeric\(10,3\)/);
+});
+
+test("background filters use individually indexable JSONB list containment", async () => {
+  const calls: unknown[][] = [];
+  await new FlatReadService({ async query(sql: string, values: readonly unknown[] = []) { calls.push([...values]); return sql.includes("count(*)") ? { rows: [{ count: "0" }] } : { rows: [] }; } }).list(
+    { role: "user" }, "background", { ability: "Dexterity", skill: "Stealth" },
+  );
+  assert.ok(calls[0].includes(JSON.stringify([{ key: "ability-scores", value: ["Dexterity"] }])));
+  assert.ok(calls[0].includes(JSON.stringify([{ key: "skill-proficiencies", value: ["Stealth"] }])));
 });
 
 test("flat list count, filters, relation targets, and cursor remain inside one RBAC boundary", async () => {
@@ -105,9 +133,10 @@ test("flat list count, filters, relation targets, and cursor remain inside one R
 });
 
 test("relation route map covers dedicated and generic compendium targets", () => {
-  assert.equal(compendiumEntryRoute("spell", "spell-shield", "en"), "/spells/spell-shield");
-  assert.equal(compendiumEntryRoute("glossary", "glossary-cover", "ru"), "/glossary/glossary-cover");
-  for (const type of ["creature", "class", "feature", "species", "monster", "classFeature", "other"]) assert.equal(compendiumEntryRoute(type, `${type}-id`, "ru"), `/ru/compendium/entries/${type}-id`);
+  const selection = { edition: "5.5e", language: "ru" } as const;
+  assert.equal(compendiumEntryRoute("spell", "spell-shield", selection), "/spells/spell-shield?edition=5.5e&language=ru");
+  assert.equal(compendiumEntryRoute("glossary", "glossary-cover", selection), "/glossary/glossary-cover?edition=5.5e&language=ru");
+  for (const type of ["creature", "class", "feature", "species", "monster", "classFeature", "other"]) assert.equal(compendiumEntryRoute(type, `${type}-id`, selection), `/ru/compendium/entries/${type}-id?edition=5.5e&language=ru`);
 });
 
 test("detail identity SQL prioritizes exact IDs and rejects ambiguous aliases", async () => {
@@ -123,5 +152,5 @@ test("all flat pages retain concrete RU/EN, mobile, print, citation, and editor 
   const [list, detail, pages, css, editor, navigation] = await Promise.all([readFile("src/app/flat-compendium/flat-list.tsx", "utf8"), readFile("src/app/flat-compendium/flat-detail.tsx", "utf8"), readFile("src/app/flat-compendium/pages.tsx", "utf8"), readFile("src/app/globals.css", "utf8"), readFile("src/app/admin/compendium/entries/editor-client.tsx", "utf8"), readFile("src/components/ui/navigation.ts", "utf8")]);
   for (const type of ["feat", "background", "item", "equipment", "glossary"] as FlatEntryType[]) { assert.match(list, new RegExp(`${type}: \\[`)); assert.match(editor, new RegExp(`${type}: \\[`)); }
   for (const route of ["feats", "backgrounds", "items", "equipment", "glossary"]) assert.match(navigation, new RegExp(`href: "/${route}"`));
-  assert.match(list, /name="language"/); assert.match(list, /name="repeatable"/); assert.match(list, /name="attunement"/); assert.match(detail, /requiresAttunement: \["Требует настройки", "Requires attunement"\]/); assert.match(detail, /value \? "Да" : "Нет"/); assert.match(detail, /citation\.previewUrl/); assert.match(detail, /citation\.sourceUrl/); assert.match(detail, /entry\.sourceVersions/); assert.match(detail, /entry\.relations/); assert.match(pages, /FlatReadService/); assert.match(css, /@media \(max-width:39\.999rem\)[\s\S]*\.flat-filters/); assert.match(css, /@media print[\s\S]*\.flat-detail section/);
+  assert.match(list, /name="language"/); assert.match(list, /entry\.edition.*entry\.language.*entry\.id/); assert.match(list, /name="repeatable"/); assert.match(list, /name="attunement"/); assert.match(detail, /requiresAttunement: \["Требует настройки", "Requires attunement"\]/); assert.match(detail, /edition: entry\.edition, language: entry\.language/); assert.match(detail, /value \? "Да" : "Нет"/); assert.match(detail, /citation\.previewUrl/); assert.match(detail, /citation\.sourceUrl/); assert.match(detail, /entry\.sourceVersions/); assert.match(detail, /entry\.relations/); assert.match(pages, /notFound\(\)/); assert.match(pages, /parseFlatSelection/); assert.match(css, /@media \(max-width:39\.999rem\)[\s\S]*\.flat-filters/); assert.match(css, /@media print[\s\S]*\.flat-detail section/);
 });

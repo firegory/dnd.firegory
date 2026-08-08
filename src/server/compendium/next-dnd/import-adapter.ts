@@ -172,8 +172,8 @@ function flatProjection(detail: SnapshotDetail): FlatProjection {
     repeatable: Boolean(value("repeatable")) || /(?:repeatable|повторяем)/iu.test(detail.normalized.contentText),
   });
   if (type === "background") return validateFlatProjection(type, {
-    abilityScores: nullableString(value("abilityScores") ?? value("ability_scores") ?? labelled(["Ability Scores", "Характеристики"])) ?? "Not specified",
-    skillProficiencies: nullableString(value("skillProficiencies") ?? value("skill_proficiencies") ?? labelled(["Skill Proficiencies", "Владение навыками"])) ?? "Not specified",
+    abilityScores: stringList(value("abilityScores", "ability_scores") ?? labelled(["Ability Scores", "Характеристики"])),
+    skillProficiencies: stringList(value("skillProficiencies", "skill_proficiencies") ?? labelled(["Skill Proficiencies", "Владение навыками"])),
   });
   if (type === "item") return validateFlatProjection(type, {
     category: normalizedEnum(value("category") ?? metadata.item_icon_title, Object.fromEntries(["armor", "potion", "ring", "rod", "scroll", "staff", "wand", "weapon", "wondrous", "other"].map((key) => [key, key])), "other"),
@@ -200,6 +200,10 @@ function isFlatCategory(category: string): category is "feats" | "backgrounds" |
 function normalizedEnum(value: unknown, aliases: Readonly<Record<string, string>>, fallback: string): string { const key = String(value ?? "").normalize("NFC").trim().toLocaleLowerCase("und"); return aliases[key] ?? fallback; }
 function nullableString(value: unknown): string | null { return typeof value === "string" && value.trim() ? value.normalize("NFC").trim() : null; }
 function finiteNumber(value: unknown): number | null { const number = typeof value === "number" ? value : Number.NaN; return Number.isFinite(number) ? number : null; }
+function stringList(value: unknown): readonly string[] {
+  const items = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[,;]/u) : [];
+  return [...new Set(items.map((item) => String(item).normalize("NFC").trim()).filter(Boolean))];
+}
 function stringValues(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.normalize("NFC").trim()) : []; }
 
 export type SnapshotSpellCandidate = Readonly<{

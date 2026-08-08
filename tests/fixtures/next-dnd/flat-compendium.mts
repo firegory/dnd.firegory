@@ -2,7 +2,7 @@ import { nextDndCardFingerprint } from "../../../src/server/compendium/next-dnd/
 
 const records = [
   { category: "feats", id: "201", title: "Наблюдательный", titleEn: "Observant", text: "Черта. Требование: 4 уровень. Эту черту нельзя брать повторно.", attributes: { category: "general", prerequisiteLevel: 4, prerequisiteText: "4 level", repeatable: false } },
-  { category: "backgrounds", id: "301", title: "Ремесленник", titleEn: "Artisan", text: "Предыстория. Характеристики: Интеллект, Мудрость. Владение навыками: Проницательность, Убеждение.", attributes: { abilityScores: "Интеллект, Мудрость", skillProficiencies: "Проницательность, Убеждение" } },
+  { category: "backgrounds", id: "301", title: "Ремесленник", titleEn: "Artisan", text: "Предыстория. Характеристики: Интеллект, Мудрость. Владение навыками: Проницательность, Убеждение.", attributes: { abilityScores: ["Интеллект", "Мудрость"], skillProficiencies: ["Проницательность", "Убеждение"] } },
   { category: "items", id: "401", title: "Кольцо защиты", titleEn: "Ring of Protection", text: "Магический предмет, кольцо, редкий. Требует настройки.", attributes: { category: "ring", rarity: "rare", requiresAttunement: true } },
   { category: "equipment", id: "501", title: "Верёвка", titleEn: "Rope", text: "Снаряжение. Стоимость: 1 зм. Вес: 10 фунтов.", attributes: { category: "adventuring_gear", costCp: 100, weightLb: 10 } },
   { category: "glossary", id: "601", title: "Укрытие", titleEn: "Cover", text: "Термин правил. Укрытие повышает КД и спасброски Ловкости.", attributes: { category: "combat", relatedTerms: ["КД", "Спасбросок"] } },

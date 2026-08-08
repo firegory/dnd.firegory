@@ -4,7 +4,7 @@ import Link from "next/link";
 
 import { useUiLanguage } from "../../components/ui/i18n";
 import type { FlatListEntry, FlatListOptions } from "../../server/compendium/flat-read-service";
-import { flatCollection, type FlatEntryType } from "../../server/compendium/flat-schema";
+import { compendiumEntryRoute, flatCollection, type FlatEntryType } from "../../server/compendium/flat-schema";
 
 const TITLES: Readonly<Record<FlatEntryType, readonly [string, string]>> = {
   feat: ["Черты", "Feats"], background: ["Предыстории", "Backgrounds"], item: ["Магические предметы", "Magic items"],
@@ -34,7 +34,7 @@ export function FlatList({ type, entries, count, options, nextHref }: Readonly<{
       <div className="flat-actions"><button type="submit">{t("applyFilters")}</button><Link href={`/${collection}`}>{t("clearFilters")}</Link></div>
     </form>
     <strong className="flat-count">{language === "ru" ? `Найдено: ${count}` : `Found: ${count}`}</strong>
-    {entries.length ? <ol className="flat-list">{entries.map((entry) => <li key={entry.id}><Link href={`/${collection}/${entry.id}`}><h2>{entry.title}</h2><p>{entry.summary}</p><dl>{Object.entries(entry.projection).filter(([key]) => key !== "type").slice(0, 3).map(([key, value]) => <div key={key}><dt>{label(key)}</dt><dd>{display(value, language)}</dd></div>)}</dl><footer>{entry.source.code ?? entry.source.title}{entry.source.revision ? ` · ${entry.source.revision}` : ""}</footer></Link></li>)}</ol> : <p>{language === "ru" ? "Доступные записи не найдены." : "No accessible entries found."}</p>}
+    {entries.length ? <ol className="flat-list">{entries.map((entry) => <li key={`${entry.edition}-${entry.language}-${entry.id}`}><Link href={compendiumEntryRoute(entry.entryType, entry.id, entry)}><h2>{entry.title}</h2><p>{entry.summary}</p><dl>{Object.entries(entry.projection).filter(([key]) => key !== "type").slice(0, 3).map(([key, value]) => <div key={`${entry.edition}-${entry.language}-${entry.id}-${key}`}><dt>{label(key)}</dt><dd>{display(value, language)}</dd></div>)}</dl><footer>{entry.source.code ?? entry.source.title}{entry.source.revision ? ` · ${entry.source.revision}` : ""}</footer></Link></li>)}</ol> : <p>{language === "ru" ? "Доступные записи не найдены." : "No accessible entries found."}</p>}
     {nextHref ? <Link className="flat-next" href={nextHref} rel="next">{t("nextPage")}</Link> : null}
   </div>;
 }

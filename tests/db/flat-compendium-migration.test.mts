@@ -8,7 +8,9 @@ test("0017 adds constrained flat projections and browse indexes", () => {
   assert.equal(MIGRATION_FILENAMES.at(-1), "0017_flat_compendium_types.sql");
   assert.match(sql, /ALTER TYPE compendium_entry_type ADD VALUE IF NOT EXISTS 'glossary'/);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS compendium_glossary/);
-  for (const type of ["backgrounds", "feats", "items", "equipment", "glossary"]) assert.match(sql, new RegExp(`compendium_${type}_filters_idx`));
+  for (const type of ["feats", "items", "equipment", "glossary"]) assert.match(sql, new RegExp(`compendium_${type}_filters_idx`));
+  assert.match(sql, /ALTER COLUMN ability_scores TYPE text\[\][\s\S]*ALTER COLUMN skill_proficiencies TYPE text\[\]/);
+  assert.match(sql, /compendium_backgrounds_ability_scores_idx[\s\S]*gin \(ability_scores\)[\s\S]*compendium_backgrounds_skill_proficiencies_idx[\s\S]*gin \(skill_proficiencies\)/);
   assert.match(sql, /compendium_glossary_related_terms_valid/);
   assert.match(sql, /ADD COLUMN IF NOT EXISTS edition source_edition[\s\S]*ADD COLUMN IF NOT EXISTS language source_language/);
   assert.match(sql, /nfs_index_entries_flat_browse_idx[\s\S]*entry_type, edition, language, lower\(name\) COLLATE "C", entry_id/);

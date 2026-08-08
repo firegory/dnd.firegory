@@ -1,7 +1,7 @@
 import type { QueryResultRow } from "pg";
 
 import { buildSourceAccessSql } from "../access/access-sql.ts";
-import { buildRetrievalAuthorizationFilter, type RetrievalSelection, type RetrievalUser } from "../access/retrieval-filter.ts";
+import { buildRetrievalAuthorizationFilter, type RetrievalSelection, type RetrievalUser, type SourceEdition, type SourceLanguage } from "../access/retrieval-filter.ts";
 import { query } from "../db/client.ts";
 import { flatProjectionFromTypedFields, type FlatEntryType, type FlatProjection } from "./flat-schema.ts";
 
@@ -17,7 +17,7 @@ export type FlatCitation = Readonly<{ id: string; quote: string; section: string
 export type FlatRelation = Readonly<{ type: string; direction: "incoming" | "outgoing"; entryId: string; entryType: string; title: string }>;
 export type FlatListEntry = Readonly<{
   id: string; revisionId: string; entryType: FlatEntryType; title: string; aliases: readonly string[]; summary: string;
-  edition: string; language: string; source: Readonly<{ id: string; title: string; code: string | null; revision: string | null }>;
+  edition: SourceEdition; language: SourceLanguage; source: Readonly<{ id: string; title: string; code: string | null; revision: string | null }>;
   projection: FlatProjection;
 }>;
 export type FlatDetail = FlatListEntry & Readonly<{
@@ -31,7 +31,7 @@ export class FlatNotFoundError extends Error {}
 type FlatRow = QueryResultRow & Readonly<{
   entry_id: string; revision_id: string; entry_type: FlatEntryType; name: string; aliases: unknown; typed_fields: unknown;
   plain_text: string; canonical_payload: Record<string, unknown>; source_id: string; file_id: string; mime_type: string;
-  source_title: string; edition: string; language: string; publication_code: string | null; publication_revision: string | null;
+  source_title: string; edition: SourceEdition; language: SourceLanguage; publication_code: string | null; publication_revision: string | null;
   sort_title: string; source_versions: unknown; relations: unknown;
 }>;
 const database: Queryable = { query };
@@ -145,8 +145,8 @@ function flatFilters(params: unknown[], options: FlatListOptions | Omit<FlatList
   const contains = (key: string, value: unknown) => filters.push(`indexed.typed_fields @> $${params.push(JSON.stringify([{ key, value }]))}::jsonb`);
   if (options.entryCategory) contains("category", options.entryCategory);
   if (options.rarity) contains("rarity", options.rarity);
-  if (options.ability) contains("ability-scores", options.ability);
-  if (options.skill) contains("skill-proficiencies", options.skill);
+  if (options.ability) contains("ability-scores", [options.ability]);
+  if (options.skill) contains("skill-proficiencies", [options.skill]);
   if (options.attunement !== undefined) contains("requires-attunement", options.attunement);
   if (options.repeatable !== undefined) contains("repeatable", options.repeatable);
   for (const [key, value, operator] of [["prerequisite-level", options.minLevel, ">="], ["prerequisite-level", options.maxLevel, "<="], ["cost-cp", options.minCost, ">="], ["cost-cp", options.maxCost, "<="], ["weight-lb", options.minWeight, ">="], ["weight-lb", options.maxWeight, "<="]] as const) {
