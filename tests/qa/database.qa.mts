@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { handleImportReviewAction } from "../../src/app/api/admin/compendium/import-runs/[runId]/actions/route.ts";
 import { CompendiumImportRunService, ImportRunConflictError } from "../../src/server/compendium/import-runs.ts";
 import { projectSnapshotFlatCandidate } from "../../src/server/compendium/candidate-publication.ts";
+import { handleImportReviewAction } from "../../src/server/compendium/import-review-action-handler.ts";
 import { CompendiumImportReviewService } from "../../src/server/compendium/import-review.ts";
 import { recordImportReviewPublicationOutcome } from "../../src/server/compendium/import-review-outcomes.ts";
 import { CompendiumNotFoundError, CompendiumReadService } from "../../src/server/compendium/read-service.ts";
