@@ -7,7 +7,7 @@ import type { ValidatedSourceFile } from "../content-storage/validation.ts";
 import { chunkPage } from "../../worker/ingestion/chunking.ts";
 import { classProjectionFromTypedFields, speciesProjectionFromTypedFields } from "../compendium/hierarchy-schema.ts";
 
-export const CONTENT_INDEX_PROJECTOR_VERSION = 4 as const;
+export const CONTENT_INDEX_PROJECTOR_VERSION = 5 as const;
 
 type Citation = Readonly<{
   citationId: string;
