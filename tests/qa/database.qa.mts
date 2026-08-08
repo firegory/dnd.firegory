@@ -211,7 +211,7 @@ test("QA integration: fresh corpus seed persists candidates and identical input 
   const prepared = await prepareSeed("tests/fixtures/corpus-seed/plan.json", "tests/fixtures/corpus-seed/inputs.json");
   const dependencies = { transaction: transaction as never, db: db.pool, runs: new CompendiumImportRunService(transaction as never), dataRoot };
   const first = await loadPreparedSeed(prepared, dependencies);
-  assert.equal(first[0].operation, "loaded");
+  assert.equal(first[0].operation, "loaded", JSON.stringify(first[0]));
   assert.deepEqual(first[0].counts, { discovered: 1, imported: 1, reviewed: 0, published: 0, indexed: 0, failures: 0 });
   const second = await loadPreparedSeed(prepared, dependencies);
   assert.equal(second[0].operation, "noop");
