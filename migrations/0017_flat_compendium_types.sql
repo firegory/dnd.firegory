@@ -2,6 +2,9 @@
 -- are retained; this migration only tightens their browse and publication path.
 ALTER TYPE compendium_entry_type ADD VALUE IF NOT EXISTS 'glossary';
 
+ALTER TABLE nfs_index_managed_sources ADD COLUMN IF NOT EXISTS owns_source boolean NOT NULL DEFAULT true;
+ALTER TABLE nfs_index_managed_files ADD COLUMN IF NOT EXISTS owns_file boolean NOT NULL DEFAULT true;
+
 ALTER TABLE nfs_index_entries
   ADD COLUMN IF NOT EXISTS edition source_edition,
   ADD COLUMN IF NOT EXISTS language source_language;

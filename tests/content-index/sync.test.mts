@@ -10,6 +10,7 @@ import {
   claimContentIndexRun,
   heartbeatContentIndexRun,
   reconcileManagedProjectionRows,
+  resolveNfsManagedSourceAndFile,
   synchronizeContentIndex,
 } from "../../src/server/content-index/sync.ts";
 import {
@@ -191,6 +192,61 @@ test("projection reconciliation refuses deterministic collisions with unmanaged 
   );
   assert.equal(queries, 1);
 });
+
+test("canonical source and file reuse avoids unique inserts and records non-ownership", async () => {
+  const resolved = await loadResolvedCanonicalRevisions(dataRoot);
+  const entry = projectCanonicalRevisions(resolved.manifest.repositoryId, resolved.revisions, resolved.sourceFiles)[0];
+  const originalSourceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  assert.notEqual(originalSourceId, entry.sourceUuid); assert.notEqual(entry.file.fileId, entry.fileUuid);
+  const calls: Array<{ text: string; params: readonly unknown[] }> = [];
+  const binding = await resolveNfsManagedSourceAndFile({ async query(text: string, params: readonly unknown[] = []) {
+    calls.push({ text, params });
+    if (text.includes("FROM sources s LEFT JOIN")) return result([sourceDatabaseRow(entry, originalSourceId)]);
+    if (text.includes("FROM files f LEFT JOIN")) return result([{ id: entry.file.fileId, source_id: originalSourceId, mime_type: entry.file.mediaType, checksum_sha256: entry.file.contentHash.slice(7), byte_size: entry.file.byteSize, deleted_at: null, mapping_repository_id: null, owns_file: null }]);
+    return result([]);
+  } } as never, resolved.manifest.repositoryId, entry);
+  assert.deepEqual(binding, { sourceId: originalSourceId, fileId: entry.file.fileId, ownsSource: false, ownsFile: false });
+  assert.equal(calls.some(({ text }) => /^\s*INSERT INTO sources/.test(text)), false);
+  assert.equal(calls.some(({ text }) => /^\s*INSERT INTO files/.test(text)), false);
+  assert.ok(calls.some(({ text, params }) => text.includes("nfs_index_managed_sources") && params.at(-1) === false));
+  assert.ok(calls.some(({ text, params }) => text.includes("nfs_index_managed_files") && params.at(-1) === false));
+});
+
+test("absent canonical identities create owned mappings", async () => {
+  const resolved = await loadResolvedCanonicalRevisions(dataRoot);
+  const entry = projectCanonicalRevisions(resolved.manifest.repositoryId, resolved.revisions, resolved.sourceFiles)[0];
+  const calls: Array<{ text: string; params: readonly unknown[] }> = [];
+  const binding = await resolveNfsManagedSourceAndFile({ async query(text: string, params: readonly unknown[] = []) { calls.push({ text, params }); return result([]); } } as never, resolved.manifest.repositoryId, entry);
+  assert.deepEqual(binding, { sourceId: entry.sourceUuid, fileId: entry.fileUuid, ownsSource: true, ownsFile: true });
+  assert.ok(calls.some(({ text }) => /^\s*INSERT INTO sources/.test(text)));
+  assert.ok(calls.some(({ text }) => /^\s*INSERT INTO files/.test(text)));
+  assert.ok(calls.some(({ text, params }) => text.includes("nfs_index_managed_sources") && params.at(-1) === true));
+  assert.ok(calls.some(({ text, params }) => text.includes("nfs_index_managed_files") && params.at(-1) === true));
+});
+
+test("conflicting canonical source access and publication metadata fails before mapping", async () => {
+  const resolved = await loadResolvedCanonicalRevisions(dataRoot);
+  const entry = projectCanonicalRevisions(resolved.manifest.repositoryId, resolved.revisions, resolved.sourceFiles)[0];
+  let mappings = 0;
+  await assert.rejects(resolveNfsManagedSourceAndFile({ async query(text: string) {
+    if (text.includes("FROM sources s LEFT JOIN")) return result([{ ...sourceDatabaseRow(entry, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), access_tier: entry.source.accessTier === "open" ? "premium" : "open" }]);
+    if (text.includes("nfs_index_managed_")) mappings++;
+    return result([]);
+  } } as never, resolved.manifest.repositoryId, entry), /conflicts on access_tier/);
+  assert.equal(mappings, 0);
+});
+
+test("retirement SQL preserves reused rows and retires only owned source and file mappings", async () => {
+  const sync = await readFile(resolve("src/server/content-index/sync.ts"), "utf8");
+  assert.match(sync, /nfs_index_managed_files[\s\S]*owns_file/);
+  assert.match(sync, /nfs_index_managed_sources ms[\s\S]*ms\.owns_source/);
+  assert.doesNotMatch(sync, /UPDATE files SET active_generation_id = NULL, deleted_at = now\(\) WHERE id = \$1", \[fileId\]/);
+});
+
+function sourceDatabaseRow(entry: ReturnType<typeof projectCanonicalRevisions>[number], id: string) {
+  return { id, title: entry.source.title, category: entry.source.category, edition: entry.source.edition, language: entry.source.language, access_tier: entry.source.accessTier, shared: entry.source.shared, owner_user_id: entry.source.ownerUserId, publication_code: entry.source.publication.code, publication_title: entry.source.publication.title, publisher: entry.source.publication.publisher, release_year: entry.source.publication.releaseYear, publication_revision: entry.source.publication.revision ?? null, external_origin_url: entry.source.publication.origin?.url ?? null, external_origin_id: entry.source.publication.origin?.id ?? null, attribution: entry.source.publication.attribution ?? null, source_priority: entry.source.publication.sourcePriority, canonical_book_id: entry.source.publication.canonicalBookId, license: entry.source.license ?? null, deleted_at: null, mapping_repository_id: null, owns_source: null };
+}
+function result(rows: readonly Record<string, unknown>[]) { return { rows, rowCount: rows.length, command: "SELECT", oid: 0, fields: [] } as never; }
 
 test("validate mode completes without any database access", async () => {
   let queried = false;
