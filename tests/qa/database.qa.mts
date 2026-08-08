@@ -9,6 +9,7 @@ import { projectSnapshotFlatCandidate } from "../../src/server/compendium/candid
 import { CompendiumImportReviewService } from "../../src/server/compendium/import-review.ts";
 import { recordImportReviewPublicationOutcome } from "../../src/server/compendium/import-review-outcomes.ts";
 import { CompendiumNotFoundError, CompendiumReadService } from "../../src/server/compendium/read-service.ts";
+import { nextDndCardFingerprint } from "../../src/server/compendium/next-dnd/parser.ts";
 import { seedImportBatch } from "../../src/server/corpus-seed/batch.ts";
 import { inspectPreparedSeed, loadPreparedSeed, seedSlotCounts } from "../../src/server/corpus-seed/executor.ts";
 import { prepareSeed } from "../../src/server/corpus-seed/model.ts";
@@ -209,7 +210,9 @@ test("QA integration: shared feature and class snapshots never cross-synthesize 
       'QA Synthetic Authors',2024,'v1','https://next.dnd.su/class/','qa-shared-hierarchy','Synthetic QA fixture.',0,'qa-shared-hierarchy','CC0-1.0 synthetic fixture')`, [sourceId]);
   await db.pool.query(`INSERT INTO files(id,source_id,original_filename,mime_type,checksum_sha256,byte_size,storage_path)
     VALUES($1,$2,'class.snapshot','application/vnd.dnd-firegory.snapshot+json',$3,1,'canonical-seed:qa-shared-hierarchy')`, [fileId, sourceId, "a".repeat(64)]);
-  const detail = hierarchyDetailsFixture()[0];
+  const fixtureDetail = hierarchyDetailsFixture()[0];
+  const indexMetadata = { ...fixtureDetail.indexMetadata, cross_links: [] };
+  const detail = { ...fixtureDetail, indexMetadata, indexSource: { ...fixtureDetail.indexSource, cardFingerprintSha256: nextDndCardFingerprint(indexMetadata) } };
   const manifest = { schemaVersion: 2, parserVersion: "next-dnd-2024-v3", status: "complete", collectedAt: detail.fetchedAt,
     robots: { userAgent: "fixture", snapshot: {} as never, rules: [], evaluations: [] },
     categories: [{ requestedCategory: "class", discoveredCategory: "class", entryCount: 1, index: {} as never, details: [detail] }], parserFailures: [], diagnostics: [] };
