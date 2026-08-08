@@ -5,7 +5,9 @@ import { describe, it } from "node:test";
 import { buildSourceAccessSql } from "../../src/server/access/access-sql.ts";
 import { buildRetrievalAuthorizationFilter } from "../../src/server/access/retrieval-filter.ts";
 import { mergeCandidates } from "../../src/server/retrieval/hybrid.ts";
+import { hybridSearch } from "../../src/server/retrieval/pipeline.ts";
 import { rerankCandidates } from "../../src/server/retrieval/rerank.ts";
+import type { EntityResolution } from "../../src/server/retrieval/entity.ts";
 import type { RetrievalCandidate } from "../../src/server/retrieval/types.ts";
 
 function candidate(overrides: Partial<RetrievalCandidate> = {}): RetrievalCandidate {
@@ -27,6 +29,24 @@ function candidate(overrides: Partial<RetrievalCandidate> = {}): RetrievalCandid
     ...overrides,
   };
 }
+
+const generationId = "11111111-1111-4111-8111-111111111111";
+const entryId = "22222222-2222-4222-8222-222222222222";
+const sourceId = "44444444-4444-4444-8444-444444444444";
+const versionId = "88888888-8888-4888-8888-888888888888";
+const matchedResolution: EntityResolution = {
+  matches: [{
+    entryId,
+    entryType: "spell",
+    canonicalKey: "mage-hand",
+    title: "Mage Hand",
+    aliases: ["Mage's Hand", "Рука мага"],
+    edition: "5e",
+    language: "en",
+    sourceId,
+  }],
+  candidates: [candidate()],
+};
 
 describe("entity retrieval integration contracts", () => {
   it("builds all RBAC and corpus filters used to capture the entity snapshot", () => {
@@ -107,5 +127,122 @@ describe("entity retrieval integration contracts", () => {
     assert.equal(enriched?.quoteText, "Range: Self");
     assert.equal(enriched?.sourceId, entity.sourceId);
     assert.equal(enriched?.entityEvidence?.[0].fieldPath, "$.range");
+  });
+
+  it("executes authorized entity resolution before rewrite for RU and EN aliases", async () => {
+    for (const query of ["How does Mage's Hand work?", "Как работает Рука мага?"]) {
+      const events: string[] = [];
+      const result = await hybridSearch(
+        { query, user: { role: "user" }, rewriteEnabled: true },
+        {
+          captureSnapshot: async () => {
+            events.push("snapshot");
+            return { generationIds: [generationId] };
+          },
+          resolveEntities: async (searchQuery) => {
+            events.push("entity");
+            assert.equal(searchQuery, query);
+            return matchedResolution;
+          },
+          rewrite: async () => {
+            events.push("rewrite");
+            return { original: query, canonical: "mage hand", bilingual: [], expanded: [] };
+          },
+          keyword: async () => [],
+          vector: async () => [],
+        },
+      );
+
+      assert.deepEqual(events.slice(0, 3), ["snapshot", "entity", "rewrite"]);
+      assert.equal(result.chunks[0].strategy, "entity");
+      assert.ok(result.rewrite?.expanded.includes("Mage's Hand"));
+      assert.ok(result.rewrite?.expanded.includes("Рука мага"));
+    }
+  });
+
+  it("makes inaccessible and nonexistent entry scopes indistinguishable", async () => {
+    async function scopedSearch(scopedEntryId: string) {
+      return hybridSearch(
+        {
+          query: "What is its range?",
+          user: { role: "user" },
+          entryScope: { entryId: scopedEntryId, sourceId, versionId, edition: "5e", language: "en" },
+          rewriteEnabled: false,
+        },
+        {
+          captureSnapshot: async () => ({ generationIds: [generationId] }),
+          resolveEntities: async () => ({ matches: [], candidates: [] }),
+          keyword: async (_query, params) => {
+            assert.deepEqual(params.chunkIds, []);
+            return [];
+          },
+          vector: async (_query, params) => {
+            assert.deepEqual(params.chunkIds, []);
+            return [];
+          },
+        },
+      );
+    }
+
+    const inaccessible = await scopedSearch(entryId);
+    const nonexistent = await scopedSearch("99999999-9999-4999-8999-999999999999");
+    assert.deepEqual(nonexistent, inaccessible);
+  });
+
+  it("does not resolve or semantically search a conflicting selection and scope", async () => {
+    let resolverCalled = false;
+    const result = await hybridSearch(
+      {
+        query: "What is its range?",
+        user: { role: "user" },
+        selection: { edition: "5.5e", language: "ru" },
+        entryScope: { entryId, sourceId, versionId, edition: "5e", language: "en" },
+        rewriteEnabled: false,
+      },
+      {
+        captureSnapshot: async () => ({ generationIds: [generationId] }),
+        resolveEntities: async () => {
+          resolverCalled = true;
+          return matchedResolution;
+        },
+        keyword: async (_query, params) => {
+          assert.deepEqual(params.chunkIds, []);
+          return [];
+        },
+        vector: async (_query, params) => {
+          assert.deepEqual(params.chunkIds, []);
+          return [];
+        },
+      },
+    );
+
+    assert.equal(resolverCalled, false);
+    assert.deepEqual(result.chunks, []);
+  });
+
+  it("executes the unchanged general hybrid path without entry chunk filters", async () => {
+    const keywordCandidate = candidate({ chunkId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", strategy: "keyword" });
+    const vectorCandidate = candidate({ chunkId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", strategy: "vector" });
+    const result = await hybridSearch(
+      { query: "general combat rules", user: { role: "user" }, rewriteEnabled: false },
+      {
+        captureSnapshot: async () => ({ generationIds: [generationId] }),
+        resolveEntities: async () => ({ matches: [], candidates: [] }),
+        keyword: async (_query, params) => {
+          assert.equal(params.chunkIds, undefined);
+          return [keywordCandidate];
+        },
+        vector: async (_query, params) => {
+          assert.equal(params.chunkIds, undefined);
+          return [vectorCandidate];
+        },
+      },
+    );
+
+    assert.deepEqual(new Set(result.chunks.map((chunk) => chunk.chunkId)), new Set([
+      keywordCandidate.chunkId,
+      vectorCandidate.chunkId,
+    ]));
+    assert.deepEqual(result.entityMatches, []);
   });
 });

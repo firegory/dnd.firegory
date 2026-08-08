@@ -8,9 +8,9 @@
  * Accepts either a single query string or an array for backward compatibility.
  */
 
-import { query } from "../db/client";
-import { generateEmbedding, generateEmbeddings, getQueryEmbeddingConfig } from "../embeddings/provider";
-import type { RetrievalCandidate, RetrievalParams } from "./types";
+import { query } from "../db/client.ts";
+import { generateEmbedding, generateEmbeddings, getQueryEmbeddingConfig } from "../embeddings/provider.ts";
+import type { RetrievalCandidate, RetrievalParams } from "./types.ts";
 
 type VectorRow = {
   id: string;

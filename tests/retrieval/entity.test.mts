@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   enrichRewriteWithEntities,
+  entryScopeConflictsWithSelection,
   isCompendiumEntryScope,
   resolveCompendiumEntities,
 } from "../../src/server/retrieval/entity.ts";
@@ -10,6 +11,7 @@ import {
 const generationId = "11111111-1111-4111-8111-111111111111";
 const entryId = "22222222-2222-4222-8222-222222222222";
 const sourceId = "33333333-3333-4333-8333-333333333333";
+const versionId = "88888888-8888-4888-8888-888888888888";
 
 function entityRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -103,6 +105,56 @@ describe("resolveCompendiumEntities", () => {
     assert.deepEqual(params, [[generationId], entryId, sourceId, "5e", "ru"]);
   });
 
+  it("binds source, version, edition, and language as exact scope filters", async () => {
+    let sql = "";
+    let params: readonly unknown[] = [];
+    await resolveCompendiumEntities(
+      "What is its range?",
+      [generationId],
+      { entryId, sourceId, versionId, edition: "5e", language: "en" },
+      (async (statement: string, values: readonly unknown[]) => {
+        sql = statement;
+        params = values;
+        return { rows: [] } as never;
+      }) as never,
+    );
+
+    assert.match(sql, /e\.id = \$2::uuid/);
+    assert.match(sql, /v\.source_id = \$3::uuid/);
+    assert.match(sql, /v\.id = \$4::uuid/);
+    assert.match(sql, /e\.edition = \$5/);
+    assert.match(sql, /v\.language = \$6/);
+    assert.deepEqual(params, [[generationId], entryId, sourceId, versionId, "5e", "en"]);
+  });
+
+  it("parameterizes apostrophe aliases without interpolating user text", async () => {
+    const alias = "Mordenkainen's Sword";
+    let sql = "";
+    let params: readonly unknown[] = [];
+    await resolveCompendiumEntities(alias, [generationId], undefined, (async (statement: string, values: readonly unknown[]) => {
+      sql = statement;
+      params = values;
+      return { rows: [entityRow({ title: alias, aliases: ["Меч Морденкайнена"] })] } as never;
+    }) as never);
+
+    assert.equal(sql.includes(alias), false);
+    assert.deepEqual(params, [[generationId], alias]);
+  });
+
+  it("returns indistinguishable results for inaccessible and nonexistent scoped entries", async () => {
+    const resolveMissing = (scopedEntryId: string) => resolveCompendiumEntities(
+      "What is it?",
+      [generationId],
+      { entryId: scopedEntryId, sourceId, versionId, edition: "5e", language: "en" },
+      (async () => ({ rows: [] })) as never,
+    );
+
+    const inaccessible = await resolveMissing(entryId);
+    const nonexistent = await resolveMissing("99999999-9999-4999-8999-999999999999");
+    assert.deepEqual(inaccessible, { matches: [], candidates: [] });
+    assert.deepEqual(nonexistent, inaccessible);
+  });
+
   it("coalesces citations by chunk while retaining field and block evidence", async () => {
     const result = await resolveCompendiumEntities(
       "Shield",
@@ -132,9 +184,16 @@ describe("resolveCompendiumEntities", () => {
 
 describe("entity query contracts", () => {
   it("validates canonical entry scopes", () => {
-    assert.equal(isCompendiumEntryScope({ entryId, edition: "5.5e", language: "en" }), true);
+    assert.equal(isCompendiumEntryScope({ entryId, versionId, edition: "5.5e", language: "en" }), true);
     assert.equal(isCompendiumEntryScope({ entryId: "not-a-uuid" }), false);
     assert.equal(isCompendiumEntryScope({ entryId, edition: "4e" }), false);
+  });
+
+  it("detects edition and language conflicts without consulting entry existence", () => {
+    const scope = { entryId, sourceId, versionId, edition: "5e", language: "en" } as const;
+    assert.equal(entryScopeConflictsWithSelection(scope, { edition: "5e", language: "en" }), false);
+    assert.equal(entryScopeConflictsWithSelection(scope, { edition: "5.5e" }), true);
+    assert.equal(entryScopeConflictsWithSelection(scope, { language: "ru" }), true);
   });
 
   it("adds authorized bilingual names without duplicates", () => {

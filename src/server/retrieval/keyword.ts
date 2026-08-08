@@ -9,8 +9,8 @@
  * vector search is unavailable and the user asks with fuzzy/bilingual wording.
  */
 
-import { query } from "../db/client";
-import type { RetrievalCandidate, RetrievalParams } from "./types";
+import { query } from "../db/client.ts";
+import type { RetrievalCandidate, RetrievalParams } from "./types.ts";
 
 /**
  * Performs a full-text keyword search against chunk text.

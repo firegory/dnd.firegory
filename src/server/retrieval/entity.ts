@@ -1,12 +1,13 @@
 import type { QueryResult, QueryResultRow } from "pg";
 
 import { query } from "../db/client.ts";
-import type { SourceEdition, SourceLanguage } from "../access/retrieval-filter.ts";
+import type { RetrievalSelection, SourceEdition, SourceLanguage } from "../access/retrieval-filter.ts";
 import type { EntityEvidence, RetrievalCandidate } from "./types.ts";
 
 export type CompendiumEntryScope = Readonly<{
   entryId: string;
   sourceId?: string;
+  versionId?: string;
   edition?: SourceEdition;
   language?: SourceLanguage;
 }>;
@@ -63,8 +64,17 @@ export function isCompendiumEntryScope(value: unknown): value is CompendiumEntry
   const scope = value as Record<string, unknown>;
   return UUID_RE.test(String(scope.entryId ?? ""))
     && (scope.sourceId === undefined || UUID_RE.test(String(scope.sourceId)))
+    && (scope.versionId === undefined || UUID_RE.test(String(scope.versionId)))
     && (scope.edition === undefined || scope.edition === "5e" || scope.edition === "5.5e")
     && (scope.language === undefined || scope.language === "en" || scope.language === "ru");
+}
+
+export function entryScopeConflictsWithSelection(
+  scope: CompendiumEntryScope,
+  selection: RetrievalSelection,
+): boolean {
+  return (scope.edition !== undefined && selection.edition !== undefined && scope.edition !== selection.edition)
+    || (scope.language !== undefined && selection.language !== undefined && scope.language !== selection.language);
 }
 
 /**
@@ -91,6 +101,10 @@ export async function resolveCompendiumEntities(
     if (scope.sourceId) {
       params.push(scope.sourceId);
       scopeFilters.push(`v.source_id = $${params.length}::uuid`);
+    }
+    if (scope.versionId) {
+      params.push(scope.versionId);
+      scopeFilters.push(`v.id = $${params.length}::uuid`);
     }
     if (scope.edition) {
       params.push(scope.edition);

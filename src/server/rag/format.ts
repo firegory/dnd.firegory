@@ -35,8 +35,13 @@ export type SourceCitation = Readonly<{
   /** Internal chunk ID for precise bbox preview. */
   chunkId: string;
   /** Citation-backed compendium fields supporting this quote, when present. */
-  entityEvidence?: readonly EntityEvidence[];
+  entityEvidence?: readonly CitationEntityEvidence[];
 }>;
+
+export type CitationEntityEvidence = Readonly<Pick<
+  EntityEvidence,
+  "entryId" | "citationId" | "citationKind" | "fieldPath"
+>>;
 
 // ---------- Prompt construction ----------
 
@@ -171,7 +176,7 @@ export function parseLlmResponse(raw: string): RawLlmResponse {
   }
 
   try {
-    return JSON.parse(text) as RawLlmResponse;
+    return sanitizeLlmResponse(JSON.parse(text));
   } catch {
     const braceStart = text.indexOf("{");
     if (braceStart !== -1) {
@@ -181,7 +186,7 @@ export function parseLlmResponse(raw: string): RawLlmResponse {
         else if (text[i] === "}") depth--;
         if (depth === 0) {
           try {
-            return JSON.parse(text.slice(braceStart, i + 1)) as RawLlmResponse;
+            return sanitizeLlmResponse(JSON.parse(text.slice(braceStart, i + 1)));
           } catch {
             break;
           }
@@ -189,12 +194,11 @@ export function parseLlmResponse(raw: string): RawLlmResponse {
       }
       const fixed = text.slice(braceStart) + "]}";
       try {
-        return JSON.parse(fixed) as RawLlmResponse;
+        return sanitizeLlmResponse(JSON.parse(fixed));
       } catch {
         const partial = text.slice(braceStart) + "]";
         try {
-          const inner = JSON.parse(partial) as RawLlmResponse;
-          return inner;
+          return sanitizeLlmResponse(JSON.parse(partial));
         } catch {
           const quotesMatch = text.match(/"answer"\s*:\s*"((?:[^"\\]|\\.)*)"/);
           const answer = quotesMatch?.[1]
@@ -208,11 +212,34 @@ export function parseLlmResponse(raw: string): RawLlmResponse {
   }
 }
 
+function sanitizeLlmResponse(value: unknown): RawLlmResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const raw = value as Record<string, unknown>;
+  const citations = Array.isArray(raw.citations)
+    ? raw.citations.flatMap((citation): RawLlmCitation[] => {
+        if (!citation || typeof citation !== "object" || Array.isArray(citation)) return [];
+        const item = citation as Record<string, unknown>;
+        return [{
+          ...(typeof item.quote === "string" ? { quote: item.quote } : {}),
+          ...(typeof item.sourceTitle === "string" ? { sourceTitle: item.sourceTitle } : {}),
+          ...(typeof item.edition === "string" ? { edition: item.edition } : {}),
+          ...(item.page === null || typeof item.page === "number" ? { page: item.page as number | null } : {}),
+          ...(item.section === null || typeof item.section === "string" ? { section: item.section as string | null } : {}),
+        }];
+      })
+    : undefined;
+  return {
+    ...(typeof raw.answer === "string" ? { answer: raw.answer } : {}),
+    ...(typeof raw.confident === "boolean" ? { confident: raw.confident } : {}),
+    ...(citations ? { citations } : {}),
+  };
+}
+
 /**
  * Maps LLM citations to structured source citations with chunk matching.
  *
- * Tries to match each LLM citation to a retrieval candidate by source title
- * and quote text overlap, so we can include the internal IDs.
+ * Accepts only normalized contiguous substrings of retrieved source quotes,
+ * then returns authoritative quote and location data from the matched chunk.
  */
 export function mapCitations(
   rawCitations: readonly RawLlmCitation[] | undefined,
@@ -225,40 +252,22 @@ export function mapCitations(
   for (const raw of rawCitations) {
     if (!raw.quote) continue;
 
-    let matchedChunk: RetrievalCandidate | undefined;
+    const support = findCitationSupport(raw, chunks);
 
-    const quoteLower = raw.quote.toLowerCase();
-
-    if (raw.sourceTitle) {
-      const titleMatches = chunks.filter(
-        (c) =>
-          c.sourceTitle.toLowerCase() === raw.sourceTitle!.toLowerCase()
-          && candidateSupportsQuote(c, quoteLower),
-      );
-
-      matchedChunk = titleMatches[0];
-    }
-
-    if (!matchedChunk && raw.quote) {
-      matchedChunk = chunks.find((c) => candidateSupportsQuote(c, quoteLower));
-    }
-
-    if (matchedChunk) {
-      const entityEvidence = matchedChunk.entityEvidence?.filter((evidence) =>
-        quotesOverlap(evidence.quote.toLowerCase(), quoteLower),
-      );
+    if (support) {
+      const { chunk: matchedChunk, evidence } = support;
       citations.push({
-        quote: raw.quote,
+        quote: support.quote,
         sourceTitle: matchedChunk.sourceTitle,
         edition: matchedChunk.edition,
         language: matchedChunk.language,
-        page: raw.page ?? matchedChunk.pageNumber,
-        section: raw.section ?? matchedChunk.sectionHeading,
+        page: matchedChunk.pageNumber,
+        section: matchedChunk.sectionHeading,
         category: matchedChunk.sourceCategory,
         fileId: matchedChunk.fileId,
         sourceId: matchedChunk.sourceId,
         chunkId: matchedChunk.chunkId,
-        ...(entityEvidence?.length ? { entityEvidence } : {}),
+        ...(evidence ? { entityEvidence: [citationEntityEvidence(evidence)] } : {}),
       });
     }
   }
@@ -266,21 +275,49 @@ export function mapCitations(
   return citations;
 }
 
-function candidateSupportsQuote(candidate: RetrievalCandidate, quoteLower: string): boolean {
-  return quotesOverlap(candidate.quoteText.toLowerCase(), quoteLower)
-    || (candidate.entityEvidence?.some((evidence) =>
-      quotesOverlap(evidence.quote.toLowerCase(), quoteLower),
-    ) ?? false);
+export function citationEntityEvidence(evidence: EntityEvidence): CitationEntityEvidence {
+  return {
+    entryId: evidence.entryId,
+    citationId: evidence.citationId,
+    citationKind: evidence.citationKind,
+    fieldPath: evidence.fieldPath,
+  };
 }
 
-function quotesOverlap(left: string, right: string): boolean {
-  const normalizedLeft = left.replaceAll(/\s+/g, " ").trim();
-  const normalizedRight = right.replaceAll(/\s+/g, " ").trim();
-  if (!normalizedLeft || !normalizedRight) return false;
-  if (normalizedLeft === normalizedRight) return true;
+type CitationSupport = Readonly<{
+  chunk: RetrievalCandidate;
+  quote: string;
+  evidence?: EntityEvidence;
+}>;
 
-  const comparableLength = Math.min(30, normalizedLeft.length, normalizedRight.length);
-  if (comparableLength < 12) return false;
-  return normalizedLeft.includes(normalizedRight.slice(0, comparableLength))
-    || normalizedRight.includes(normalizedLeft.slice(0, comparableLength));
+function findCitationSupport(
+  citation: RawLlmCitation,
+  chunks: readonly RetrievalCandidate[],
+): CitationSupport | undefined {
+  if (!citation.quote) return undefined;
+  const titleMatches = citation.sourceTitle
+    ? chunks.filter((chunk) => chunk.sourceTitle.localeCompare(citation.sourceTitle!, undefined, { sensitivity: "accent" }) === 0)
+    : [];
+  const candidates = [...titleMatches, ...chunks.filter((chunk) => !titleMatches.includes(chunk))];
+
+  for (const chunk of candidates) {
+    for (const evidence of chunk.entityEvidence ?? []) {
+      if (isNormalizedSubstring(citation.quote, evidence.quote)) {
+        return { chunk, quote: evidence.quote, evidence };
+      }
+    }
+    if (isNormalizedSubstring(citation.quote, chunk.quoteText)) {
+      return { chunk, quote: chunk.quoteText };
+    }
+  }
+  return undefined;
+}
+
+function isNormalizedSubstring(quote: string, source: string): boolean {
+  const normalizedQuote = normalizeCitationText(quote);
+  return normalizedQuote.length >= 8 && normalizeCitationText(source).includes(normalizedQuote);
+}
+
+function normalizeCitationText(value: string): string {
+  return value.normalize("NFC").replaceAll(/\s+/g, " ").trim().toLocaleLowerCase();
 }

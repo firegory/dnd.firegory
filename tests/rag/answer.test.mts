@@ -206,6 +206,17 @@ describe("parseLlmResponse", () => {
     assert.equal(result.answer, "Trimmed");
     assert.equal(result.confident, true);
   });
+
+  it("drops model-provided structured claims and invalid field types", () => {
+    const result = parseLlmResponse(JSON.stringify({
+      answer: { range: "Self" },
+      confident: "yes",
+      entity: { range: "Self" },
+      citations: [{ quote: "Range: Self", page: "12", structuredClaim: { range: "Self" } }],
+    }));
+
+    assert.deepEqual(result, { citations: [{ quote: "Range: Self" }] });
+  });
 });
 
 // ---------- mapCitations ----------
@@ -229,7 +240,7 @@ describe("mapCitations", () => {
     assert.equal(result[0].sourceTitle, "Basic Rules");
   });
 
-  it("falls back to quote overlap matching", () => {
+  it("maps a normalized contiguous quote substring and derives the source quote", () => {
     const chunks = [
       makeChunk({
         sourceTitle: "Player's Handbook",
@@ -240,6 +251,7 @@ describe("mapCitations", () => {
     const result = mapCitations(raw, chunks);
     assert.equal(result.length, 1);
     assert.equal(result[0].sourceTitle, "Player's Handbook");
+    assert.equal(result[0].quote, "A creature can take a reaction on another creature's turn.");
   });
 
   it("omits unmatched citations without source support", () => {
@@ -252,6 +264,14 @@ describe("mapCitations", () => {
   it("does not accept an unsupported short quote by incidental overlap", () => {
     assert.deepEqual(
       mapCitations([{ quote: "A", sourceTitle: "Basic Rules" }], [makeChunk()]),
+      [],
+    );
+  });
+
+  it("rejects a divergent quote that only shares a long prefix", () => {
+    const chunk = makeChunk({ quoteText: "A creature can take a reaction on another creature's turn." });
+    assert.deepEqual(
+      mapCitations([{ quote: "A creature can take a reaction that deals damage" }], [chunk]),
       [],
     );
   });
@@ -328,12 +348,12 @@ describe("mapCitations", () => {
     assert.equal(result[0].section, "Reactions");
   });
 
-  it("prefers LLM-provided page/section over chunk metadata", () => {
+  it("ignores LLM-provided page/section in favor of chunk metadata", () => {
     const chunks = [makeChunk({ pageNumber: 73, sectionHeading: "Reactions" })];
     const raw = [{ quote: "A creature can take a reaction", sourceTitle: "Basic Rules", page: 99, section: "Combat" }];
     const result = mapCitations(raw, chunks);
-    assert.equal(result[0].page, 99);
-    assert.equal(result[0].section, "Combat");
+    assert.equal(result[0].page, 73);
+    assert.equal(result[0].section, "Reactions");
   });
 
   it("maps multiple citations to different chunks", () => {

@@ -21,10 +21,11 @@ import {
   buildSystemPrompt,
   buildUserMessage,
   parseLlmResponse,
-  mapCitations,
+  citationEntityEvidence,
   type AnswerLanguage,
   type SourceCitation,
 } from "./format";
+import { groundGeneratedAnswer, unsupportedAnswer } from "./ground.ts";
 
 // Re-export format utilities for direct testing
 export {
@@ -124,7 +125,7 @@ export async function generateAnswer(
 
   // 2. Check if we have enough for a confident answer
   if (chunks.length < MIN_CHUNKS_FOR_CONFIDENT_ANSWER) {
-    const noSupportAnswer = buildNoSupportAnswer(answerLanguage);
+    const noSupportAnswer = unsupportedAnswer(answerLanguage, chunks.length);
     return {
       answer: noSupportAnswer,
       retrieval,
@@ -168,14 +169,7 @@ export async function generateAnswer(
 
   // 5. Parse and map
   const parsed = parseLlmResponse(result.content);
-  const citations = mapCitations(parsed.citations, chunks);
-
-  const answer: RagAnswer = {
-    answer: parsed.answer ?? result.content,
-    citations,
-    confident: parsed.confident !== false,
-    retrievedChunks: chunks.length,
-  };
+  const answer: RagAnswer = groundGeneratedAnswer(parsed, chunks, answerLanguage, entryScope !== undefined);
 
   return {
     answer,
@@ -188,20 +182,6 @@ export async function generateAnswer(
 /**
  * Builds a "no support found" answer without calling the LLM.
  */
-function buildNoSupportAnswer(language: AnswerLanguage): RagAnswer {
-  const messages: Record<AnswerLanguage, string> = {
-    en: "I could not find relevant information in the available sources for your query.",
-    ru: "Не удалось найти релевантную информацию в доступных источниках по вашему запросу.",
-  };
-
-  return {
-    answer: messages[language],
-    citations: [],
-    confident: false,
-    retrievedChunks: 0,
-  };
-}
-
 function buildAnswerGenerationUnavailableAnswer(
   language: AnswerLanguage,
   chunks: HybridSearchResult["chunks"],
@@ -224,7 +204,9 @@ function buildAnswerGenerationUnavailableAnswer(
       fileId: chunk.fileId,
       sourceId: chunk.sourceId,
       chunkId: chunk.chunkId,
-      ...(chunk.entityEvidence ? { entityEvidence: chunk.entityEvidence } : {}),
+      ...(chunk.entityEvidence?.length
+        ? { entityEvidence: chunk.entityEvidence.map(citationEntityEvidence) }
+        : {}),
     })),
     confident: false,
     retrievedChunks: chunks.length,

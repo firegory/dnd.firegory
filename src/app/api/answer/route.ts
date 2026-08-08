@@ -13,8 +13,20 @@ import { NextResponse } from "next/server";
 import { generateAnswer } from "../../../server/rag/answer";
 import { type AnswerLanguage } from "../../../server/rag/format";
 import { getCurrentUser } from "../../../server/auth/session";
-import type { SourceEdition, SourceLanguage, SourceCategory } from "../../../server/access/retrieval-filter";
-import { isCompendiumEntryScope, type CompendiumEntryScope } from "../../../server/retrieval/entity";
+import {
+  SOURCE_CATEGORIES,
+  SOURCE_EDITIONS,
+  SOURCE_LANGUAGES,
+  type RetrievalSelection,
+  type SourceEdition,
+  type SourceLanguage,
+  type SourceCategory,
+} from "../../../server/access/retrieval-filter";
+import {
+  entryScopeConflictsWithSelection,
+  isCompendiumEntryScope,
+  type CompendiumEntryScope,
+} from "../../../server/retrieval/entity";
 
 export type AnswerRequestBody = Readonly<{
   query: string;
@@ -72,15 +84,26 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: "Invalid entry scope." }, { status: 400 });
   }
 
+  if ((body.edition !== undefined && !SOURCE_EDITIONS.includes(body.edition))
+    || (body.language !== undefined && !SOURCE_LANGUAGES.includes(body.language))
+    || (body.category !== undefined && !SOURCE_CATEGORIES.includes(body.category))) {
+    return NextResponse.json({ error: "Invalid source selection." }, { status: 400 });
+  }
+
+  const selection: RetrievalSelection = {
+    ...(body.edition ? { edition: body.edition } : {}),
+    ...(body.language ? { language: body.language } : {}),
+    ...(body.category ? { category: body.category } : {}),
+  };
+  if (body.entryScope && entryScopeConflictsWithSelection(body.entryScope, selection)) {
+    return NextResponse.json({ error: "Entry scope conflicts with source selection." }, { status: 400 });
+  }
+
   try {
     const result = await generateAnswer({
       query: body.query,
       user: { role: user.role, userId: user.id },
-      selection: {
-        ...(body.edition ? { edition: body.edition } : {}),
-        ...(body.language ? { language: body.language } : {}),
-        ...(body.category ? { category: body.category } : {}),
-      },
+      selection,
       answerLanguage,
       retrievalLimit,
       entryScope: body.entryScope,

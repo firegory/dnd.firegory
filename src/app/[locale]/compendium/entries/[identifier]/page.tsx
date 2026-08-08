@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { LocaleSync } from "../../../../../components/compendium/locale-sync";
+import { AskAboutEntry } from "../../../../../components/compendium/ask-about-entry";
 import { AppLayout } from "../../../../../components/ui/app-layout";
 import { requireUser } from "../../../../../server/auth/session";
 import { isGuideLocale } from "../../../../../server/compendium/guides";
@@ -39,6 +40,17 @@ export default async function EntryPage({ params, searchParams }: { params: Prom
       <article className="entry-document">
         <header className="compendium-hero"><p className="compendium-kicker">{entry.edition} · {entry.entryType}</p><h1>{entry.title}</h1>{entry.summary ? <p>{entry.summary}</p> : null}</header>
         <div className="entry-body">{entry.body.split(/\n{2,}/).filter(Boolean).map((paragraph, index) => <p key={index}>{paragraph}</p>)}</div>
+        <AskAboutEntry
+          title={entry.title}
+          locale={locale}
+          scope={{
+            entryId: entry.id,
+            sourceId: entry.source.id,
+            versionId: entry.versionId,
+            edition: entry.edition,
+            language: entry.language,
+          }}
+        />
         <footer className="entry-source">
           <h2>{locale === "ru" ? "Источник и цитаты" : "Source and citations"}</h2>
           <p>

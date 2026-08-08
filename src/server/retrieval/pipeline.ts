@@ -10,23 +10,24 @@ import {
   buildRetrievalAuthorizationFilter,
   type RetrievalUser,
   type RetrievalSelection,
-} from "../access/retrieval-filter";
-import { buildSourceAccessSql } from "../access/access-sql";
-import { keywordSearch } from "./keyword";
-import { vectorSearch } from "./vector";
-import { mergeCandidates, type HybridMergeConfig } from "./hybrid";
-import { expandQuery, combinedExpandedQuery, type ExpansionConfig } from "./expand";
-import { rewriteQuery, collectVectorQueries, type RewrittenQuery } from "./rewrite";
-import { rerankCandidates, type RerankConfig } from "./rerank";
-import type { RetrievalCandidate, RetrievalParams } from "./types";
-import { captureRetrievalSnapshot, type RetrievalSnapshot } from "./snapshot";
+} from "../access/retrieval-filter.ts";
+import { buildSourceAccessSql } from "../access/access-sql.ts";
+import { keywordSearch } from "./keyword.ts";
+import { vectorSearch } from "./vector.ts";
+import { mergeCandidates, type HybridMergeConfig } from "./hybrid.ts";
+import { expandQuery, combinedExpandedQuery, type ExpansionConfig } from "./expand.ts";
+import { rewriteQuery, collectVectorQueries, type RewrittenQuery } from "./rewrite.ts";
+import { rerankCandidates, type RerankConfig } from "./rerank.ts";
+import type { RetrievalCandidate, RetrievalParams } from "./types.ts";
+import { captureRetrievalSnapshot, type RetrievalSnapshot } from "./snapshot.ts";
 import {
   enrichRewriteWithEntities,
+  entryScopeConflictsWithSelection,
   resolveCompendiumEntities,
   type CompendiumEntryScope,
   type EntityResolution,
   type ExactEntityMatch,
-} from "./entity";
+} from "./entity.ts";
 
 export type {
   RetrievalCandidate,
@@ -132,11 +133,13 @@ export async function hybridSearch(
 
   // Entity resolution uses only the fixed authorized snapshot and completes
   // before any entity names can influence expansion or semantic retrieval.
-  const entityResolution: EntityResolution = await (dependencies.resolveEntities ?? resolveCompendiumEntities)(
-    searchQuery,
-    snapshot.generationIds,
-    entryScope,
-  );
+  const entityResolution: EntityResolution = entryScope && entryScopeConflictsWithSelection(entryScope, selection)
+    ? { matches: [], candidates: [] }
+    : await (dependencies.resolveEntities ?? resolveCompendiumEntities)(
+        searchQuery,
+        snapshot.generationIds,
+        entryScope,
+      );
 
   const retrievalParams: RetrievalParams = {
     limit: strategyLimit,
