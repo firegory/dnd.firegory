@@ -262,8 +262,8 @@ async function seedReviewFixture(client: Pool | PoolClient): Promise<void> {
   const sourceId = IDS.sources.open;
   const fileId = "30000000-0000-4000-8000-000000000001";
   await client.query(
-    `INSERT INTO compendium_import_runs(id,source_id,file_id,generation_id,status,importer,importer_version,parser_version,prompt_version,model_version,input_sha256,checkpoint,started_at,finished_at,occurrence_count,candidate_count,new_count)
-     VALUES ($1,$2,$3,$4,'succeeded','qa','1','1','none','none',$5,'completed',now(),now(),1,1,1)`,
+    `INSERT INTO compendium_import_runs(id,source_id,file_id,generation_id,status,importer,importer_version,parser_version,prompt_version,model_version,input_sha256,checkpoint,lease_token,lease_expires_at,heartbeat_at,started_at)
+     VALUES ($1,$2,$3,$4,'running','qa','1','1','none','none',$5,'occurrences','72000000-0000-4000-8000-000000000001',now()+interval '1 hour',now(),now())`,
     [IDS.browserImportRun, sourceId, fileId, "40000000-0000-4000-8000-000000000001", "a".repeat(64)],
   );
   const occurrenceId = "71000000-0000-4000-8000-000000000001";
@@ -276,5 +276,13 @@ async function seedReviewFixture(client: Pool | PoolClient): Promise<void> {
     `INSERT INTO compendium_import_candidates(import_run_id,source_id,file_id,generation_id,occurrence_id,candidate_order,candidate_key,entry_type,diff_status,content,content_sha256)
      VALUES ($1,$2,$3,$4,$5,0,'qa-review-spell','spell','new',$6::jsonb,$7)`,
     [IDS.browserImportRun, sourceId, fileId, "40000000-0000-4000-8000-000000000001", occurrenceId, JSON.stringify({ title: "QA review spell", body: "Review body" }), "c".repeat(64)],
+  );
+  await client.query(
+    "UPDATE compendium_import_runs SET checkpoint='diffed',occurrence_count=1,candidate_count=1,new_count=1 WHERE id=$1",
+    [IDS.browserImportRun],
+  );
+  await client.query(
+    "UPDATE compendium_import_runs SET status='succeeded',checkpoint='completed',lease_token=NULL,lease_expires_at=NULL,finished_at=now() WHERE id=$1",
+    [IDS.browserImportRun],
   );
 }
