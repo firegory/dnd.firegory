@@ -15,7 +15,10 @@ case "$evidence_root" in /*) ;; *) echo "DND_DR_EVIDENCE_ROOT must be absolute" 
 [ -d "$evidence_dir" ] && [ ! -L "$evidence_dir" ] || { echo "Evidence path must be a non-symlink directory" >&2; exit 1; }
 [ -r "$signing_key" ] || { echo "DND_DR_EVIDENCE_SIGNING_SECRET_KEY_FILE must be readable" >&2; exit 1; }
 command -v minisign >/dev/null || { echo "minisign is required to seal evidence" >&2; exit 1; }
-"$(dirname "$0")/dr-target-guard.sh" verify --project-name "$project" >/dev/null
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
+"$script_dir/dr-target-guard.sh" verify --project-name "$project" >/dev/null
+. "$script_dir/dr-docker-socket.sh"
+dr_docker_socket_initialize
 [ ! -e "$evidence_dir/EVIDENCE_COMPLETE.json" ] || { echo "Evidence is already sealed" >&2; exit 1; }
 for file in backup-metadata.json COMPLETE.json timeline.csv source-fingerprints.csv \
   restored-fingerprints.csv ingestion-reconciliation.log index-cardinality.csv; do
@@ -27,6 +30,7 @@ node --input-type=module --eval '
   import { readFileSync, writeFileSync } from "node:fs";
   const directory = process.argv[1];
   const project = process.argv[2];
+  const dockerSocket = process.argv[3];
   const backup = JSON.parse(readFileSync(`${directory}/backup-metadata.json`, "utf8"));
   const complete = JSON.parse(readFileSync(`${directory}/COMPLETE.json`, "utf8"));
   const rows = readFileSync(`${directory}/timeline.csv`, "utf8").trim().split("\n").slice(1).map((line) => {
@@ -42,6 +46,7 @@ node --input-type=module --eval '
   const summary = {
     schemaVersion: 1,
     project,
+    dockerSocket,
     sourceSnapshotTime: backup.sourceSnapshotTime,
     postgresDumpStarted: backup.postgresDumpStarted,
     postgresDumpFinished: backup.postgresDumpFinished,
@@ -60,7 +65,7 @@ node --input-type=module --eval '
   };
   if (summary.backupPipelineSeconds < 0 || summary.measuredRtoSeconds < 0) throw new Error("Evidence contains negative elapsed time");
   writeFileSync(`${directory}/summary.json`, `${JSON.stringify(summary, null, 2)}\n`, { mode: 0o400, flag: "wx" });
-' "$evidence_dir" "$project"
+' "$evidence_dir" "$project" "$dr_docker_socket"
 (
   cd "$evidence_dir"
   sha256sum backup-metadata.json COMPLETE.json timeline.csv source-fingerprints.csv \

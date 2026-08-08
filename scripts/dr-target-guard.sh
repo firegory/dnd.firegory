@@ -47,10 +47,13 @@ marker_parent=$(readlink -f "$(dirname "$marker")")
 marker="$marker_parent/$(basename "$marker")"
 case "$marker" in "$data_path"/*) echo "DR marker must be outside canonical data" >&2; exit 1 ;; esac
 
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
+. "$script_dir/dr-docker-socket.sh"
+dr_docker_socket_initialize
 "$(dirname "$0")/production-nfs-preflight.sh" >/dev/null
 mount_fingerprint=$(findmnt --noheadings --raw --output SOURCE,FSROOT,FSTYPE,OPTIONS --target "$data_path" | sha256sum | cut -d ' ' -f 1)
 
-expected=$(printf 'dnd-firegory-dr-empty-target-v1\nproject=%s\ndata_path=%s\nmount_sha256=%s\n' "$project" "$data_path" "$mount_fingerprint")
+expected=$(printf 'dnd-firegory-dr-empty-target-v1\nproject=%s\ndata_path=%s\nmount_sha256=%s\ndocker_socket=%s\n' "$project" "$data_path" "$mount_fingerprint" "$dr_docker_socket")
 
 verify_marker() {
   [ -f "$marker" ] && [ ! -L "$marker" ] || { echo "Expected DR empty-target marker is missing" >&2; exit 1; }

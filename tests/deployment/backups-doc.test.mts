@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -15,6 +17,7 @@ const migration = await readFile(new URL("../../migrations/0006_ingestion_genera
 const guard = await readFile(new URL("../../scripts/dr-target-guard.sh", import.meta.url), "utf8");
 const drCompose = await readFile(new URL("../../scripts/dr-compose.sh", import.meta.url), "utf8");
 const drComposeLib = await readFile(new URL("../../scripts/dr-compose-lib.sh", import.meta.url), "utf8");
+const drDockerSocket = await readFile(new URL("../../scripts/dr-docker-socket.sh", import.meta.url), "utf8");
 const createBackup = await readFile(new URL("../../scripts/create-backup-set.sh", import.meta.url), "utf8");
 const sealReplica = await readFile(new URL("../../scripts/seal-backup-replica.sh", import.meta.url), "utf8");
 const verifyBackup = await readFile(new URL("../../scripts/verify-backup-set.sh", import.meta.url), "utf8");
@@ -31,6 +34,19 @@ const compose = parse(composeSource) as { services: Record<string, unknown>; vol
 
 function bashBlocks(section = backups): string[] {
   return [...section.matchAll(/```bash\n([\s\S]*?)```/g)].map((match) => match[1]);
+}
+
+async function listenOnUnixSocket(path: string): Promise<Server> {
+  const server = createServer();
+  server.listen(path);
+  await once(server, "listening");
+  await chmod(path, 0o600);
+  return server;
+}
+
+async function closeServer(server: Server): Promise<void> {
+  server.close();
+  await once(server, "close");
 }
 
 test("runbook matches production paths, identities, services, and volumes", () => {
@@ -59,6 +75,7 @@ test("every referenced repository script exists and executable shell scripts hav
   for (const path of paths) await access(new URL(`../../${path}`, import.meta.url));
   for (const internal of [
     "scripts/dr-compose-lib.sh",
+    "scripts/dr-docker-socket.sh",
     "scripts/dr-critical-fingerprint.sql",
     "scripts/dr-index-cardinality.sql",
     "scripts/dr-reconcile-ingestion.sql",
@@ -108,6 +125,8 @@ test("DR Compose scope is explicit and ambient or nested overrides are rejected"
   assert.match(drComposeLib, /--env-file "\$dr_env_file"/);
   assert.match(drComposeLib, /--file "\$dr_compose_file"/);
   assert.match(drComposeLib, /unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROJECT_DIR COMPOSE_PROFILES/);
+  assert.match(drDockerSocket, /DR_DOCKER_HOST:-unix:\/\/\/var\/run\/docker\.sock/);
+  assert.match(drComposeLib, /env -u DOCKER_CONTEXT -u DOCKER_HOST DOCKER_HOST="\$dr_docker_host" docker compose/);
   for (const script of [permissionsSmoke, replacementSmoke]) {
     assert.match(script, /"\$1" = "--project-name"/);
     assert.match(script, /dr-target-guard\.sh" verify --project-name "\$project"/);
@@ -124,6 +143,8 @@ test("DR Compose rejects every config, project, profile, mount, build, and comma
   const marker = join(temporary, "target.marker");
   const bin = join(temporary, "bin");
   const dockerLog = join(temporary, "docker.log");
+  const socket = join(temporary, "docker.sock");
+  const socketServer = await listenOnUnixSocket(socket);
   await mkdir(data);
   await mkdir(bin);
   await writeFile(join(bin, "docker"), `#!/bin/sh\nenv > "${dockerLog}"\nprintf '%s\\n' "$@" >> "${dockerLog}"\n`);
@@ -142,10 +163,13 @@ test("DR Compose rejects every config, project, profile, mount, build, and comma
     COMPOSE_PROJECT_DIR: "/tmp",
     COMPOSE_PROFILES: "evil",
     COMPOSE_ENV_FILES: "/tmp/evil.env",
+    DOCKER_HOST: "",
+    DOCKER_CONTEXT: "",
+    DR_DOCKER_HOST: `unix://${socket}`,
   };
-  const run = (args: string[]) => spawnSync("sh", ["scripts/dr-compose.sh", "--project-name", "dnd94-dr-smoke-compose", ...args], {
+  const run = (args: string[], runEnv = env) => spawnSync("sh", ["scripts/dr-compose.sh", "--project-name", "dnd94-dr-smoke-compose", ...args], {
     cwd: root,
-    env,
+    env: runEnv,
     encoding: "utf8",
   });
   const escapes = [
@@ -177,13 +201,42 @@ test("DR Compose rejects every config, project, profile, mount, build, and comma
       assert.equal(result.status, 2, `${escape.join(" ")}: ${result.stderr}`);
       await assert.rejects(access(dockerLog));
     }
+    for (const remoteEnv of [
+      { ...env, DOCKER_HOST: "tcp://production:2375" },
+      { ...env, DOCKER_HOST: "ssh://production" },
+      { ...env, DOCKER_HOST: `unix://${socket}` },
+      { ...env, DOCKER_CONTEXT: "production" },
+      { ...env, DR_DOCKER_HOST: "tcp://production:2375" },
+      { ...env, DR_DOCKER_HOST: "ssh://production" },
+      { ...env, DR_DOCKER_HOST: "context://production" },
+    ]) {
+      await rm(dockerLog, { force: true });
+      assert.notEqual(run(["status"], remoteEnv).status, 0);
+      await assert.rejects(access(dockerLog));
+    }
+    const regularFile = join(temporary, "not-a-socket");
+    const socketLink = join(temporary, "socket-link");
+    await writeFile(regularFile, "not a socket");
+    await symlink(socket, socketLink);
+    for (const endpoint of [regularFile, socketLink]) {
+      await rm(dockerLog, { force: true });
+      assert.notEqual(run(["status"], { ...env, DR_DOCKER_HOST: `unix://${endpoint}` }).status, 0);
+      await assert.rejects(access(dockerLog));
+    }
+    await chmod(socket, 0o666);
+    assert.notEqual(run(["status"]).status, 0);
+    await assert.rejects(access(dockerLog));
+    await chmod(socket, 0o600);
     const valid = run(["status"]);
     assert.equal(valid.status, 0, valid.stderr);
     const invocation = await readFile(dockerLog, "utf8");
     assert.match(invocation, new RegExp(`--project-directory\\n${String(root.pathname).replace(/\/$/, "")}`));
     assert.match(invocation, /--file\n.*compose\.production\.yml/);
     assert.doesNotMatch(invocation, /COMPOSE_FILE=|COMPOSE_PROJECT_NAME=|COMPOSE_PROJECT_DIR=|COMPOSE_PROFILES=|COMPOSE_ENV_FILES=/);
+    assert.match(invocation, new RegExp(`DOCKER_HOST=unix://${socket.replaceAll("/", "\\/")}`));
+    assert.doesNotMatch(invocation, /DOCKER_CONTEXT=/);
   } finally {
+    await closeServer(socketServer);
     await rm(temporary, { recursive: true, force: true });
   }
 });
@@ -192,6 +245,8 @@ test("DR target guard fails closed and binds an empty target to one project", as
   const temporary = await mkdtemp(join(tmpdir(), "dnd-dr-guard-"));
   const data = join(temporary, "data");
   const marker = join(temporary, "target.marker");
+  const socket = join(temporary, "docker.sock");
+  const socketServer = await listenOnUnixSocket(socket);
   await mkdir(data);
   const baseEnv = {
     ...process.env,
@@ -200,6 +255,9 @@ test("DR target guard fails closed and binds an empty target to one project", as
     DND_DR_EMPTY_TARGET_MARKER: marker,
     DND_NFS_PREFLIGHT_TEST_MODE: "1",
     DND_DR_GUARD_TEST_MODE: "1",
+    DOCKER_HOST: "",
+    DOCKER_CONTEXT: "",
+    DR_DOCKER_HOST: `unix://${socket}`,
   };
   const run = (args: string[], env = baseEnv) => spawnSync("sh", ["scripts/dr-target-guard.sh", ...args], {
     cwd: root,
@@ -226,6 +284,7 @@ test("DR target guard fails closed and binds an empty target to one project", as
     }).status, 0);
     assert.equal(run(["remove", "--project-name", "dnd94-dr-smoke-test"], authorized).status, 0);
   } finally {
+    await closeServer(socketServer);
     await rm(temporary, { recursive: true, force: true });
   }
 });
@@ -252,6 +311,7 @@ test("backup accepts only a read-only provider snapshot and verifies extracted c
   assert.match(verifyBackup, /minisign -V[\s\S]*backup-set\.sha256[\s\S]*minisign -V[\s\S]*COMPLETE\.json/);
   assert.match(verifyBackup, /metadataSha256[\s\S]*checksumManifestSha256/);
   assert.match(guard, /SOURCE,FSROOT,FSTYPE,OPTIONS[\s\S]*mount_sha256/);
+  assert.match(guard, /docker_socket=%s[\s\S]*"\$dr_docker_socket"/);
   assert.match(guard, /Refusing the configured production NFS path/);
   const backupCommands = bashBlocks(backups.slice(0, backups.indexOf("## Empty-environment restore drill"))).join("\n");
   assert.doesNotMatch(backupCommands, /\b(?:worker\s+stop|stop\s+worker)\b/);
@@ -406,6 +466,7 @@ test("metadata and evidence make RPO/RTO and cardinality measurable", () => {
   }
   assert.match(backups, /index-cardinality\.csv/);
   assert.match(evidence, /backupPipelineSeconds/);
+  assert.match(evidence, /dockerSocket/);
   assert.match(evidence, /measuredRtoSeconds/);
   assert.match(evidence, /evidence\.sha256[\s\S]*EVIDENCE_COMPLETE\.json/);
   assert.match(evidence, /DND_DR_EVIDENCE_ROOT[\s\S]*evidence_dir[\s\S]*\$project/);
@@ -421,6 +482,7 @@ test("sensitive backup artifacts require encryption and unsafe variants are abse
   assert.match(backups, /separate replica-sealing role/);
   assert.match(backups, /Rotate recipients at least annually/);
   assert.match(backups, /Secure expiry deletes every replica/);
+  assert.match(backups, /DR_DOCKER_HOST=unix:\/\/\/run\/user\/1000\/docker\.sock/);
   assert.match(removePlaintext, /dr-target-guard\.sh" verify --project-name "\$project"/);
   assert.match(removePlaintext, /"\$path" = "\/run\/dnd-dr-tmpfs\/\$project"/);
   assert.doesNotMatch(bashBlocks(backups.slice(backups.indexOf("## Empty-environment restore drill"))).join("\n"), /\brm -rf\b/);

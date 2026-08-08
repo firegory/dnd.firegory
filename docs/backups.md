@@ -10,6 +10,9 @@ absolute paths, clears all relevant `COMPOSE_*` ambient overrides, and exposes
 only named operations. It never forwards Compose flags, service definitions,
 commands, volumes, mounts, build contexts, profiles, or config paths supplied by
 an operator.
+It also rejects ambient `DOCKER_HOST` and `DOCKER_CONTEXT`, accepts only an
+explicitly validated local `unix://` socket, and invokes Docker with the context
+unset and `DOCKER_HOST` fixed to that canonical socket.
 
 ## Recovery contract
 
@@ -107,6 +110,7 @@ counts/fingerprints.
 ```bash
 set -euo pipefail
 export DND_BACKUP_PLAINTEXT_TMPDIR=/run/dnd-backup-tmpfs
+export DR_DOCKER_HOST=unix:///var/run/docker.sock
 install -d -m 0700 /srv/encrypted-backups/dnd-firegory/20260808T000000Z
 ./scripts/create-backup-set.sh \
   --project-name dnd-firegory-production \
@@ -159,17 +163,26 @@ be selected for restore.
 ## Empty-environment restore drill
 
 Use an isolated host and newly provisioned empty NFS export. The DR authorization
-has three independent requirements:
+has four independent requirements:
 
 1. An explicit project matching `dnd94-dr-*`.
 2. The exact `DND_DR_OPT_IN` phrase shown below.
 3. A mode-0600 marker outside NFS that binds that project to the canonicalized
    target path and was created only after the guard proved the target empty.
+4. A local Unix Docker socket whose canonical path is bound into that marker.
 
 `dr-compose`, permission smoke, replacement smoke, evidence sealing, and
 teardown each re-run the guard. A stale ambient variable cannot redirect them.
 The guard refuses missing/mismatched markers, non-empty initialization,
 non-NFS targets, nested project overrides, and production-style project names.
+It also refuses ambient Docker hosts/contexts, TCP/SSH/context endpoints,
+symlinks, non-sockets, inaccessible sockets, sockets owned by an unrelated user,
+and world-writable sockets. The default is `unix:///var/run/docker.sock`, which
+canonicalizes to the local socket (commonly `/run/docker.sock`). A rootless local
+daemon is supported only through an explicit value such as
+`DR_DOCKER_HOST=unix:///run/user/1000/docker.sock`; the invoking operator must own
+and be able to read/write it. Unix sockets that proxy a remote daemon are outside
+the supported trust model and must not be used.
 
 ### 1. Authorize the empty target and start evidence
 
@@ -177,7 +190,9 @@ Set `.env` `DND_DATA_HOST_PATH` to the isolated DR export, never the production
 path. `DND_DR_PRODUCTION_DATA_PATH` records the protected production mount and
 is required; the guard rejects equality. The marker also hashes the current NFS
 mount source/root/type/options, so swapping the mount at the same path invalidates
-every guarded command.
+every guarded command. It records the canonical Docker socket path as part of
+the same authorization, tying container operations to the host whose NFS path
+was validated.
 
 ```bash
 set -euo pipefail
@@ -188,6 +203,7 @@ export DR_PROJECT=dnd94-dr-20260808
 export DND_DR_OPT_IN=I_UNDERSTAND_DND_FIREGORY_DR_IS_DESTRUCTIVE
 export DND_DR_EMPTY_TARGET_MARKER="/var/lib/dnd-firegory-dr/$DR_PROJECT.marker"
 export DND_DR_PRODUCTION_DATA_PATH=/mnt/dnd-firegory
+export DR_DOCKER_HOST=unix:///var/run/docker.sock
 export DND_BACKUP_SIGNING_PUBLIC_KEY_FILE=/etc/dnd-firegory/backup-minisign.pub
 export BACKUP_DIR=/srv/replicated-encrypted-backups/dnd-firegory/20260808T000000Z
 export DR_PLAINTEXT="/run/dnd-dr-tmpfs/$DR_PROJECT"
@@ -377,6 +393,7 @@ never delete chunks or canonical files.
 Sealing requires matching source/restored fingerprints, all timeline stages,
 reconciliation output, index cardinality, and backup metadata. It computes
 backup-pipeline seconds and measured RTO, then checksums the evidence set.
+The signed summary also records the canonical local Docker socket path.
 
 ```bash
 export DND_DR_EVIDENCE_SIGNING_SECRET_KEY_FILE=/run/secrets/dnd-dr-evidence-minisign.key
@@ -403,6 +420,7 @@ infrastructure action; this repository never recursively deletes NFS.
 | Failure | Response | Rollback |
 | --- | --- | --- |
 | Guard, prefix, opt-in, marker, or empty-target check fails | Stop; do not bypass the script or set an ambient project | Provision another empty DR target and initialize a new bound marker |
+| Docker endpoint is ambient, remote, a symlink/non-socket, inaccessible, or insecurely writable | Stop before every Compose action | Set `DR_DOCKER_HOST=unix://<verified-local-socket>` and re-run guard verification; never use a remote context |
 | Provider snapshot is absent, writable, or not atomic | Reject the set before backup | Select/create a verified immutable provider snapshot |
 | Archive extraction/checksum/canonical validation fails | Never seal or index it | Quarantine the set and use another sealed replica/snapshot |
 | NFS restore cannot write under `APP_UID:APP_GID` with `root_squash` | Stop; fix server/provider identity mapping | Discard the isolated export; never client-`chown` or disable `root_squash` |
