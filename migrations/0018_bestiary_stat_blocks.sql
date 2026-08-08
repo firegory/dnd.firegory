@@ -1,6 +1,6 @@
--- Complete typed creature projection. 0017 remains reserved; existing flat and
--- spell migration order is intentionally unchanged. Existing creature rows are
--- marked incomplete: this migration never invents absent stat-block values.
+-- Complete typed creature projection. 0017_flat_compendium_types.sql precedes
+-- this migration; existing flat and spell migration order is unchanged.
+-- Existing creature rows are marked incomplete: no absent values are invented.
 
 ALTER TABLE compendium_creatures
   ADD COLUMN IF NOT EXISTS projection_status text NOT NULL DEFAULT 'legacy_incomplete',
