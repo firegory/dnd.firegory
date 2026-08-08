@@ -4,6 +4,16 @@ ALTER TYPE compendium_entry_type ADD VALUE IF NOT EXISTS 'glossary';
 
 ALTER TABLE nfs_index_managed_sources ADD COLUMN IF NOT EXISTS owns_source boolean NOT NULL DEFAULT true;
 ALTER TABLE nfs_index_managed_files ADD COLUMN IF NOT EXISTS owns_file boolean NOT NULL DEFAULT true;
+ALTER TABLE nfs_index_managed_files ADD COLUMN IF NOT EXISTS previous_active_generation_id uuid;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'nfs_index_managed_files_previous_generation_fk') THEN
+    ALTER TABLE nfs_index_managed_files ADD CONSTRAINT nfs_index_managed_files_previous_generation_fk
+      FOREIGN KEY (previous_active_generation_id, file_id, source_id)
+      REFERENCES ingestion_generations(id, file_id, source_id) ON DELETE SET NULL (previous_active_generation_id);
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS nfs_index_managed_files_previous_generation_idx
+  ON nfs_index_managed_files(previous_active_generation_id) WHERE previous_active_generation_id IS NOT NULL;
 
 ALTER TABLE nfs_index_entries
   ADD COLUMN IF NOT EXISTS edition source_edition,

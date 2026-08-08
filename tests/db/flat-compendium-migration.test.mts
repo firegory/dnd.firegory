@@ -9,6 +9,9 @@ test("0017 adds constrained flat projections and browse indexes", () => {
   assert.match(sql, /ALTER TYPE compendium_entry_type ADD VALUE IF NOT EXISTS 'glossary'/);
   assert.match(sql, /nfs_index_managed_sources ADD COLUMN IF NOT EXISTS owns_source boolean NOT NULL DEFAULT true/);
   assert.match(sql, /nfs_index_managed_files ADD COLUMN IF NOT EXISTS owns_file boolean NOT NULL DEFAULT true/);
+  assert.match(sql, /previous_active_generation_id uuid/);
+  assert.match(sql, /nfs_index_managed_files_previous_generation_fk[\s\S]*FOREIGN KEY \(previous_active_generation_id, file_id, source_id\)[\s\S]*ON DELETE SET NULL \(previous_active_generation_id\)/);
+  assert.match(sql, /nfs_index_managed_files_previous_generation_idx/);
   assert.match(sql, /CREATE TABLE IF NOT EXISTS compendium_glossary/);
   for (const type of ["feats", "items", "equipment", "glossary"]) assert.match(sql, new RegExp(`compendium_${type}_filters_idx`));
   assert.match(sql, /ALTER COLUMN ability_scores TYPE text\[\][\s\S]*ALTER COLUMN skill_proficiencies TYPE text\[\]/);

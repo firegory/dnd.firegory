@@ -26,7 +26,7 @@ A partial unique index permits only one staging/applying run per repository. Eac
 
 Repository validation reads every cited source file once, verifies its SHA-256, and captures its byte size in the projection before any database access. Transactional activation uses only that captured hash/size/path and never stats or rereads mutable NFS metadata.
 
-The mapping tables distinguish rows created by sync from reused relational rows. Removed entries are retired, but files are soft-deleted and sources retired only when their mapping has `owns_file=true` or `owns_source=true`. Reused published source/file rows remain untouched by clean and retirement. Canonical source/file IDs in these mappings bridge NFS entries back to relational compendium versions and import-link provenance.
+The mapping tables distinguish rows created by sync from reused relational rows. Before first activation on a reused file, sync retains its prior active generation and preserves that snapshot across incremental NFS generations. Removal restores the retained valid generation (or `NULL`) by compare-and-swap, then removes all NFS-derived entries and their generation cascade; an externally changed active pointer fails the transaction. Owned files and their derived generations are deleted by cascade, while reused source/file rows remain. Canonical source/file IDs in these mappings bridge NFS entries back to relational compendium versions and import-link provenance.
 
 ## Rebuild Boundary
 
