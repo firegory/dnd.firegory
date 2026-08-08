@@ -23,6 +23,26 @@ import { publishCanonicalRevision } from "../../src/worker/publication/publisher
 import { COMPLETE_CLASS, hierarchyDetailsFixture } from "../fixtures/character-options.mts";
 import { applyMigrationPrefix, IDS, isolatedDatabase, runProductionMigrations, seedAccessFixture } from "./postgres.mts";
 
+test("QA integration: concurrent isolated database cleanup closes owned pools before dropping", async () => {
+  const databases = await Promise.all([isolatedDatabase("cleanup_a"), isolatedDatabase("cleanup_b")]);
+  try {
+    const clients = await Promise.all(databases.map(({ pool }) => pool.connect()));
+    try {
+      await Promise.all(clients.map((client) => client.query("SELECT pg_sleep(0.01)")));
+    } finally {
+      clients.forEach((client) => client.release());
+    }
+    await Promise.all(databases.map(({ cleanup }) => cleanup()));
+    await Promise.all(databases.map(({ cleanup }) => cleanup()));
+    await Promise.all(databases.map(({ pool }) => assert.rejects(pool.query("SELECT 1"), /end/)));
+  } catch (error) {
+    const shutdown = await Promise.allSettled(databases.map(({ cleanup }) => cleanup()));
+    const shutdownErrors = shutdown.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+    if (shutdownErrors.length) throw new AggregateError([error, ...shutdownErrors], "Isolated database regression and cleanup both failed.");
+    throw error;
+  }
+});
+
 test("QA integration: fresh and prefix-upgrade migrations are database-isolated and preserve data", async (t) => {
   const fresh = await isolatedDatabase("fresh");
   t.after(() => fresh.cleanup());
