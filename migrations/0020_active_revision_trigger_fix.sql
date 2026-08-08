@@ -36,6 +36,40 @@ BEGIN
   RETURN NEW;
 END $$;
 
+CREATE OR REPLACE FUNCTION compendium_guard_import_artifact_immutability() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  run_status compendium_import_status;
+  run_checkpoint text;
+BEGIN
+  IF TG_OP <> 'INSERT' THEN
+    RAISE EXCEPTION 'import occurrences, candidates, checkpoints, diagnostics, and audit records are immutable';
+  END IF;
+  IF TG_TABLE_NAME IN ('compendium_import_occurrences', 'compendium_import_candidates', 'compendium_import_checkpoints', 'compendium_import_diagnostics') THEN
+    SELECT status, checkpoint INTO run_status, run_checkpoint
+    FROM compendium_import_runs WHERE id = NEW.import_run_id FOR SHARE;
+    IF run_status <> 'running' THEN
+      RAISE EXCEPTION 'import work may only be appended while its run is running';
+    END IF;
+    IF TG_TABLE_NAME = 'compendium_import_occurrences' THEN
+      IF run_checkpoint NOT IN ('created', 'occurrences') THEN
+        RAISE EXCEPTION 'import occurrences cannot be appended after the occurrence phase';
+      END IF;
+    ELSIF TG_TABLE_NAME = 'compendium_import_candidates' THEN
+      IF run_checkpoint <> 'occurrences' THEN
+        RAISE EXCEPTION 'import candidates may only be appended during the diff phase';
+      END IF;
+    ELSIF TG_TABLE_NAME = 'compendium_import_checkpoints' THEN
+      IF (NEW.checkpoint_key LIKE 'occurrence:%' AND run_checkpoint NOT IN ('created', 'occurrences'))
+         OR (NEW.checkpoint_key = 'candidate-diff' AND run_checkpoint <> 'occurrences')
+         OR (NEW.checkpoint_key = 'completed' AND run_checkpoint <> 'diffed') THEN
+        RAISE EXCEPTION 'import checkpoint does not match the current run phase';
+      END IF;
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
 CREATE OR REPLACE FUNCTION compendium_validate_published_import_links() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE target_revision uuid;
