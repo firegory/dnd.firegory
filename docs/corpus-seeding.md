@@ -116,12 +116,13 @@ Keep `npm run worker` running as the only process with read-write `DND_DATA_ROOT
 ```bash
 export APP_ORIGIN='https://dnd.example.invalid'
 export RUN_ID='<importRunId-from-seed-manifest>'
+export ENTRY_TYPE='<content-type-for-this-slot>'
 export COOKIE_JAR='/secure/operator-admin-cookie.jar'
 
 curl --fail-with-body --silent --show-error --cookie "$COOKIE_JAR" \
   "$APP_ORIGIN/api/admin/compendium/import-runs/$RUN_ID" > /secure/review-run.json
 
-jq -c '[.candidates[]|select(.publicationCapability=="publishable" and (.diffStatus=="new" or .diffStatus=="changed" or .diffStatus=="unchanged"))] | _nwise(200) | {action:"approve",candidateIds:map(.id),activeRevisionTokens:(map({key:.id,value:.activeRevisionToken})|from_entries)}' \
+jq -c --arg entryType "$ENTRY_TYPE" '[.candidates[]|select(.entryType==$entryType and .publicationCapability=="publishable" and (.diffStatus=="new" or .diffStatus=="changed" or .diffStatus=="unchanged"))] | _nwise(200) | {action:"approve",candidateIds:map(.id),activeRevisionTokens:(map({key:.id,value:.activeRevisionToken})|from_entries)}' \
   /secure/review-run.json > /secure/review-actions.jsonl
 
 while IFS= read -r action; do
@@ -133,7 +134,7 @@ done < /secure/review-actions.jsonl
 
 The administrator must inspect provenance, diff, typed fields, citations, and payload capability before submitting. Do not bulk approve an empty selection. `requires_extraction`, invalid, or duplicate candidates fail closed and need supported repair/rejection; they are not auto-published. Wait for worker terminal outcomes, then run `corpus-seed status` again.
 
-Process the ten output slots in this exact order: `feature`, `class`, `species`, `background`, `feat`, `spell`, `glossary`, `creature`, `item`, `equipment`. For each run, fetch the current candidates, inspect them, submit consecutive batches of at most 200, and wait until every batch has a successful worker publication outcome before moving to the next run. After publishing `feature`, run canonical validation, incremental indexing, and `corpus-seed status`; do not approve the `class` run until the feature slot reports current `reviewed`, `published`, and `indexed` counts equal to `discovered`, with no failures. Apply the same current-status gate after every later slot. A queued command, old completed review, stale revision, unrelated same-key entry, or previous index generation does not satisfy the gate.
+Process the ten output slots in this exact order: `feature`, `class`, `species`, `background`, `feat`, `spell`, `glossary`, `creature`, `item`, `equipment`. Set `ENTRY_TYPE` to the current slot type and approve only candidates whose exact `entryType` matches it. The `feature` and `class` runs intentionally contain the same complete class snapshot candidate set so full-snapshot diffing cannot synthesize removals: the feature run reviews only `feature`, while the class run reviews only `class` candidates (including subclasses). For each run, fetch the current candidates, inspect them, submit consecutive batches of at most 200, and wait until every batch has a successful worker publication outcome before moving to the next run. After publishing `feature`, run canonical validation, incremental indexing, and `corpus-seed status`; do not approve the `class` run until the feature slot reports current `reviewed`, `published`, and `indexed` counts equal to `discovered`, with no failures. Apply the same current-status gate after every later slot. A queued command, old completed review, stale revision, unrelated same-key entry, or previous index generation does not satisfy the gate.
 
 ## Reindex And Embed
 

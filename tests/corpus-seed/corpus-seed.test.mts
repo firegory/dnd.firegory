@@ -182,7 +182,7 @@ test("review actions honor the API maximum for more than 200 candidates", () => 
   assert.ok(batches.every(({ candidateIds, activeRevisionTokens }) => Object.keys(activeRevisionTokens).length === candidateIds.length));
 });
 
-test("class snapshots produce separate feature candidates before dependent classes", () => {
+test("shared feature and class runs submit the same complete hierarchy candidate set", () => {
   const detail = hierarchyDetailsFixture()[0];
   const manifest = { schemaVersion: 2, parserVersion: "next-dnd-2024-v3", status: "complete", collectedAt: detail.fetchedAt,
     robots: { userAgent: "fixture", snapshot: {} as never, rules: [], evaluations: [] },
@@ -191,11 +191,10 @@ test("class snapshots produce separate feature candidates before dependent class
     inputManifestDigest: "b".repeat(64), evidenceFiles: [], inputDigest: "c".repeat(64), discovered: 1 };
   const features = seedImportBatch({ ...common, planSlot: { id: "feature", contentType: "feature", snapshotCategory: "class", inputSlotId: "class", dependsOn: [], required: true } } as never);
   const classes = seedImportBatch({ ...common, planSlot: { id: "class", contentType: "class", snapshotCategory: "class", inputSlotId: "class", dependsOn: ["feature"], required: true } } as never);
-  assert.equal(features.candidates.length, 2);
-  assert.ok(features.candidates.every(({ entryType, content }) => entryType === "feature" && content.kind === "snapshotFeatureCandidate"));
-  assert.deepEqual(features.occurrences.map(({ occurrenceIndex }) => occurrenceIndex), [0, 1]);
-  assert.equal(classes.candidates.length, 1);
-  assert.equal(classes.candidates[0].entryType, "class");
+  assert.deepEqual(features, classes);
+  assert.deepEqual(features.candidates.map(({ entryType }) => entryType), ["feature", "feature", "class"]);
+  assert.ok(features.candidates.slice(0, 2).every(({ content }) => content.kind === "snapshotFeatureCandidate"));
+  assert.deepEqual(features.occurrences.map(({ occurrenceIndex }) => occurrenceIndex), [0, 1, 2]);
 });
 
 test("prepared and installed class evidence passes actual feature and class canonical projectors", async () => {
@@ -211,12 +210,13 @@ test("prepared and installed class evidence passes actual feature and class cano
     rawBlobPath: occurrence.rawBlobPath!, fetchedAt: occurrence.sourceFetchedAt!, fileChecksumSha256: prepared.slots[0].manifestDigest,
     indexUrl: occurrence.indexLocator!, indexFingerprintSha256: occurrence.indexFingerprintSha256!, rawIndexBlobPath: occurrence.rawIndexBlobPath!,
     indexFetchedAt: occurrence.indexSourceFetchedAt!, indexCardFingerprintSha256: occurrence.indexCardFingerprintSha256!, metadataEvidenceText: occurrence.metadataEvidenceText! });
-  const features = featureBatch.candidates.map((candidate, index) => projectSnapshotFeatureCandidate(candidate.content, {
+  const features = featureBatch.candidates.flatMap((candidate, index) => candidate.entryType === "feature" ? [projectSnapshotFeatureCandidate(candidate.content, {
     candidateKey: candidate.candidateKey!, createdAt: prepared.slots[0].manifest.collectedAt, source,
     fileId: prepared.slots[0].identities.fileId, evidence: evidence(featureBatch.occurrences[index]),
-  }));
-  const classRevision = projectSnapshotHierarchyCandidate(classBatch.candidates[0].content, { candidateKey: classBatch.candidates[0].candidateKey!, entryType: "class",
-    createdAt: prepared.slots[1].manifest.collectedAt, source, fileId: prepared.slots[1].identities.fileId, evidence: evidence(classBatch.occurrences[0]) });
+  })] : []);
+  const classIndex = classBatch.candidates.findIndex(({ entryType }) => entryType === "class"); const classCandidate = classBatch.candidates[classIndex];
+  const classRevision = projectSnapshotHierarchyCandidate(classCandidate.content, { candidateKey: classCandidate.candidateKey!, entryType: "class",
+    createdAt: prepared.slots[1].manifest.collectedAt, source, fileId: prepared.slots[1].identities.fileId, evidence: evidence(classBatch.occurrences[classIndex]) });
   for (const revision of [...features, classRevision]) await validateCanonicalRevisionDependencies(dataRoot, revision);
   const declaredFile = source.files[0], installedFile = join(dataRoot, declaredFile.path);
   const projections = projectCanonicalRevisions("seed-class-test", [...features, classRevision], [{ sourceId: source.sourceId, fileId: declaredFile.fileId,

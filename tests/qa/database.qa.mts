@@ -6,16 +6,19 @@ import test from "node:test";
 
 import { CompendiumImportRunService, ImportRunConflictError } from "../../src/server/compendium/import-runs.ts";
 import { projectSnapshotFlatCandidate } from "../../src/server/compendium/candidate-publication.ts";
+import { CompendiumImportReviewService } from "../../src/server/compendium/import-review.ts";
 import { recordImportReviewPublicationOutcome } from "../../src/server/compendium/import-review-outcomes.ts";
 import { CompendiumNotFoundError, CompendiumReadService } from "../../src/server/compendium/read-service.ts";
 import { seedImportBatch } from "../../src/server/corpus-seed/batch.ts";
 import { inspectPreparedSeed, loadPreparedSeed, seedSlotCounts } from "../../src/server/corpus-seed/executor.ts";
 import { prepareSeed } from "../../src/server/corpus-seed/model.ts";
 import { synchronizeContentIndex } from "../../src/server/content-index/sync.ts";
+import { projectCanonicalRevisions } from "../../src/server/content-index/projection.ts";
 import { formatPublicationGeneration, type ContentSource } from "../../src/server/content-storage/repository.ts";
 import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 import { PostgresPublicationFenceManager } from "../../src/worker/publication/fence.ts";
 import { publishCanonicalRevision } from "../../src/worker/publication/publisher.ts";
+import { COMPLETE_CLASS, hierarchyDetailsFixture } from "../fixtures/character-options.mts";
 import { applyMigrationPrefix, IDS, isolatedDatabase, runProductionMigrations, seedAccessFixture } from "./postgres.mts";
 
 test("QA integration: fresh and prefix-upgrade migrations are database-isolated and preserve data", async (t) => {
@@ -192,6 +195,76 @@ test("QA integration: transactional import crash rolls back, stale lease retries
   assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_candidates WHERE import_run_id=$1", [run.id])).rows[0]?.count), 1);
   await service.completeRun(run.id, retry.leaseToken, "qa-retry");
   assert.deepEqual(await service.claimRun(run.id, "qa-after-complete"), { run: { ...run, status: "succeeded", checkpoint: "completed" }, leaseToken: null, completed: true });
+});
+
+test("QA integration: shared feature and class snapshots never cross-synthesize missing candidates", async (t) => {
+  const db = await isolatedDatabase("shared_hierarchy_seed");
+  t.after(() => db.cleanup());
+  await runProductionMigrations(db.url);
+  const sourceId = "71000000-0000-4000-8000-000000000001", fileId = "71000000-0000-4000-8000-000000000002";
+  await db.pool.query(`INSERT INTO sources
+    (id,canonical_source_id,title,category,edition,language,access_tier,shared,publication_code,publication_title,publisher,
+     release_year,publication_revision,external_origin_url,external_origin_id,attribution,source_priority,canonical_book_id,license)
+    VALUES($1,'qa-shared-hierarchy','QA Shared Hierarchy','core_rules','5.5e','en','open',false,'QA-HIERARCHY','QA Shared Hierarchy',
+      'QA Synthetic Authors',2024,'v1','https://next.dnd.su/class/','qa-shared-hierarchy','Synthetic QA fixture.',0,'qa-shared-hierarchy','CC0-1.0 synthetic fixture')`, [sourceId]);
+  await db.pool.query(`INSERT INTO files(id,source_id,original_filename,mime_type,checksum_sha256,byte_size,storage_path)
+    VALUES($1,$2,'class.snapshot','application/vnd.dnd-firegory.snapshot+json',$3,1,'canonical-seed:qa-shared-hierarchy')`, [fileId, sourceId, "a".repeat(64)]);
+  const detail = hierarchyDetailsFixture()[0];
+  const manifest = { schemaVersion: 2, parserVersion: "next-dnd-2024-v3", status: "complete", collectedAt: detail.fetchedAt,
+    robots: { userAgent: "fixture", snapshot: {} as never, rules: [], evaluations: [] },
+    categories: [{ requestedCategory: "class", discoveredCategory: "class", entryCount: 1, index: {} as never, details: [detail] }], parserFailures: [], diagnostics: [] };
+  const slot = (id: "feature" | "class") => ({ manifest, planSlot: { id, contentType: id, snapshotCategory: "class", inputSlotId: "class",
+    dependsOn: id === "class" ? ["feature"] : [], required: true } } as never);
+  const featureBatch = seedImportBatch(slot("feature")), classBatch = seedImportBatch(slot("class"));
+  assert.deepEqual(featureBatch, classBatch);
+
+  const transaction = async <T>(callback: (client: import("pg").PoolClient) => Promise<T>): Promise<T> => {
+    const client = await db.pool.connect();
+    try { await client.query("BEGIN"); const result = await callback(client); await client.query("COMMIT"); return result; }
+    catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+  };
+  const runs = new CompendiumImportRunService(transaction as never);
+  const runInput = (id: "feature" | "class") => ({ id: id === "feature" ? "71000000-0000-4000-8000-000000000003" : "71000000-0000-4000-8000-000000000004",
+    sourceId, fileId, importer: "approved-2024-corpus-seed", importerVersion: "1", parserVersion: "next-dnd-2024-v3",
+    promptVersion: "none", modelVersion: "none", inputSha256: id === "feature" ? "1".repeat(64) : "2".repeat(64), actor: "qa-corpus-seed" });
+  const load = async (id: "feature" | "class", batch: typeof featureBatch) => {
+    const run = await runs.createRun(runInput(id)); const claim = await runs.claimRun(run.id, "qa-corpus-seed"); assert.ok(claim.leaseToken);
+    await runs.recordOccurrences(run.id, claim.leaseToken, batch.occurrences, "qa-corpus-seed");
+    const candidates = await runs.computeCandidateDiff(run.id, claim.leaseToken, batch.candidates, "qa-corpus-seed");
+    await runs.completeRun(run.id, claim.leaseToken, "qa-corpus-seed"); return { run, candidates };
+  };
+  const feature = await load("feature", featureBatch), classes = await load("class", classBatch);
+  assert.deepEqual(feature.candidates.map(({ candidateKey, contentSha256 }) => [candidateKey, contentSha256]),
+    classes.candidates.map(({ candidateKey, contentSha256 }) => [candidateKey, contentSha256]));
+  assert.equal(feature.candidates.every(({ diffStatus }) => diffStatus === "new"), true);
+  assert.equal(classes.candidates.every(({ diffStatus }) => diffStatus === "unchanged"), true);
+  for (const id of ["feature", "class"] as const) {
+    const repeated = await runs.createRun(runInput(id)); assert.equal(repeated.id, runInput(id).id);
+    assert.deepEqual(await runs.claimRun(repeated.id, "qa-repeat"), { run: { ...repeated, status: "succeeded", checkpoint: "completed" }, leaseToken: null, completed: true });
+  }
+  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_runs")).rows[0].count), 2);
+  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_candidates WHERE diff_status='missing' AND entry_type IN ('feature','class')")).rows[0].count), 0);
+
+  const submitted: Array<{ revision: import("../../src/server/content-storage/repository.ts").CanonicalRevision }> = [];
+  const review = new CompendiumImportReviewService(transaction as never, {
+    publish: async (input) => { submitted.push(input); return { commandPath: "/qa/spool", existing: false }; },
+    unpublish: async () => { throw new Error("shared hierarchy seed must not unpublish"); },
+  }, async (entryIds) => new Map(entryIds.map((entryId) => [entryId, null])));
+  const admin = { userId: "71000000-0000-4000-8000-000000000005", role: "admin" } as const;
+  const featureReview = await review.getRun(admin, feature.run.id), classReview = await review.getRun(admin, classes.run.id);
+  assert.equal([...featureReview.candidates, ...classReview.candidates].some(({ publicationCapability }) => publicationCapability === "can_unpublish"), false);
+  const featureCandidates = featureReview.candidates.filter(({ entryType }) => entryType === "feature");
+  const classCandidates = classReview.candidates.filter(({ entryType }) => entryType === "class");
+  await review.act(admin, feature.run.id, { action: "approve", candidateIds: featureCandidates.map(({ id }) => id),
+    activeRevisionTokens: Object.fromEntries(featureCandidates.map(({ id }) => [id, null])) });
+  await review.act(admin, classes.run.id, { action: "approve", candidateIds: classCandidates.map(({ id }) => id),
+    activeRevisionTokens: Object.fromEntries(classCandidates.map(({ id }) => [id, null])) });
+  const source = submitted[0].revision.source, file = source.files[0];
+  const projections = projectCanonicalRevisions("qa-shared-hierarchy", submitted.map(({ revision }) => revision), [{ sourceId: source.sourceId,
+    fileId: file.fileId, path: file.path, mediaType: file.mediaType, contentHash: file.contentHash, byteSize: 1 }]);
+  assert.deepEqual(submitted.filter(({ revision }) => revision.entryId.startsWith("feature-")).map(({ revision }) => revision.entryId), COMPLETE_CLASS.features.map(({ canonicalId }) => canonicalId));
+  assert.deepEqual(projections.find(({ entryId }) => entryId === "class-17")!.relations.map(({ targetEntryId }) => targetEntryId), COMPLETE_CLASS.features.map(({ canonicalId }) => canonicalId));
 });
 
 test("QA integration: fresh corpus seed persists candidates and identical input is a DB-backed no-op", async (t) => {

@@ -16,15 +16,17 @@ export function reviewActionBatches(candidates: readonly Readonly<{ id: string; 
 
 export function seedImportBatch(slot: PreparedSeedSlot): Readonly<{ occurrences: readonly ImportOccurrenceInput[]; candidates: readonly ImportCandidateInput[] }> {
   const base = nextDndImportBatch(slot.manifest);
-  if (slot.planSlot.contentType !== "feature") {
-    const selected = base.candidates.flatMap((candidate) => candidate.entryType === slot.planSlot.contentType ? [{ candidate, occurrence: base.occurrences[candidate.occurrenceIndex] }] : []);
-    return reindex(selected);
-  }
-  const selected = slot.manifest.categories[0].details.flatMap((detail) => featureCandidates(detail).map((content) => ({
-    occurrence: base.occurrences.find((candidate) => candidate.locator === detail.sourceUrl)!,
-    candidate: { occurrenceIndex: 0, candidateKey: content.externalId, entryType: "feature" as const, content },
-  })));
-  if (selected.length === 0) throw new Error("The required feature slot discovered no class feature candidates.");
+  const hierarchySlots = slot.planSlot.snapshotCategory === "class" && ["feature", "class"].includes(slot.planSlot.contentType);
+  const selected = hierarchySlots ? slot.manifest.categories[0].details.flatMap((detail) => {
+    const occurrence = base.occurrences.find((candidate) => candidate.locator === detail.sourceUrl)!;
+    const hierarchy = base.candidates.find((candidate) => candidate.occurrenceIndex === occurrence.occurrenceIndex)!;
+    return [
+      ...featureCandidates(detail).map((content) => ({ occurrence, candidate: { occurrenceIndex: 0, candidateKey: content.externalId, entryType: "feature" as const, content } })),
+      { occurrence, candidate: hierarchy },
+    ];
+  }) : base.candidates.flatMap((candidate) => candidate.entryType === slot.planSlot.contentType
+    ? [{ candidate, occurrence: base.occurrences[candidate.occurrenceIndex] }] : []);
+  if (slot.planSlot.contentType === "feature" && !selected.some(({ candidate }) => candidate.entryType === "feature")) throw new Error("The required feature slot discovered no class feature candidates.");
   return reindex(selected);
 }
 
