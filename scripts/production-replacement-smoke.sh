@@ -16,7 +16,7 @@ marker="replacement-smoke-$$"
 wait_healthy() {
   service="$1"
   attempts=0
-  until [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$(compose ps -q "$service")")" = healthy ]; do
+  until [ "$(dr_docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$(compose ps -q "$service")")" = healthy ]; do
     attempts=$((attempts + 1))
     [ "$attempts" -lt 60 ] || { compose logs "$service"; return 1; }
     sleep 2
@@ -34,7 +34,7 @@ wait_healthy postgres
 wait_healthy redis
 compose up -d --no-deps --force-recreate migrate
 attempts=0
-until [ "$(docker inspect --format '{{.State.Status}}:{{.State.ExitCode}}' "$(compose ps -a -q migrate)")" = exited:0 ]; do
+until [ "$(dr_docker inspect --format '{{.State.Status}}:{{.State.ExitCode}}' "$(compose ps -a -q migrate)")" = exited:0 ]; do
   attempts=$((attempts + 1))
   [ "$attempts" -lt 60 ] || { compose logs migrate; exit 1; }
   sleep 1

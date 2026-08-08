@@ -126,7 +126,8 @@ test("DR Compose scope is explicit and ambient or nested overrides are rejected"
   assert.match(drComposeLib, /--file "\$dr_compose_file"/);
   assert.match(drComposeLib, /unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROJECT_DIR COMPOSE_PROFILES/);
   assert.match(drDockerSocket, /DR_DOCKER_HOST:-unix:\/\/\/var\/run\/docker\.sock/);
-  assert.match(drComposeLib, /env -u DOCKER_CONTEXT -u DOCKER_HOST DOCKER_HOST="\$dr_docker_host" docker compose/);
+  assert.match(drComposeLib, /dr_docker\(\)[\s\S]*env -u DOCKER_CONTEXT -u DOCKER_HOST DOCKER_HOST="\$dr_docker_host" docker "\$@"/);
+  assert.match(drComposeLib, /dr_compose\(\)[\s\S]*dr_docker compose/);
   for (const script of [permissionsSmoke, replacementSmoke]) {
     assert.match(script, /"\$1" = "--project-name"/);
     assert.match(script, /dr-target-guard\.sh" verify --project-name "\$project"/);
@@ -235,10 +236,32 @@ test("DR Compose rejects every config, project, profile, mount, build, and comma
     assert.doesNotMatch(invocation, /COMPOSE_FILE=|COMPOSE_PROJECT_NAME=|COMPOSE_PROJECT_DIR=|COMPOSE_PROFILES=|COMPOSE_ENV_FILES=/);
     assert.match(invocation, new RegExp(`DOCKER_HOST=unix://${socket.replaceAll("/", "\\/")}`));
     assert.doesNotMatch(invocation, /DOCKER_CONTEXT=/);
+
+    await rm(dockerLog, { force: true });
+    const inspect = spawnSync("sh", ["-c", ". ./scripts/dr-compose-lib.sh; dr_compose_initialize dnd94-dr-smoke-compose ./scripts; dr_docker inspect --format '{{.State.Status}}' container-id"], {
+      cwd: root,
+      env,
+      encoding: "utf8",
+    });
+    assert.equal(inspect.status, 0, inspect.stderr);
+    const inspectInvocation = await readFile(dockerLog, "utf8");
+    assert.match(inspectInvocation, /inspect\n--format\n\{\{\.State\.Status\}\}\ncontainer-id/);
+    assert.match(inspectInvocation, new RegExp(`DOCKER_HOST=unix://${socket.replaceAll("/", "\\/")}`));
+    assert.doesNotMatch(inspectInvocation, /DOCKER_CONTEXT=/);
   } finally {
     await closeServer(socketServer);
     await rm(temporary, { recursive: true, force: true });
   }
+});
+
+test("production smoke scripts route inspect and version calls through the validated Docker helper", () => {
+  for (const script of [productionSmoke, replacementSmoke]) {
+    assert.doesNotMatch(script, /\bdocker inspect\b|\bdocker compose version\b/);
+    assert.match(script, /dr_docker inspect/);
+    assert.match(script, /dr-compose-lib\.sh/);
+    assert.match(script, /dr_compose_initialize "\$project"/);
+  }
+  assert.match(productionSmoke, /dr_docker compose version/);
 });
 
 test("DR target guard fails closed and binds an empty target to one project", async () => {

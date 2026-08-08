@@ -13,6 +13,8 @@ an operator.
 It also rejects ambient `DOCKER_HOST` and `DOCKER_CONTEXT`, accepts only an
 explicitly validated local `unix://` socket, and invokes Docker with the context
 unset and `DOCKER_HOST` fixed to that canonical socket.
+The same shared helper covers Compose, health/status `docker inspect`, and the
+standalone smoke preflight; no DR smoke operation calls Docker directly.
 
 ## Recovery contract
 

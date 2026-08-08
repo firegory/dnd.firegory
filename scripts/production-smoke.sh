@@ -2,7 +2,6 @@
 set -eu
 
 command -v docker >/dev/null 2>&1 || { echo "Docker is required for the runtime smoke test." >&2; exit 1; }
-docker compose version >/dev/null
 
 root=$(mktemp -d)
 project="dnd94-dr-smoke-$$"
@@ -41,12 +40,16 @@ export DND_DR_PRODUCTION_DATA_PATH="$root/production-data"
 export PRODUCTION_SECRETS_ROOT="$root/secrets" DND_NFS_PREFLIGHT_TEST_MODE=1
 export APP_UID="$uid" APP_GID="$gid" GATEWAY_UID="$uid" GATEWAY_GID="$gid"
 
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
+. "$script_dir/dr-compose-lib.sh"
+dr_compose_initialize "$project" "$script_dir"
+dr_docker compose version >/dev/null
 ./scripts/dr-target-guard.sh initialize --project-name "$project"
 ./scripts/dr-compose.sh --project-name "$project" start-stack
 
 for service in app worker gateway postgres redis; do
   attempts=0
-  until [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$(./scripts/dr-compose.sh --project-name "$project" service-id "$service")")" = healthy ]; do
+  until [ "$(dr_docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$(./scripts/dr-compose.sh --project-name "$project" service-id "$service")")" = healthy ]; do
     attempts=$((attempts + 1))
     if [ "$attempts" -ge 60 ]; then
       ./scripts/dr-compose.sh --project-name "$project" status
@@ -57,7 +60,7 @@ for service in app worker gateway postgres redis; do
     sleep 2
   done
 done
-test "$(docker inspect --format '{{.State.ExitCode}}' "$(./scripts/dr-compose.sh --project-name "$project" service-id migrate)")" = 0
+test "$(dr_docker inspect --format '{{.State.ExitCode}}' "$(./scripts/dr-compose.sh --project-name "$project" service-id migrate)")" = 0
 
 ./scripts/production-permissions-smoke.sh --project-name "$project"
 ./scripts/production-replacement-smoke.sh --project-name "$project"

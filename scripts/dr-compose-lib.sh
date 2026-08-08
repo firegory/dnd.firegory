@@ -17,8 +17,12 @@ dr_compose_initialize() {
     COMPOSE_PARALLEL_LIMIT COMPOSE_PROGRESS COMPOSE_MENU COMPOSE_EXPERIMENTAL COMPOSE_BAKE
 }
 
+dr_docker() {
+  env -u DOCKER_CONTEXT -u DOCKER_HOST DOCKER_HOST="$dr_docker_host" docker "$@"
+}
+
 dr_compose() {
-  env -u DOCKER_CONTEXT -u DOCKER_HOST DOCKER_HOST="$dr_docker_host" docker compose \
+  dr_docker compose \
     --project-name "$dr_project" \
     --project-directory "$dr_repo_root" \
     --env-file "$dr_env_file" \
