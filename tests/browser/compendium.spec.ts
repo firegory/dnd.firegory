@@ -13,7 +13,7 @@ test("@anonymous landing redirects and APIs reject without a session", async ({ 
 test("@user actual spell filters, deep link, citation preview, and print layout work", async ({ page, request }) => {
   await page.goto("/en/compendium");
   await expect(page.getByRole("heading", { name: "Adventurer's compendium" })).toBeVisible();
-  await page.getByRole("link", { name: /Spells/ }).click();
+  await page.locator('.category-tile[href="/en/compendium/categories/spell"]').click();
   await expect(page).toHaveURL(/\/en\/compendium\/categories\/spell/);
   await page.getByRole("link", { name: "QA Spell 1" }).click();
   await expect(page.getByRole("heading", { name: "QA Spell 1" })).toBeVisible();
