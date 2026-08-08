@@ -31,6 +31,14 @@ case "$marker" in /*) ;; *) echo "DND_DR_EMPTY_TARGET_MARKER must be absolute" >
 case "$production_path" in /*) ;; *) echo "DND_DR_PRODUCTION_DATA_PATH must be absolute" >&2; exit 1 ;; esac
 [ -d "$data_path" ] || { echo "DR data path is not a directory: $data_path" >&2; exit 1; }
 [ -d "$(dirname "$marker")" ] || { echo "DR marker parent does not exist" >&2; exit 1; }
+[ "$(stat -c '%u' "$(dirname "$marker")")" = "$(id -u)" ] || {
+  echo "DR marker parent must be owned by the invoking operator" >&2
+  exit 1
+}
+[ "$(stat -c '%a' "$(dirname "$marker")")" = 700 ] || {
+  echo "DR marker parent must have mode 0700" >&2
+  exit 1
+}
 
 data_path=$(readlink -f "$data_path")
 production_path=$(readlink -m "$production_path")

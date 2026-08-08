@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,6 +14,7 @@ const dockerfile = await readFile(new URL("../../Dockerfile", import.meta.url), 
 const migration = await readFile(new URL("../../migrations/0006_ingestion_generation_integrity.sql", import.meta.url), "utf8");
 const guard = await readFile(new URL("../../scripts/dr-target-guard.sh", import.meta.url), "utf8");
 const drCompose = await readFile(new URL("../../scripts/dr-compose.sh", import.meta.url), "utf8");
+const drComposeLib = await readFile(new URL("../../scripts/dr-compose-lib.sh", import.meta.url), "utf8");
 const createBackup = await readFile(new URL("../../scripts/create-backup-set.sh", import.meta.url), "utf8");
 const sealReplica = await readFile(new URL("../../scripts/seal-backup-replica.sh", import.meta.url), "utf8");
 const verifyBackup = await readFile(new URL("../../scripts/verify-backup-set.sh", import.meta.url), "utf8");
@@ -25,6 +26,7 @@ const evidence = await readFile(new URL("../../scripts/seal-dr-evidence.sh", imp
 const permissionsSmoke = await readFile(new URL("../../scripts/production-permissions-smoke.sh", import.meta.url), "utf8");
 const replacementSmoke = await readFile(new URL("../../scripts/production-replacement-smoke.sh", import.meta.url), "utf8");
 const productionSmoke = await readFile(new URL("../../scripts/production-smoke.sh", import.meta.url), "utf8");
+const chronology = await readFile(new URL("../../scripts/validate-backup-chronology.mjs", import.meta.url), "utf8");
 const compose = parse(composeSource) as { services: Record<string, unknown>; volumes: Record<string, unknown> };
 
 function bashBlocks(section = backups): string[] {
@@ -48,8 +50,6 @@ test("every referenced repository script exists and executable shell scripts hav
     "scripts/dr-compose.sh",
     "scripts/dr-target-guard.sh",
     "scripts/filesystem-manifest.mjs",
-    "scripts/dr-critical-fingerprint.sql",
-    "scripts/dr-reconcile-ingestion.sql",
     "scripts/dr-restore-nfs-archive.sh",
     "scripts/dr-remove-plaintext.sh",
     "scripts/seal-backup-replica.sh",
@@ -57,6 +57,14 @@ test("every referenced repository script exists and executable shell scripts hav
     "scripts/verify-backup-set.sh",
   ]) assert.ok(paths.has(expected), expected);
   for (const path of paths) await access(new URL(`../../${path}`, import.meta.url));
+  for (const internal of [
+    "scripts/dr-compose-lib.sh",
+    "scripts/dr-critical-fingerprint.sql",
+    "scripts/dr-index-cardinality.sql",
+    "scripts/dr-reconcile-ingestion.sql",
+    "scripts/filesystem-access-model.mjs",
+    "scripts/validate-backup-chronology.mjs",
+  ]) await access(new URL(`../../${internal}`, import.meta.url));
 
   const shellScripts = [
     "scripts/create-backup-set.sh",
@@ -94,15 +102,90 @@ test("DR Compose scope is explicit and ambient or nested overrides are rejected"
   assert.doesNotMatch(bashBlocks(drill).join("\n"), /COMPOSE_PROJECT_NAME/);
   assert.doesNotMatch(productionSmoke, /COMPOSE_PROJECT_NAME/);
   assert.match(drCompose, /dr-target-guard\.sh" verify --project-name "\$project"/);
-  assert.match(drCompose, /docker compose --project-name "\$project" --file compose\.production\.yml/);
-  assert.match(drCompose, /Nested Compose project overrides are forbidden/);
+  assert.match(drCompose, /validate-content\|start-postgres\|restore-postgres/);
+  assert.doesNotMatch(drCompose, /"\$@"/);
+  assert.match(drComposeLib, /--project-directory "\$dr_repo_root"/);
+  assert.match(drComposeLib, /--env-file "\$dr_env_file"/);
+  assert.match(drComposeLib, /--file "\$dr_compose_file"/);
+  assert.match(drComposeLib, /unset COMPOSE_FILE COMPOSE_PROJECT_NAME COMPOSE_PROJECT_DIR COMPOSE_PROFILES/);
   for (const script of [permissionsSmoke, replacementSmoke]) {
     assert.match(script, /"\$1" = "--project-name"/);
     assert.match(script, /dr-target-guard\.sh" verify --project-name "\$project"/);
-    assert.match(script, /docker compose --project-name "\$project" --file compose\.production\.yml/);
+    assert.match(script, /dr-compose-lib\.sh/);
+    assert.match(script, /dr_compose_initialize "\$project"/);
   }
   assert.match(productionSmoke, /project="dnd94-dr-smoke-\$\$"/);
-  assert.match(productionSmoke, /dr-compose\.sh --project-name "\$project" down --volumes/);
+  assert.match(productionSmoke, /dr-compose\.sh --project-name "\$project" teardown/);
+});
+
+test("DR Compose rejects every config, project, profile, mount, build, and command escape before Docker", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "dnd-dr-compose-"));
+  const data = join(temporary, "data");
+  const marker = join(temporary, "target.marker");
+  const bin = join(temporary, "bin");
+  const dockerLog = join(temporary, "docker.log");
+  await mkdir(data);
+  await mkdir(bin);
+  await writeFile(join(bin, "docker"), `#!/bin/sh\nenv > "${dockerLog}"\nprintf '%s\\n' "$@" >> "${dockerLog}"\n`);
+  await chmod(join(bin, "docker"), 0o755);
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    DND_DATA_HOST_PATH: data,
+    DND_DR_PRODUCTION_DATA_PATH: join(temporary, "production-data"),
+    DND_DR_EMPTY_TARGET_MARKER: marker,
+    DND_NFS_PREFLIGHT_TEST_MODE: "1",
+    DND_DR_GUARD_TEST_MODE: "1",
+    DND_DR_OPT_IN: "I_UNDERSTAND_DND_FIREGORY_DR_IS_DESTRUCTIVE",
+    COMPOSE_FILE: "/tmp/evil.yml",
+    COMPOSE_PROJECT_NAME: "production",
+    COMPOSE_PROJECT_DIR: "/tmp",
+    COMPOSE_PROFILES: "evil",
+    COMPOSE_ENV_FILES: "/tmp/evil.env",
+  };
+  const run = (args: string[]) => spawnSync("sh", ["scripts/dr-compose.sh", "--project-name", "dnd94-dr-smoke-compose", ...args], {
+    cwd: root,
+    env,
+    encoding: "utf8",
+  });
+  const escapes = [
+    ["--file", "/tmp/evil.yml", "status"], ["-f", "/tmp/evil.yml", "status"], ["--file=/tmp/evil.yml"], ["-f=/tmp/evil.yml"],
+    ["--env-file", "/tmp/evil.env", "status"], ["--env-file=/tmp/evil.env"],
+    ["--project-directory", "/tmp", "status"], ["--project-directory=/tmp"],
+    ["--project-name", "production", "status"], ["--project-name=production"], ["-p", "production", "status"], ["-p=production"],
+    ["--profile", "evil", "status"], ["--profile=evil"],
+    ["status", "--file=/tmp/evil.yml"], ["start-stack", "--build"],
+    ["validate-content", "--volume=/:/host"], ["validate-content", "-v", "/:/host"], ["validate-content", "-v=/:/host"],
+    ["validate-content", "--mount", "type=bind,source=/,target=/host"], ["validate-content", "--mount=type=bind,source=/,target=/host"],
+    ["validate-content", "--entrypoint", "sh"], ["validate-content", "--entrypoint=sh"],
+    ["validate-content", "--env", "COMPOSE_FILE=/tmp/evil"], ["validate-content", "--env=COMPOSE_FILE=/tmp/evil"],
+    ["validate-content", "--workdir=/prod"], ["validate-content", "--user=0"], ["validate-content", "--name=production"],
+    ["validate-content", "--publish=5432:5432"], ["validate-content", "--pull=always"],
+    ["run", "--build", "worker"], ["up", "--build"], ["config", "--volumes"],
+    ["service-id", "app", "--volume=/prod:/data"], ["service-id", "../../production"],
+  ];
+  try {
+    const initialized = spawnSync("sh", ["scripts/dr-target-guard.sh", "initialize", "--project-name", "dnd94-dr-smoke-compose"], {
+      cwd: root,
+      env,
+      encoding: "utf8",
+    });
+    assert.equal(initialized.status, 0, initialized.stderr);
+    for (const escape of escapes) {
+      await rm(dockerLog, { force: true });
+      const result = run(escape);
+      assert.equal(result.status, 2, `${escape.join(" ")}: ${result.stderr}`);
+      await assert.rejects(access(dockerLog));
+    }
+    const valid = run(["status"]);
+    assert.equal(valid.status, 0, valid.stderr);
+    const invocation = await readFile(dockerLog, "utf8");
+    assert.match(invocation, new RegExp(`--project-directory\\n${String(root.pathname).replace(/\/$/, "")}`));
+    assert.match(invocation, /--file\n.*compose\.production\.yml/);
+    assert.doesNotMatch(invocation, /COMPOSE_FILE=|COMPOSE_PROJECT_NAME=|COMPOSE_PROJECT_DIR=|COMPOSE_PROFILES=|COMPOSE_ENV_FILES=/);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 });
 
 test("DR target guard fails closed and binds an empty target to one project", async () => {
@@ -147,6 +230,13 @@ test("DR target guard fails closed and binds an empty target to one project", as
   }
 });
 
+test("marker directory is assigned to and verified against the invoking operator", () => {
+  assert.match(backups, /sudo install -d -m 0700 -o "\$\(id -u\)" -g "\$\(id -g\)"/);
+  assert.match(guard, /stat -c '%u'[\s\S]*"\$\(id -u\)"/);
+  assert.match(guard, /DR marker parent must be owned by the invoking operator/);
+  assert.match(guard, /DR marker parent must have mode 0700/);
+});
+
 test("backup accepts only a read-only provider snapshot and verifies extracted content before sealing", () => {
   assert.match(createBackup, /findmnt[\s\S]*FSTYPE[\s\S]*nfs\|nfs4/);
   assert.match(createBackup, /findmnt[\s\S]*OPTIONS[\s\S]*\*,ro,\*/);
@@ -187,28 +277,91 @@ test("filesystem manifest detects files, directories, symlinks, and archive drif
   }
 });
 
+test("backup chronology rejects reversed and future timestamps before COMPLETE", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "dnd-backup-time-"));
+  const metadataPath = join(temporary, "metadata.json");
+  const completePath = join(temporary, "COMPLETE.json");
+  const timestamp = (offsetSeconds: number) => new Date(Math.floor(Date.now() / 1000) * 1000 + offsetSeconds * 1000).toISOString().replace(".000", "");
+  const valid = {
+    sourceSnapshotTime: timestamp(-80),
+    backupStartedAt: timestamp(-70),
+    nfsVerificationStarted: timestamp(-60),
+    nfsVerificationFinished: timestamp(-50),
+    postgresSnapshotExportedAt: timestamp(-40),
+    postgresDumpStarted: timestamp(-30),
+    postgresDumpFinished: timestamp(-20),
+    backupGeneratedAt: timestamp(-10),
+  };
+  const run = (...args: string[]) => spawnSync(process.execPath, ["scripts/validate-backup-chronology.mjs", metadataPath, ...args], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  try {
+    await writeFile(metadataPath, JSON.stringify(valid));
+    assert.equal(run().status, 0);
+    await writeFile(completePath, JSON.stringify({ sourceSnapshotTime: valid.sourceSnapshotTime, replicationCompletedAt: timestamp(-5) }));
+    assert.equal(run("--complete", completePath).status, 0);
+    await writeFile(metadataPath, JSON.stringify({ ...valid, postgresDumpStarted: timestamp(-55) }));
+    assert.notEqual(run().status, 0);
+    await writeFile(metadataPath, JSON.stringify({ ...valid, nfsVerificationFinished: timestamp(600) }));
+    assert.notEqual(run().status, 0);
+    await writeFile(metadataPath, JSON.stringify(valid));
+    assert.notEqual(run("--replication-time", timestamp(-90)).status, 0);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("root-squash restore never claims client-root ownership", () => {
   const drillBlocks = bashBlocks(backups.slice(backups.indexOf("### 2. Restore canonical NFS"))).join("\n");
   assert.match(drillBlocks, /dr-restore-nfs-archive\.sh --project-name "\$DR_PROJECT"/);
   assert.match(restoreNfs, /dr-target-guard\.sh" verify --project-name "\$project"/);
   assert.match(restoreNfs, /sudo -u "#\$uid" -g "#\$gid"/);
   assert.match(restoreNfs, /tar --extract --gzip --no-same-owner/);
+  assert.match(restoreNfs, /--same-permissions/);
+  assert.match(restoreNfs, /single-identity-posix-mode-no-acl/);
+  assert.match(restoreNfs, /"\$uid:\$gid" = "\$gateway_uid:\$gateway_gid"/);
+  assert.match(restoreNfs, /config --format json/);
+  assert.match(restoreNfs, /filesystem-access-model\.mjs" --validate/);
   assert.doesNotMatch(drillBlocks, /--same-owner|\bchown\b|--numeric-owner/);
   assert.match(backups, /provider\/server restores or clones/);
   assert.match(backups, /Do not recursively `chown`/);
+});
+
+test("archive fallback access model rejects multiple or mismatched identities", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "dnd-access-model-"));
+  const model = join(temporary, "model.json");
+  const run = (uid: string, gid: string) => spawnSync(process.execPath, ["scripts/filesystem-access-model.mjs", "--validate", model, uid, gid], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  try {
+    await writeFile(model, JSON.stringify({ schemaVersion: 1, identities: [{ uid: 10001, gid: 10001 }], hasExtendedAcl: false, hasExtendedXattr: false }));
+    assert.equal(run("10001", "10001").status, 0);
+    assert.notEqual(run("10002", "10001").status, 0);
+    await writeFile(model, JSON.stringify({ schemaVersion: 1, identities: [{ uid: 10001, gid: 10001 }, { uid: 10002, gid: 10001 }], hasExtendedAcl: false, hasExtendedXattr: false }));
+    assert.notEqual(run("10001", "10001").status, 0);
+    await writeFile(model, JSON.stringify({ schemaVersion: 1, identities: [{ uid: 10001, gid: 10001 }], hasExtendedAcl: true, hasExtendedXattr: false }));
+    assert.notEqual(run("10001", "10001").status, 0);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 });
 
 test("critical fingerprints use the same PostgreSQL snapshot and must match before reconciliation", () => {
   for (const table of ["users", "sessions", "search_events", "rag_events", "compendium_import_audit", "compendium_import_review_audit", "compendium_editor_audit", "ingestion_jobs"]) {
     assert.match(fingerprints, new RegExp(`'${table}'`));
   }
-  assert.match(fingerprints, /digest\([\s\S]*'sha256'/);
+  assert.match(fingerprints, /bit_xor\(hashtextextended\(row_json, 0\)\)/);
+  assert.match(fingerprints, /bit_xor\(hashtextextended\(row_json, 1\)\)/);
+  assert.match(fingerprints, /sum\(hashtextextended\(row_json, 2\)::numeric\)/);
+  assert.doesNotMatch(fingerprints, /string_agg/);
   assert.doesNotMatch(fingerprints, /ON COMMIT DROP/);
   assert.match(createBackup, /pg_export_snapshot/);
   assert.match(createBackup, /pg_dump[\s\S]*--snapshot "\$pg_snapshot"/);
   assert.match(createBackup, /SET TRANSACTION SNAPSHOT '\$pg_snapshot'/);
   const compare = backups.indexOf('cmp "$DR_EVIDENCE/source-fingerprints.csv"');
-  const reconcileCommand = backups.indexOf("scripts/dr-reconcile-ingestion.sql");
+  const reconcileCommand = backups.indexOf("reconcile-ingestion");
   assert.ok(compare >= 0 && reconcileCommand > compare);
   assert.match(evidence, /cmp "\$evidence_dir\/source-fingerprints\.csv" "\$evidence_dir\/restored-fingerprints\.csv"/);
 });
@@ -229,20 +382,24 @@ test("ingestion reconciliation matches schema and releases active uniqueness ato
 test("checksum validation and reconciliation precede index mutation and acceptance", () => {
   const drill = backups.indexOf("## Empty-environment restore drill");
   const checksum = backups.indexOf("sha256sum --check -", drill);
-  const validate = backups.indexOf("scripts/content-index.mts validate", drill);
-  const reconcileStep = backups.indexOf("scripts/dr-reconcile-ingestion.sql", drill);
-  const dryRun = backups.indexOf("scripts/content-index.mts clean --dry-run", drill);
-  const clean = backups.indexOf("scripts/content-index.mts clean\n", drill);
+  const validate = backups.indexOf("validate-content", drill);
+  const reconcileStep = backups.indexOf("reconcile-ingestion", drill);
+  const dryRun = backups.indexOf("index-clean-dry-run", drill);
+  const clean = backups.indexOf("index-clean\n", drill);
   const acceptance = backups.indexOf("services_accepted", drill);
   assert.ok(checksum > drill && validate > checksum && reconcileStep > validate);
   assert.ok(dryRun > reconcileStep && clean > dryRun && acceptance > clean);
 });
 
 test("metadata and evidence make RPO/RTO and cardinality measurable", () => {
-  for (const field of ["sourceSnapshotTime", "postgresDumpStarted", "postgresDumpFinished", "backupGeneratedAt"]) {
+  for (const field of ["sourceSnapshotTime", "backupStartedAt", "nfsVerificationStarted", "nfsVerificationFinished", "postgresSnapshotExportedAt", "postgresDumpStarted", "postgresDumpFinished", "backupGeneratedAt"]) {
     assert.match(createBackup, new RegExp(field));
   }
   assert.match(sealReplica, /replicationCompletedAt/);
+  assert.match(sealReplica, /validate-backup-chronology\.mjs[\s\S]*--replication-time/);
+  assert.ok(sealReplica.indexOf("validate-backup-chronology.mjs") < sealReplica.indexOf("writeFileSync(`${directory}/COMPLETE.json`"));
+  assert.match(verifyBackup, /validate-backup-chronology\.mjs[\s\S]*--complete/);
+  assert.match(chronology, /futureLimit/);
   for (const event of ["drill_started", "nfs_restore_finished", "postgres_restore_finished", "index_rebuild_finished", "services_accepted"]) {
     assert.match(backups, new RegExp(event));
     assert.match(evidence, new RegExp(event));

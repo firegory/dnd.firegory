@@ -13,10 +13,14 @@ command -v minisign >/dev/null || { echo "minisign is required to seal a backup"
 [ -d "$backup_dir" ] || { echo "Backup directory does not exist" >&2; exit 1; }
 [ ! -e "$backup_dir/COMPLETE.json" ] || { echo "Replica is already sealed" >&2; exit 1; }
 for file in backup-metadata.json backup-set.sha256 nfs.tar.gz.age nfs-files.sha256.age \
-  nfs-tree.jsonl.age nfs-validation.json.age postgres.dump.age postgres.toc.age \
+  nfs-tree.jsonl.age nfs-access-model.json.age nfs-validation.json.age postgres.dump.age postgres.toc.age \
   source-fingerprints.csv.age; do
   [ -s "$backup_dir/$file" ] || { echo "Required backup artifact is missing: $file" >&2; exit 1; }
 done
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
+replication_completed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+node "$script_dir/validate-backup-chronology.mjs" "$backup_dir/backup-metadata.json" \
+  --replication-time "$replication_completed"
 (
   cd "$backup_dir"
   sha256sum --check backup-set.sha256
@@ -30,19 +34,16 @@ node --input-type=module --eval '
   const checksums = readFileSync(`${directory}/backup-set.sha256`, "utf8");
   const checksumSignature = readFileSync(`${directory}/backup-set.sha256.minisig`, "utf8");
   const metadata = JSON.parse(metadataText);
-  for (const key of ["sourceSnapshotTime", "postgresDumpStarted", "postgresDumpFinished", "backupGeneratedAt"]) {
-    if (Number.isNaN(Date.parse(metadata[key]))) throw new Error(`Invalid backup metadata field: ${key}`);
-  }
   const digest = (value) => createHash("sha256").update(value).digest("hex");
   writeFileSync(`${directory}/COMPLETE.json`, `${JSON.stringify({
     schemaVersion: 1,
     sourceSnapshotTime: metadata.sourceSnapshotTime,
-    replicationCompletedAt: new Date().toISOString(),
+    replicationCompletedAt: process.argv[2],
     metadataSha256: digest(metadataText),
     checksumManifestSha256: digest(checksums),
     checksumSignatureSha256: digest(checksumSignature),
   }, null, 2)}\n`, { mode: 0o400, flag: "wx" });
-' "$backup_dir"
+ ' "$backup_dir" "$replication_completed"
 minisign -S -s "$signing_key" -m "$backup_dir/COMPLETE.json" -x "$backup_dir/COMPLETE.json.minisig"
 chmod 0400 "$backup_dir/backup-set.sha256.minisig" "$backup_dir/COMPLETE.json.minisig"
 echo "Replica checksums verified and COMPLETE.json sealed."

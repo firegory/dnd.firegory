@@ -6,8 +6,11 @@ set -eu
   exit 2
 }
 project=$2
-"$(dirname "$0")/dr-target-guard.sh" verify --project-name "$project" >/dev/null
-compose() { docker compose --project-name "$project" --file compose.production.yml "$@"; }
+script_dir=$(dirname "$0")
+"$script_dir/dr-target-guard.sh" verify --project-name "$project" >/dev/null
+. "$script_dir/dr-compose-lib.sh"
+dr_compose_initialize "$project" "$script_dir"
+compose() { dr_compose "$@"; }
 marker=".permissions-smoke-$$"
 
 app_identity=$(compose exec -T app sh -c 'printf "%s:%s" "$(id -u)" "$(id -g)"')

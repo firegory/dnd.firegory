@@ -12,12 +12,15 @@ case "$backup_dir" in /*) ;; *) echo "Backup directory must be absolute" >&2; ex
 command -v minisign >/dev/null || { echo "minisign is required to verify a backup" >&2; exit 1; }
 [ -f "$backup_dir/COMPLETE.json" ] || { echo "Sealed COMPLETE.json is missing" >&2; exit 1; }
 for file in backup-metadata.json backup-set.sha256 nfs.tar.gz.age nfs-files.sha256.age \
-  nfs-tree.jsonl.age nfs-validation.json.age postgres.dump.age postgres.toc.age \
+  nfs-tree.jsonl.age nfs-access-model.json.age nfs-validation.json.age postgres.dump.age postgres.toc.age \
   source-fingerprints.csv.age; do
   [ -s "$backup_dir/$file" ] || { echo "Required backup artifact is missing: $file" >&2; exit 1; }
 done
 minisign -V -p "$public_key" -m "$backup_dir/backup-set.sha256" -x "$backup_dir/backup-set.sha256.minisig"
 minisign -V -p "$public_key" -m "$backup_dir/COMPLETE.json" -x "$backup_dir/COMPLETE.json.minisig"
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
+node "$script_dir/validate-backup-chronology.mjs" "$backup_dir/backup-metadata.json" \
+  --complete "$backup_dir/COMPLETE.json"
 (
   cd "$backup_dir"
   sha256sum --check backup-set.sha256

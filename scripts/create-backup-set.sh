@@ -28,6 +28,8 @@ case "$snapshot_time" in *[!0-9TZ:+.-]*) echo "Invalid source snapshot time" >&2
 date --date "$snapshot_time" --utc +%Y-%m-%dT%H:%M:%SZ >/dev/null
 command -v age >/dev/null || { echo "age is required for encrypted backup artifacts" >&2; exit 1; }
 command -v findmnt >/dev/null || { echo "findmnt is required" >&2; exit 1; }
+command -v getfacl >/dev/null || { echo "getfacl is required to classify snapshot ACLs" >&2; exit 1; }
+command -v getfattr >/dev/null || { echo "getfattr is required to classify snapshot xattrs" >&2; exit 1; }
 [ -d "$snapshot_path" ] || { echo "Snapshot path is not a directory" >&2; exit 1; }
 [ -d "$backup_dir" ] || { echo "Backup directory must already exist" >&2; exit 1; }
 [ -z "$(find "$backup_dir" -mindepth 1 -maxdepth 1 -print -quit)" ] || { echo "Backup directory must be empty" >&2; exit 1; }
@@ -54,9 +56,13 @@ cleanup() {
   rm -rf "$work"
 }
 trap cleanup EXIT INT TERM
-compose() { docker compose --project-name "$project" --file compose.production.yml "$@"; }
+script_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd -P)
+. "$script_dir/dr-compose-lib.sh"
+dr_compose_initialize "$project" "$script_dir"
+compose() { dr_compose "$@"; }
 
-source_commit=$(git rev-parse HEAD)
+source_commit=$(git -C "$dr_repo_root" rev-parse HEAD)
+backup_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 nfs_verify_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 DND_DATA_HOST_PATH="$snapshot_path" compose run --rm --no-deps --build worker \
   node --experimental-strip-types scripts/content-index.mts validate > "$work/nfs-validation.json"
@@ -64,15 +70,21 @@ DND_DATA_HOST_PATH="$snapshot_path" compose run --rm --no-deps --build worker \
   cd "$snapshot_path"
   find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum
 ) > "$work/nfs-files.sha256"
-node scripts/filesystem-manifest.mjs "$snapshot_path" > "$work/nfs-tree.jsonl"
+node "$dr_repo_root/scripts/filesystem-manifest.mjs" "$snapshot_path" > "$work/nfs-tree.jsonl"
+getfacl --absolute-names --skip-base --recursive "$snapshot_path" > "$work/extended-acls.txt"
+getfattr --absolute-names --dump --match=- --recursive "$snapshot_path" > "$work/extended-xattrs.txt"
+has_acl=false; [ ! -s "$work/extended-acls.txt" ] || has_acl=true
+has_xattr=false; [ ! -s "$work/extended-xattrs.txt" ] || has_xattr=true
+DND_FILESYSTEM_HAS_EXTENDED_ACL=$has_acl DND_FILESYSTEM_HAS_EXTENDED_XATTR=$has_xattr \
+  node "$dr_repo_root/scripts/filesystem-access-model.mjs" "$snapshot_path" > "$work/nfs-access-model.json"
 tar --create --gzip --file "$work/nfs.tar.gz" --one-file-system --directory "$snapshot_path" .
 mkdir "$work/extracted"
-tar --extract --gzip --file "$work/nfs.tar.gz" --no-same-owner --directory "$work/extracted"
+tar --extract --gzip --file "$work/nfs.tar.gz" --no-same-owner --same-permissions --directory "$work/extracted"
 (
   cd "$work/extracted"
   sha256sum --check "$work/nfs-files.sha256"
 )
-node scripts/filesystem-manifest.mjs "$work/extracted" > "$work/extracted-tree.jsonl"
+node "$dr_repo_root/scripts/filesystem-manifest.mjs" "$work/extracted" > "$work/extracted-tree.jsonl"
 cmp "$work/nfs-tree.jsonl" "$work/extracted-tree.jsonl"
 nfs_verify_finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -92,6 +104,7 @@ for _ in $(seq 1 100); do
   sleep 0.1
 done
 [ -n "$pg_snapshot" ] || { echo "Timed out exporting PostgreSQL snapshot" >&2; exit 1; }
+pg_snapshot_exported=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 pg_dump_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 compose exec -T postgres pg_dump --username "${POSTGRES_USER:-dnd}" \
@@ -101,7 +114,7 @@ compose exec -T postgres psql --username "${POSTGRES_USER:-dnd}" --dbname "${POS
   --no-psqlrc --quiet --set ON_ERROR_STOP=1 \
   --command "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" \
   --command "SET TRANSACTION SNAPSHOT '$pg_snapshot'" --file - \
-  < scripts/dr-critical-fingerprint.sql > "$work/source-fingerprints.csv"
+  < "$dr_repo_root/scripts/dr-critical-fingerprint.sql" > "$work/source-fingerprints.csv"
 compose exec -T postgres pg_restore --list < "$work/postgres.dump" > "$work/postgres.toc"
 printf 'COMMIT;\n\\q\n' >&9
 exec 9>&-
@@ -112,16 +125,17 @@ pg_dump_finished=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 for table in users sessions search_events rag_events compendium_import_audit \
   compendium_import_review_audit compendium_editor_audit ingestion_jobs; do
   grep -Eq "TABLE DATA public ${table} " "$work/postgres.toc"
-  grep -Eq "^${table},[0-9]+,[0-9a-f]{64}$" "$work/source-fingerprints.csv"
+  grep -Eq "^${table},[0-9]+,-?[0-9]+,-?[0-9]+,-?[0-9]+$" "$work/source-fingerprints.csv"
 done
 
-for artifact in nfs.tar.gz nfs-files.sha256 nfs-tree.jsonl nfs-validation.json postgres.dump postgres.toc source-fingerprints.csv; do
+for artifact in nfs.tar.gz nfs-files.sha256 nfs-tree.jsonl nfs-access-model.json nfs-validation.json postgres.dump postgres.toc source-fingerprints.csv; do
   age --recipient "$age_recipient" --output "$backup_dir/$artifact.age" "$work/$artifact"
 done
 generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-printf '{\n  "schemaVersion": 1,\n  "sourceCommit": "%s",\n  "providerSnapshotId": "%s",\n  "sourceSnapshotTime": "%s",\n  "nfsVerificationStarted": "%s",\n  "nfsVerificationFinished": "%s",\n  "postgresSnapshotId": "%s",\n  "postgresDumpStarted": "%s",\n  "postgresDumpFinished": "%s",\n  "backupGeneratedAt": "%s",\n  "encryption": "age-recipient"\n}\n' \
-  "$source_commit" "$snapshot_id" "$snapshot_time" "$nfs_verify_started" "$nfs_verify_finished" \
-  "$pg_snapshot" "$pg_dump_started" "$pg_dump_finished" "$generated_at" > "$backup_dir/backup-metadata.json"
+printf '{\n  "schemaVersion": 1,\n  "sourceCommit": "%s",\n  "providerSnapshotId": "%s",\n  "sourceSnapshotTime": "%s",\n  "backupStartedAt": "%s",\n  "nfsVerificationStarted": "%s",\n  "nfsVerificationFinished": "%s",\n  "postgresSnapshotId": "%s",\n  "postgresSnapshotExportedAt": "%s",\n  "postgresDumpStarted": "%s",\n  "postgresDumpFinished": "%s",\n  "backupGeneratedAt": "%s",\n  "encryption": "age-recipient"\n}\n' \
+  "$source_commit" "$snapshot_id" "$snapshot_time" "$backup_started" "$nfs_verify_started" "$nfs_verify_finished" \
+  "$pg_snapshot" "$pg_snapshot_exported" "$pg_dump_started" "$pg_dump_finished" "$generated_at" > "$backup_dir/backup-metadata.json"
+node "$dr_repo_root/scripts/validate-backup-chronology.mjs" "$backup_dir/backup-metadata.json"
 (
   cd "$backup_dir"
   sha256sum backup-metadata.json ./*.age > backup-set.sha256

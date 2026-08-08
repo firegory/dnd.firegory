@@ -5,6 +5,11 @@ root. Production backup commands name the production Compose project explicitly.
 Every restore-drill Compose command goes through `scripts/dr-compose.sh` and
 names a guarded DR-only project explicitly; none may rely on
 `COMPOSE_PROJECT_NAME` or Compose's directory-derived default.
+The wrapper resolves the repository, Compose file, and `.env` to canonical
+absolute paths, clears all relevant `COMPOSE_*` ambient overrides, and exposes
+only named operations. It never forwards Compose flags, service definitions,
+commands, volumes, mounts, build contexts, profiles, or config paths supplied by
+an operator.
 
 ## Recovery contract
 
@@ -90,6 +95,8 @@ hard-link, fsync, close-to-open, and same-filesystem semantics documented in
 ### 2. Generate encrypted artifacts and snapshot fingerprints
 
 Create an empty encrypted destination and provide a sufficiently large tmpfs.
+Install `age`, `minisign`, and the host `acl`/`attr` tools (`getfacl` and
+`getfattr`) before scheduling backups.
 The script requires an explicit production project, proves the snapshot mount is
 NFS and `ro`, validates canonical schemas/hashes, archives it, extracts the
 archive into tmpfs, verifies every archived regular file against the manifest,
@@ -115,10 +122,12 @@ PostgreSQL dump/TOC, complete tree manifest, and `source-fingerprints.csv`, plus
 `backup-metadata.json` and ciphertext checksums. It deliberately does not create
 `COMPLETE.json`; local creation is not offsite durability.
 
-The fingerprint SQL covers `users`, `sessions`, all listed audit tables,
-`ingestion_jobs`, counts every row, canonicalizes each row through PostgreSQL
-JSONB, and SHA-256 hashes the ordered representation. This is stronger than TOC
-presence and is tied to the dump's exported snapshot.
+The fingerprint SQL covers `users`, `sessions`, all listed audit tables, and
+`ingestion_jobs`. It canonicalizes each row through PostgreSQL JSONB, then emits
+a row count, two independent `bit_xor(hashtextextended(...))` aggregates, and a
+third numeric sum aggregate. PostgreSQL 16 computes these in bounded aggregate
+state without an unbounded `string_agg`. The signed, exact CSV comparison is
+stronger than TOC presence and is tied to the dump's exported snapshot.
 
 ### 3. Replicate, verify, and seal
 
@@ -133,6 +142,13 @@ export DND_BACKUP_SIGNING_PUBLIC_KEY_FILE=/etc/dnd-firegory/backup-minisign.pub
 ./scripts/verify-backup-set.sh \
   --backup-dir /srv/replicated-encrypted-backups/dnd-firegory/20260808T000000Z
 ```
+
+Before sealing, chronology validation requires strict UTC timestamps ordered as
+source snapshot, backup start, NFS verification start/finish, PostgreSQL snapshot
+export, dump start/finish, backup generation, and replication completion. Every
+timestamp is checked against current time with a five-minute clock-skew ceiling.
+Invalid, reversed, missing, or unreasonably future metadata cannot produce
+`COMPLETE.json`.
 
 Sealing rechecks every ciphertext checksum, signs the checksum manifest and
 `COMPLETE.json`, and binds metadata/checksum/signature hashes,
@@ -178,7 +194,8 @@ export DR_PLAINTEXT="/run/dnd-dr-tmpfs/$DR_PROJECT"
 export DND_DR_EVIDENCE_ROOT=/srv/encrypted-dr-evidence
 export DR_EVIDENCE="$DND_DR_EVIDENCE_ROOT/$DR_PROJECT"
 install -d -m 0700 "$DR_PLAINTEXT" "$DR_EVIDENCE"
-sudo install -d -m 0700 "$(dirname "$DND_DR_EMPTY_TARGET_MARKER")"
+sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" \
+  "$(dirname "$DND_DR_EMPTY_TARGET_MARKER")"
 ./scripts/dr-target-guard.sh initialize --project-name "$DR_PROJECT"
 ./scripts/verify-backup-set.sh --backup-dir "$BACKUP_DIR"
 export BACKUP_COMMIT="$(node --input-type=module --eval \
@@ -195,13 +212,17 @@ storage. Fetch the age private identity into a short-lived root-readable file in
 tmpfs through the recovery-role secret manager; never place it in `.env` or
 shell history.
 
+The marker directory is mode 0700 and explicitly assigned to the invoking
+non-root drill operator; the guard verifies that owner before creating or
+reading a marker.
+
 Decrypt only the artifacts needed for restore:
 
 ```bash
 set -euo pipefail
 export AGE_IDENTITY_FILE="$DR_PLAINTEXT/recovery-identity"
 test "$(findmnt --noheadings --raw --output FSTYPE --target "$DR_PLAINTEXT")" = tmpfs
-for artifact in nfs.tar.gz nfs-files.sha256 nfs-tree.jsonl postgres.dump source-fingerprints.csv; do
+for artifact in nfs.tar.gz nfs-files.sha256 nfs-tree.jsonl nfs-access-model.json postgres.dump source-fingerprints.csv; do
   age --decrypt --identity "$AGE_IDENTITY_FILE" \
     --output "$DR_PLAINTEXT/$artifact" "$BACKUP_DIR/$artifact.age"
 done
@@ -217,16 +238,23 @@ runbook never asks it to. Choose one supported method:
   snapshot into the authorized empty DR export, preserving server-side metadata.
 - Controlled archive fallback: infrastructure confirms the export maps numeric
   `APP_UID:APP_GID` to the worker service identity, then extraction runs as that
-  identity with `--no-same-owner`. Every created object is owned through the
-  service mapping; heterogeneous archived ownership is intentionally not
-  reproduced.
+  identity with `--no-same-owner --same-permissions`. The fallback additionally
+  requires app, worker, and gateway to have the same effective Compose UID:GID,
+  and the sealed snapshot access model to contain exactly that one identity.
+  It preserves and later verifies POSIX modes, file content, paths, and symlinks.
+  The backup records whether recursive `getfacl --skip-base` or `getfattr`
+  discovers extended ACLs/xattrs (including file capabilities). The fallback
+  rejects either flag, as well as multiple identities. Those configurations
+  require provider/server restore.
 
 The fallback is executable only when the service identity has create/rename
 rights. It refuses the unsupported client-root `chown` model:
 
 ```bash
+export DND_DR_ARCHIVE_FALLBACK_ACCESS_MODEL=single-identity-posix-mode-no-acl
 ./scripts/dr-restore-nfs-archive.sh --project-name "$DR_PROJECT" \
-  --archive "$DR_PLAINTEXT/nfs.tar.gz"
+  --archive "$DR_PLAINTEXT/nfs.tar.gz" \
+  --access-model "$DR_PLAINTEXT/nfs-access-model.json"
 ```
 
 After either method, verify archive checksums and canonical schemas before any
@@ -241,8 +269,7 @@ sudo -u "#${APP_UID:-10001}" -g "#${APP_GID:-10001}" \
   node ./scripts/filesystem-manifest.mjs "$DND_DATA_HOST_PATH" \
   > "$DR_PLAINTEXT/restored-tree.jsonl"
 cmp "$DR_PLAINTEXT/nfs-tree.jsonl" "$DR_PLAINTEXT/restored-tree.jsonl"
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" run --rm --no-deps worker \
-  node --experimental-strip-types scripts/content-index.mts validate
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" validate-content
 printf 'nfs_restore_finished,%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   >> "$DR_EVIDENCE/timeline.csv"
 ```
@@ -258,16 +285,13 @@ project-scoped volume, and run current migrations:
 
 ```bash
 set -euo pipefail
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" up --detach --wait postgres
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" exec -T postgres pg_restore \
-  --username "${POSTGRES_USER:-dnd}" --dbname "${POSTGRES_DB:-dnd_firegory}" \
-  --no-owner --no-acl --exit-on-error < "$DR_PLAINTEXT/postgres.dump"
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" exec -T postgres psql \
-  --username "${POSTGRES_USER:-dnd}" --dbname "${POSTGRES_DB:-dnd_firegory}" \
-  --no-psqlrc --quiet --set ON_ERROR_STOP=1 --file - \
-  < ./scripts/dr-critical-fingerprint.sql > "$DR_EVIDENCE/restored-fingerprints.csv"
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" start-postgres
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" restore-postgres \
+  < "$DR_PLAINTEXT/postgres.dump"
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" fingerprint-postgres \
+  > "$DR_EVIDENCE/restored-fingerprints.csv"
 cmp "$DR_EVIDENCE/source-fingerprints.csv" "$DR_EVIDENCE/restored-fingerprints.csv"
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" run --rm migrate
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" migrate
 printf 'postgres_restore_finished,%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   >> "$DR_EVIDENCE/timeline.csv"
 ```
@@ -282,10 +306,7 @@ Redis and `upload_spool` intentionally start empty, so restored `queued` and
 reviewed reconciliation transaction:
 
 ```bash
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" exec -T postgres psql \
-  --username "${POSTGRES_USER:-dnd}" --dbname "${POSTGRES_DB:-dnd_firegory}" \
-  --no-psqlrc --set ON_ERROR_STOP=1 --file - \
-  < ./scripts/dr-reconcile-ingestion.sql \
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" reconcile-ingestion \
   | tee "$DR_EVIDENCE/ingestion-reconciliation.log"
 ```
 
@@ -301,17 +322,10 @@ upload for that file can create a new job. Any error rolls back the whole change
 
 ```bash
 set -euo pipefail
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" run --rm --no-deps worker \
-  node --experimental-strip-types scripts/content-index.mts clean --dry-run
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" run --rm --no-deps worker \
-  node --experimental-strip-types scripts/content-index.mts clean
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" exec -T postgres psql \
-  --username "${POSTGRES_USER:-dnd}" --dbname "${POSTGRES_DB:-dnd_firegory}" \
-  --no-psqlrc --quiet --set ON_ERROR_STOP=1 --csv \
-  --command "SELECT 'active_nfs_entries' AS metric, count(*) AS value FROM nfs_index_entries WHERE lifecycle='active'
-             UNION ALL SELECT 'active_nfs_chunks', count(*) FROM chunks c JOIN files f ON f.id=c.file_id AND f.active_generation_id=c.generation_id JOIN nfs_index_managed_files m ON m.file_id=c.file_id
-             UNION ALL SELECT 'missing_nfs_embeddings', count(*) FROM chunks c JOIN files f ON f.id=c.file_id AND f.active_generation_id=c.generation_id JOIN nfs_index_managed_files m ON m.file_id=c.file_id WHERE c.embedding IS NULL
-             ORDER BY metric" > "$DR_EVIDENCE/index-cardinality.csv"
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" index-clean-dry-run
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" index-clean
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" index-cardinality \
+  > "$DR_EVIDENCE/index-cardinality.csv"
 printf 'index_rebuild_finished,%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   >> "$DR_EVIDENCE/timeline.csv"
 ```
@@ -324,13 +338,12 @@ inspection and can be retried after correcting the cause.
 
 ```bash
 set -euo pipefail
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" up --detach --build
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" ps --all
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" start-stack
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" status
 ./scripts/production-permissions-smoke.sh --project-name "$DR_PROJECT"
 ./scripts/production-replacement-smoke.sh --project-name "$DR_PROJECT"
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" up \
-  --detach --no-deps --force-recreate gateway
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" up --detach --wait
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" recreate-gateway
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" wait-stack
 ```
 
 Verify login, user/admin visibility, canonical browsing, keyword search, audit
@@ -351,9 +364,7 @@ their layers.
 ### 7. Backfill embeddings after structured acceptance
 
 ```bash
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" run --rm --no-deps worker \
-  node --experimental-strip-types scripts/content-index.mts \
-  backfill-embeddings --batch-size 20
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" backfill-embeddings
 ```
 
 Provider failure leaves keyword search online. Retry only null active
@@ -374,8 +385,7 @@ export DND_DR_EVIDENCE_SIGNING_SECRET_KEY_FILE=/run/secrets/dnd-dr-evidence-mini
 minisign -V -p /etc/dnd-firegory/evidence-minisign.pub \
   -m "$DR_EVIDENCE/EVIDENCE_COMPLETE.json" \
   -x "$DR_EVIDENCE/EVIDENCE_COMPLETE.json.minisig"
-./scripts/dr-compose.sh --project-name "$DR_PROJECT" down \
-  --volumes --remove-orphans
+./scripts/dr-compose.sh --project-name "$DR_PROJECT" teardown
 ./scripts/dr-remove-plaintext.sh --project-name "$DR_PROJECT" \
   --path "$DR_PLAINTEXT"
 ./scripts/dr-target-guard.sh remove --project-name "$DR_PROJECT"
