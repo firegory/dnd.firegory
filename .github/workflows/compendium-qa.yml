@@ -1,0 +1,80 @@
+name: Compendium QA
+
+on:
+  pull_request:
+  push:
+    branches: [main, "test/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compendium-qa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qa:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        # pgvector/pgvector:0.8.1-pg16 OCI index; includes linux/amd64 and linux/arm64 manifests.
+        image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
+        env:
+          POSTGRES_DB: dnd_qa
+          POSTGRES_USER: qa
+          POSTGRES_PASSWORD: qa
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U qa -d dnd_qa"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      QA_DATABASE_URL: postgres://qa:qa@127.0.0.1:5432/dnd_qa
+      QA_BROWSER_DATABASE: qa_browser
+      CI: "true"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.18.0
+          cache: npm
+      - name: Initialize diagnostic artifact paths
+        run: |
+          mkdir -p qa-artifacts/diagnostics playwright-report test-results/results
+          printf 'run=%s\nsha=%s\narch=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" "$(uname -m)" > qa-artifacts/diagnostics/workflow.txt
+      - name: Install dependencies
+        run: npm ci
+      - name: Initialize pgvector
+        run: node --input-type=module -e "import pg from 'pg'; const c=new pg.Client({connectionString:process.env.QA_DATABASE_URL}); await c.connect(); await c.query('CREATE EXTENSION IF NOT EXISTS vector'); await c.end();"
+      - name: Deterministic regressions
+        run: npm run qa:unit
+      - name: Fresh, upgrade, RBAC, and import integration
+        run: npm run qa:db
+      - name: NFS atomic publication crash integration
+        run: npm run qa:publication
+      - name: Representative-volume plans
+        run: npm run qa:performance
+      - name: Typecheck, lint, and production build
+        run: npm run qa:build
+      - name: Install pinned Chromium runtime
+        run: |
+          npm run qa:browser:install
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils
+      - name: Production browser flows
+        run: npm run qa:browser
+      - name: Upload query plans and browser failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: compendium-qa-evidence
+          if-no-files-found: warn
+          path: |
+            qa-artifacts/
+            playwright-report/
+            test-results/results/
+          retention-days: 14

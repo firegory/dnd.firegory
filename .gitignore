@@ -31,3 +31,8 @@ storage/
 secrets/
 .cr/
 dnd.firegory-issue*/
+
+# Generated QA evidence
+/qa-artifacts/
+/test-results/
+/playwright-report/

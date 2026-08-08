@@ -415,6 +415,9 @@ npm run corpus-export -- generate      # Publish a portable Markdown/JSONL corpu
 npm run corpus-export -- validate      # Validate the latest portable corpus
 ```
 
+The fail-closed compendium integration, browser, migration, publication, and
+performance groups are documented in [docs/compendium-qa.md](docs/compendium-qa.md).
+
 ## Backups
 
 See [docs/backups.md](docs/backups.md) for backup and restore procedures for PostgreSQL data and file storage.

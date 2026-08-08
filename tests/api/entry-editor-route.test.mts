@@ -7,7 +7,9 @@ import { assertSameOriginMutation, OriginValidationError } from "../../src/serve
 
 test("editor mutations require exact same-origin requests", () => {
   assert.doesNotThrow(()=>assertSameOriginMutation(new Request("https://dnd.example/api/admin/compendium/entries",{method:"POST",headers:{Origin:"https://dnd.example"}})));
+  assert.doesNotThrow(()=>assertSameOriginMutation(new Request("http://internal:3000/api/admin/compendium/entries",{method:"POST",headers:{Origin:"https://dnd.example",Host:"dnd.example","X-Forwarded-Proto":"https"}})));
   assert.throws(()=>assertSameOriginMutation(new Request("https://dnd.example/api/admin/compendium/entries",{method:"POST",headers:{Origin:"https://evil.example"}})),OriginValidationError);
+  assert.throws(()=>assertSameOriginMutation(new Request("http://internal:3000/api/admin/compendium/entries",{method:"POST",headers:{Origin:"https://dnd.example",Host:"dnd.example","X-Forwarded-Proto":"https,http"}})),OriginValidationError);
 });
 
 test("stale correction validation maps to an HTTP conflict", () => {

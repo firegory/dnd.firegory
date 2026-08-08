@@ -5,7 +5,7 @@ import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 
 test("0018 adds the complete creature projection without changing flat or spell migration order", async () => {
   const migrations = (await readdir("migrations")).filter((name) => name.endsWith(".sql")).sort();
-  assert.equal(migrations.at(-1), "0019_class_species_hierarchy.sql");
+  assert.equal(migrations.at(-1), "0021_nfs_exact_lookup_indexes.sql");
   assert.equal(MIGRATION_FILENAMES[MIGRATION_FILENAMES.indexOf("0017_flat_compendium_types.sql")+1], "0018_bestiary_stat_blocks.sql");
   assert.equal(MIGRATION_FILENAMES[MIGRATION_FILENAMES.indexOf("0018_bestiary_stat_blocks.sql")+1], "0019_class_species_hierarchy.sql");
   assert.equal(MIGRATION_FILENAMES.includes("0017_bestiary_stat_blocks.sql" as never), false);

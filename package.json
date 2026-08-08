@@ -10,6 +10,13 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types 'tests/**/*.test.mts'",
+    "qa:unit": "npm test",
+    "qa:db": "node --test --experimental-strip-types tests/qa/database.qa.mts",
+    "qa:publication": "node --test --experimental-strip-types tests/content-storage/publication.test.mts tests/qa/publication-process.qa.mts",
+    "qa:performance": "node --test --experimental-strip-types tests/qa/performance.qa.mts",
+    "qa:browser": "node --experimental-strip-types scripts/run-browser-qa.mts",
+    "qa:browser:install": "playwright install --with-deps chromium",
+    "qa:build": "npm run typecheck && npm run lint && npm run build",
     "db:migrate": "node --experimental-strip-types scripts/migrate.mts",
     "worker": "node --experimental-strip-types src/worker/index.ts",
     "ingest": "node --experimental-strip-types scripts/ingest.mts",
@@ -34,6 +41,7 @@
     "redis": "^5.12.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.54.2",
     "@tailwindcss/postcss": "^4.3.0",
     "@types/node": "^25.9.0",
     "@types/pg": "^8.20.0",

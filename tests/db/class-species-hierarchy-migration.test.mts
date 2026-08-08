@@ -6,7 +6,7 @@ import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 const filename="0019_class_species_hierarchy.sql";const sql=await readFile(`migrations/${filename}`,"utf8");
 
 test("0019 registers normalized many-to-many hierarchy and exact NFS relations",()=>{
-  assert.equal(MIGRATION_FILENAMES.at(-1),filename);
+  assert.equal(MIGRATION_FILENAMES[MIGRATION_FILENAMES.indexOf(filename)+1],"0020_active_revision_trigger_fix.sql");
   for(const table of ["compendium_class_parent_links","compendium_species_parent_links","compendium_class_progression_tables","compendium_class_progression_columns","compendium_class_progression_rows","compendium_class_progression_cells","compendium_class_feature_links","compendium_species_traits","compendium_option_cross_links","nfs_index_option_relations"])assert.match(sql,new RegExp(`CREATE TABLE IF NOT EXISTS ${table}`));
   assert.doesNotMatch(sql,/parent_(?:class|species)_id\s+uuid/);assert.match(sql,/target_revision_id uuid NOT NULL/);assert.match(sql,/source_id = target_source_id/);
   assert.match(sql,/nfs_option_relations_target_fk[\s\S]*repository_id, target_entry_id, target_revision_id, target_source_id, target_file_id/);

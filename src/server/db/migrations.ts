@@ -18,6 +18,8 @@ export const MIGRATION_FILENAMES = [
   "0017_flat_compendium_types.sql",
   "0018_bestiary_stat_blocks.sql",
   "0019_class_species_hierarchy.sql",
+  "0020_active_revision_trigger_fix.sql",
+  "0021_nfs_exact_lookup_indexes.sql",
 ] as const;
 
 export type MigrationFilename = (typeof MIGRATION_FILENAMES)[number];
