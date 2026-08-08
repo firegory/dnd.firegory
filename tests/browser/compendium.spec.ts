@@ -28,7 +28,7 @@ test("@user actual spell filters, deep link, citation preview, and print layout 
   await expect(page.locator(".spell-list > li")).toHaveCount(1);
   await page.getByRole("link", { name: /QA Spell 1/ }).click();
   await expect(page).toHaveURL(/\/spells\/qa-spell-1/);
-  const preview = page.getByRole("link", { name: "Open PDF citation" });
+  const preview = page.getByRole("link", { name: "Open PDF preview" });
   const [popup] = await Promise.all([page.waitForEvent("popup"), preview.click()]);
   await popup.waitForLoadState("load");
   await expect(popup).toHaveURL(/\/api\/citations\/preview\?.*page=1/);
