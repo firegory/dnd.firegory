@@ -28,7 +28,7 @@ export class HierarchyValidationError extends Error {}
 
 const STABLE = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
 const CANONICAL = /^(?:spell|creature|item|class|feature|species|background|feat|equipment)-[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
-const RESERVED_ANCHOR = /^(?:progression|level-(?:[1-9]|1[0-9]|20)|section(?:-|$))/;
+const RESERVED_ANCHOR = /^(?:progression|level-(?:[1-9]|1[0-9]|20)|section(?:-|$)|citation-)/;
 
 export function validateClassProjection(value: unknown, options: Readonly<{ requireCompleteBase?: boolean }> = {}): ClassProjection {
   if (!record(value)) fail("Class projection must be an object.");

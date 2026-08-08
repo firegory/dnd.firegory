@@ -191,6 +191,30 @@ export function buildSyncPlan(
   return { additions, updates, removals };
 }
 
+export function expandAffectedSourceClosure(
+  changedEntryIds: ReadonlySet<string>,
+  projections: readonly Pick<IndexedEntryProjection, "entryId" | "fileUuid" | "relations">[],
+  changedFileIds: ReadonlySet<string> = new Set(),
+): Set<string> {
+  const affected = new Set(changedEntryIds);
+  const affectedFiles = new Set(changedFileIds);
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const projection of projections) {
+      if (affected.has(projection.entryId)) affectedFiles.add(projection.fileUuid);
+    }
+    for (const projection of projections) {
+      if (affected.has(projection.entryId)) continue;
+      if (!affectedFiles.has(projection.fileUuid) && !projection.relations.some((relation) => affected.has(relation.targetEntryId))) continue;
+      affected.add(projection.entryId);
+      affectedFiles.add(projection.fileUuid);
+      expanded = true;
+    }
+  }
+  return affected;
+}
+
 export async function claimContentIndexRun(execute: typeof query, input: Readonly<{
   repositoryId: string;
   manifestHash: string;
@@ -298,13 +322,15 @@ async function applySnapshot(
 
   const desiredByFile = Map.groupBy(projections, (entry) => entry.fileUuid);
   const changedEntries = new Set([...plan.additions, ...plan.updates, ...plan.removals]);
+  const changedFiles = new Set(active.filter((entry) => changedEntries.has(entry.entry_id)).map((entry) => entry.file_id));
+  const affectedEntries = expandAffectedSourceClosure(changedEntries, projections, changedFiles);
   await client.query(
     `DELETE FROM nfs_index_option_relations WHERE repository_id=$1
        AND (source_entry_id=ANY($2::text[]) OR target_entry_id=ANY($2::text[]))`,
-    [repositoryId,[...changedEntries]],
+    [repositoryId,[...affectedEntries]],
   );
-  const affectedFiles = new Set(active.filter((entry) => changedEntries.has(entry.entry_id)).map((entry) => entry.file_id));
-  for (const entry of projections) if (changedEntries.has(entry.entryId)) affectedFiles.add(entry.fileUuid);
+  const affectedFiles = new Set(active.filter((entry) => affectedEntries.has(entry.entry_id)).map((entry) => entry.file_id));
+  for (const entry of projections) if (affectedEntries.has(entry.entryId)) affectedFiles.add(entry.fileUuid);
 
   for (const entries of desiredByFile.values()) {
     if (!affectedFiles.has(entries[0].fileUuid)) continue;
@@ -501,11 +527,11 @@ async function upsertFileIndexRows(
     await client.query(
       `INSERT INTO nfs_index_option_relations
         (repository_id,source_entry_id,source_revision_id,source_id,target_entry_id,target_revision_id,target_source_id,
-         edition,language,relation_kind,target_kind,target_lifecycle,anchor,position)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+         edition,language,relation_kind,target_kind,target_lifecycle,source_anchor,anchor,position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
       [repositoryId,relation.sourceEntryId,relation.sourceRevisionId,relation.sourceId,relation.targetEntryId,
         relation.targetRevisionId,relation.targetSourceId,relation.edition,relation.language,relation.relationKind,
-        relation.targetKind,relation.targetLifecycle,relation.anchor,relation.position],
+        relation.targetKind,relation.targetLifecycle,relation.sourceAnchor,relation.anchor,relation.position],
     );
   }
 }

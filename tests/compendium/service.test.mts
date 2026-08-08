@@ -252,4 +252,5 @@ test("hierarchy writes reject missing, draft, or stale exact-corpus parent revis
   const parentSql=statements.find((sql)=>sql.includes("INSERT INTO compendium_class_parent_links"))!;
   assert.match(parentSql,/target\.source_id=owner\.source_id/);assert.match(parentSql,/target\.language=owner\.language/);
   assert.match(parentSql,/target\.lifecycle='published'/);assert.match(parentSql,/target_revision\.lifecycle='published'/);
+  assert.match(parentSql,/target_option\.class_kind='class'/);
 });

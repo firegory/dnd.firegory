@@ -212,20 +212,28 @@ FOR EACH ROW EXECUTE FUNCTION compendium_validate_hierarchy_publication();
 
 CREATE OR REPLACE FUNCTION compendium_guard_hierarchy_child_immutability() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE revision uuid;
+DECLARE old_revision uuid; new_revision uuid;
 BEGIN
   CASE TG_TABLE_NAME
-    WHEN 'compendium_class_parent_links' THEN revision := OLD.child_revision_id;
-    WHEN 'compendium_species_parent_links' THEN revision := OLD.child_revision_id;
-    WHEN 'compendium_class_progression_tables' THEN revision := OLD.class_revision_id;
-    WHEN 'compendium_class_progression_columns' THEN SELECT class_revision_id INTO revision FROM compendium_class_progression_tables WHERE id = OLD.table_id;
-    WHEN 'compendium_class_progression_rows' THEN SELECT class_revision_id INTO revision FROM compendium_class_progression_tables WHERE id = OLD.table_id;
-    WHEN 'compendium_class_progression_cells' THEN SELECT class_revision_id INTO revision FROM compendium_class_progression_tables WHERE id = OLD.table_id;
-    WHEN 'compendium_class_feature_links' THEN revision := OLD.class_revision_id;
-    WHEN 'compendium_species_traits' THEN revision := OLD.species_revision_id;
-    WHEN 'compendium_option_cross_links' THEN revision := OLD.source_revision_id;
+    WHEN 'compendium_class_parent_links' THEN old_revision := OLD.child_revision_id; new_revision := NEW.child_revision_id;
+    WHEN 'compendium_species_parent_links' THEN old_revision := OLD.child_revision_id; new_revision := NEW.child_revision_id;
+    WHEN 'compendium_class_progression_tables' THEN old_revision := OLD.class_revision_id; new_revision := NEW.class_revision_id;
+    WHEN 'compendium_class_progression_columns' THEN
+      SELECT class_revision_id INTO old_revision FROM compendium_class_progression_tables WHERE id = OLD.table_id;
+      SELECT class_revision_id INTO new_revision FROM compendium_class_progression_tables WHERE id = NEW.table_id;
+    WHEN 'compendium_class_progression_rows' THEN
+      SELECT class_revision_id INTO old_revision FROM compendium_class_progression_tables WHERE id = OLD.table_id;
+      SELECT class_revision_id INTO new_revision FROM compendium_class_progression_tables WHERE id = NEW.table_id;
+    WHEN 'compendium_class_progression_cells' THEN
+      SELECT class_revision_id INTO old_revision FROM compendium_class_progression_tables WHERE id = OLD.table_id;
+      SELECT class_revision_id INTO new_revision FROM compendium_class_progression_tables WHERE id = NEW.table_id;
+    WHEN 'compendium_class_feature_links' THEN old_revision := OLD.class_revision_id; new_revision := NEW.class_revision_id;
+    WHEN 'compendium_species_traits' THEN old_revision := OLD.species_revision_id; new_revision := NEW.species_revision_id;
+    WHEN 'compendium_option_cross_links' THEN old_revision := OLD.source_revision_id; new_revision := NEW.source_revision_id;
   END CASE;
-  IF compendium_revision_is_active(revision) THEN RAISE EXCEPTION 'active hierarchy revision children are immutable'; END IF;
+  IF compendium_revision_is_active(old_revision) OR compendium_revision_is_active(new_revision) THEN
+    RAISE EXCEPTION 'published hierarchy revision children are immutable';
+  END IF;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
   RETURN NEW;
 END $$;
@@ -239,7 +247,7 @@ BEGIN
     'compendium_class_feature_links','compendium_species_traits','compendium_option_cross_links'
   ] LOOP
     EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I', table_name || '_active_immutable', table_name);
-    EXECUTE format('CREATE TRIGGER %I BEFORE UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION compendium_guard_hierarchy_child_immutability()', table_name || '_active_immutable', table_name);
+    EXECUTE format('CREATE TRIGGER %I BEFORE INSERT OR UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION compendium_guard_hierarchy_child_immutability()', table_name || '_active_immutable', table_name);
   END LOOP;
 END $$;
 
@@ -266,7 +274,8 @@ BEGIN
     JOIN compendium_classes parent ON parent.revision_id = link.parent_revision_id
     JOIN compendium_revisions cr ON cr.id = child.revision_id JOIN compendium_versions cv ON cv.id = cr.version_id
     JOIN compendium_revisions pr ON pr.id = parent.revision_id JOIN compendium_versions pv ON pv.id = pr.version_id
-    WHERE child.class_kind <> 'subclass' OR pr.lifecycle <> 'published' OR pv.lifecycle <> 'published' OR pv.active_revision_id <> pr.id
+    WHERE child.class_kind <> 'subclass' OR parent.class_kind <> 'class'
+      OR pr.lifecycle <> 'published' OR pv.lifecycle <> 'published' OR pv.active_revision_id <> pr.id
       OR cv.source_id <> pv.source_id OR cv.edition <> pv.edition OR cv.language <> pv.language
   ) THEN RAISE EXCEPTION 'class parent must be an active exact-corpus class hierarchy version'; END IF;
 
@@ -276,29 +285,10 @@ BEGIN
     JOIN compendium_species parent ON parent.revision_id = link.parent_revision_id
     JOIN compendium_revisions cr ON cr.id = child.revision_id JOIN compendium_versions cv ON cv.id = cr.version_id
     JOIN compendium_revisions pr ON pr.id = parent.revision_id JOIN compendium_versions pv ON pv.id = pr.version_id
-    WHERE child.species_kind <> 'variant' OR pr.lifecycle <> 'published' OR pv.lifecycle <> 'published' OR pv.active_revision_id <> pr.id
+    WHERE child.species_kind <> 'variant' OR parent.species_kind <> 'species'
+      OR pr.lifecycle <> 'published' OR pv.lifecycle <> 'published' OR pv.active_revision_id <> pr.id
       OR cv.source_id <> pv.source_id OR cv.edition <> pv.edition OR cv.language <> pv.language
   ) THEN RAISE EXCEPTION 'species parent must be an active exact-corpus species hierarchy version'; END IF;
-
-  IF EXISTS (
-    SELECT 1 FROM compendium_class_parent_links direct JOIN compendium_classes parent ON parent.revision_id = direct.parent_revision_id
-    WHERE parent.class_kind = 'subclass' AND NOT EXISTS (
-      WITH RECURSIVE ancestors(revision_id) AS (
-        SELECT direct.parent_revision_id
-        UNION SELECT link.parent_revision_id FROM ancestors JOIN compendium_class_parent_links link ON link.child_revision_id = ancestors.revision_id
-      ) SELECT 1 FROM ancestors JOIN compendium_classes base ON base.revision_id = ancestors.revision_id WHERE base.class_kind = 'class'
-    )
-  ) THEN RAISE EXCEPTION 'subclass parent chains must explicitly terminate at a base class'; END IF;
-
-  IF EXISTS (
-    SELECT 1 FROM compendium_species_parent_links direct JOIN compendium_species parent ON parent.revision_id = direct.parent_revision_id
-    WHERE parent.species_kind = 'variant' AND NOT EXISTS (
-      WITH RECURSIVE ancestors(revision_id) AS (
-        SELECT direct.parent_revision_id
-        UNION SELECT link.parent_revision_id FROM ancestors JOIN compendium_species_parent_links link ON link.child_revision_id = ancestors.revision_id
-      ) SELECT 1 FROM ancestors JOIN compendium_species base ON base.revision_id = ancestors.revision_id WHERE base.species_kind = 'species'
-    )
-  ) THEN RAISE EXCEPTION 'variant parent chains must explicitly terminate at a base species'; END IF;
 
   IF EXISTS (
     SELECT 1 FROM compendium_class_feature_links link
@@ -355,11 +345,11 @@ DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION compendium_validate_
 
 ALTER TABLE compendium_class_feature_links DROP CONSTRAINT IF EXISTS compendium_class_feature_anchor_not_reserved;
 ALTER TABLE compendium_class_feature_links ADD CONSTRAINT compendium_class_feature_anchor_not_reserved CHECK (
-  anchor <> 'progression' AND anchor !~ '^level-([1-9]|1[0-9]|20)$' AND anchor !~ '^section(?:-|$)'
+  anchor <> 'progression' AND anchor !~ '^level-([1-9]|1[0-9]|20)$' AND anchor !~ '^section(?:-|$)' AND anchor !~ '^citation-'
 );
 ALTER TABLE compendium_species_traits DROP CONSTRAINT IF EXISTS compendium_species_trait_anchor_not_reserved;
 ALTER TABLE compendium_species_traits ADD CONSTRAINT compendium_species_trait_anchor_not_reserved CHECK (
-  anchor <> 'progression' AND anchor !~ '^level-([1-9]|1[0-9]|20)$' AND anchor !~ '^section(?:-|$)'
+  anchor <> 'progression' AND anchor !~ '^level-([1-9]|1[0-9]|20)$' AND anchor !~ '^section(?:-|$)' AND anchor !~ '^citation-'
 );
 
 CREATE TABLE IF NOT EXISTS nfs_index_option_relations (
@@ -372,13 +362,15 @@ CREATE TABLE IF NOT EXISTS nfs_index_option_relations (
   target_source_id uuid NOT NULL,
   edition source_edition NOT NULL,
   language source_language NOT NULL,
-  relation_kind text NOT NULL CHECK (relation_kind IN ('parent','feature','cross_link')),
+  relation_kind text NOT NULL CHECK (relation_kind IN ('parent','feature','cross_link','trait_override')),
   target_kind text NOT NULL CHECK (target_kind IN ('class','subclass','species','variant','feature','other')),
   target_lifecycle nfs_index_entry_lifecycle NOT NULL CHECK (target_lifecycle = 'active'),
+  source_anchor text NOT NULL DEFAULT '',
   anchor text,
   position smallint NOT NULL DEFAULT 0 CHECK (position >= 0),
-  PRIMARY KEY (repository_id, source_entry_id, source_revision_id, target_entry_id, target_revision_id, relation_kind),
+  PRIMARY KEY (repository_id, source_entry_id, source_revision_id, target_entry_id, target_revision_id, relation_kind, source_anchor),
   CHECK (source_id = target_source_id),
+  CHECK (source_anchor = '' OR source_anchor ~ '^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$'),
   CHECK (anchor IS NULL OR anchor ~ '^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$')
 );
 CREATE INDEX IF NOT EXISTS nfs_index_option_relations_target_idx ON nfs_index_option_relations
@@ -403,13 +395,23 @@ END $$;
 
 CREATE OR REPLACE FUNCTION nfs_index_validate_option_relation() RETURNS trigger
 LANGUAGE plpgsql AS $$
-DECLARE actual_kind text;
+DECLARE actual_kind text; source_kind text; valid_trait_override boolean;
 BEGIN
   SELECT CASE
     WHEN target.entry_id LIKE 'class-%' THEN coalesce(fields.values->>'kind','class')
     WHEN target.entry_id LIKE 'species-%' THEN coalesce(fields.values->>'kind','species')
     WHEN target.entry_id LIKE 'feature-%' THEN 'feature'
-    ELSE 'other' END INTO actual_kind
+    ELSE 'other' END,
+    CASE WHEN source.entry_id LIKE 'class-%' THEN coalesce(source_fields.values->>'kind','class')
+      WHEN source.entry_id LIKE 'species-%' THEN coalesce(source_fields.values->>'kind','species') ELSE 'other' END,
+    EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements_text(coalesce(source_fields.values->'traits','[]'::jsonb)) source_trait(value)
+      JOIN LATERAL jsonb_array_elements_text(coalesce(fields.values->'traits','[]'::jsonb)) target_trait(value)
+        ON (target_trait.value::jsonb)->>'key' = (source_trait.value::jsonb)->>'overrides'
+      WHERE (source_trait.value::jsonb)->>'anchor' = NEW.source_anchor
+        AND (target_trait.value::jsonb)->>'anchor' = NEW.anchor
+    ) INTO actual_kind, source_kind, valid_trait_override
   FROM nfs_index_entries source
   JOIN sources source_meta ON source_meta.id = source.source_id
   JOIN nfs_index_entries target ON target.repository_id = NEW.repository_id
@@ -418,6 +420,8 @@ BEGIN
   JOIN sources target_meta ON target_meta.id = target.source_id
   CROSS JOIN LATERAL (SELECT coalesce(jsonb_object_agg(field->>'key',field->'value'),'{}') AS values
     FROM jsonb_array_elements(target.typed_fields) field) fields
+  CROSS JOIN LATERAL (SELECT coalesce(jsonb_object_agg(field->>'key',field->'value'),'{}') AS values
+    FROM jsonb_array_elements(source.typed_fields) field) source_fields
   WHERE source.repository_id = NEW.repository_id AND source.entry_id = NEW.source_entry_id
     AND source.revision_id = NEW.source_revision_id AND source.source_id = NEW.source_id
     AND source.lifecycle = 'active' AND target.lifecycle = 'active'
@@ -427,6 +431,12 @@ BEGIN
   IF actual_kind IS NULL OR actual_kind <> NEW.target_kind THEN
     RAISE EXCEPTION 'NFS option relation target must be an exact active same-corpus version with matching kind';
   END IF;
+  IF NEW.relation_kind = 'parent' AND NOT (
+    source_kind = 'subclass' AND actual_kind = 'class' OR source_kind = 'variant' AND actual_kind = 'species'
+  ) THEN RAISE EXCEPTION 'NFS hierarchy parents must directly target a base class or species'; END IF;
+  IF NEW.relation_kind = 'trait_override' AND NOT (
+    source_kind = 'variant' AND actual_kind = 'species' AND valid_trait_override
+  ) THEN RAISE EXCEPTION 'NFS trait overrides must link an exact child trait to its exact base parent trait anchor'; END IF;
   RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS nfs_index_option_relation_valid ON nfs_index_option_relations;

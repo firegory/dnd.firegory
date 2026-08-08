@@ -78,9 +78,9 @@ export type IndexedOptionRelation = Readonly<{
   sourceEntryId: string; sourceRevisionId: string; sourceId: string;
   targetEntryId: string; targetRevisionId: string; targetSourceId: string;
   edition: "5e" | "5.5e"; language: "en" | "ru";
-  relationKind: "parent" | "feature" | "cross_link";
+  relationKind: "parent" | "feature" | "cross_link" | "trait_override";
   targetKind: "class" | "subclass" | "species" | "variant" | "feature" | "other";
-  targetLifecycle: "active"; anchor: string | null; position: number;
+  targetLifecycle: "active"; sourceAnchor: string; anchor: string | null; position: number;
 }>;
 
 export function deterministicUuid(namespace: string, ...parts: readonly string[]): string {
@@ -228,14 +228,14 @@ function resolveOptionRelations(entries: readonly IndexedEntryProjection[]): rea
     if (target.entryId.startsWith("feature-")) return "feature";
     return "other";
   };
-  const resolve = (source: IndexedEntryProjection, targetId: string, relationKind: IndexedOptionRelation["relationKind"], anchor: string | null, position: number): IndexedOptionRelation => {
+  const resolve = (source: IndexedEntryProjection, targetId: string, relationKind: IndexedOptionRelation["relationKind"], anchor: string | null, position: number, sourceAnchor = ""): IndexedOptionRelation => {
     const target = byId.get(targetId);
     if (!target || target.source.sourceId !== source.source.sourceId || target.source.edition !== source.source.edition || target.source.language !== source.source.language) {
       throw new Error(`Relation ${source.entryId} -> ${targetId} requires an exact target in the same source, edition, and language snapshot`);
     }
     return { sourceEntryId:source.entryId,sourceRevisionId:source.revisionId,sourceId:source.sourceUuid,targetEntryId:target.entryId,
       targetRevisionId:target.revisionId,targetSourceId:target.sourceUuid,edition:source.source.edition,language:source.source.language,
-      relationKind,targetKind:targetKind(target),targetLifecycle:"active",anchor,position };
+      relationKind,targetKind:targetKind(target),targetLifecycle:"active",sourceAnchor,anchor,position };
   };
   for (const entry of entries) {
     if (entry.entryId.startsWith("class-")) projectionById.set(entry.entryId, classProjectionFromTypedFields(entry.typedFields));
@@ -258,6 +258,13 @@ function resolveOptionRelations(entries: readonly IndexedEntryProjection[]): rea
     const parents="parentClassIds" in projection?projection.parentClassIds:projection.parentSpeciesIds;
     parents.forEach((id,index)=>relations.push(resolve(entry,id,"parent",null,index)));
     if("features" in projection)projection.features.forEach((feature,index)=>relations.push(resolve(entry,feature.canonicalId,"feature",feature.anchor,index)));
+    if("traits" in projection) projection.traits.forEach((trait,index)=>{
+      if(!trait.overrides)return;
+      const parentId=parents.find((id)=>{const parent=projectionById.get(id);return parent&&"traits" in parent&&parent.traits.some(({key})=>key===trait.overrides);});
+      const parent=parentId?projectionById.get(parentId):undefined;const inherited=parent&&"traits" in parent?parent.traits.find(({key})=>key===trait.overrides):undefined;
+      if(!parentId||!inherited)throw new Error(`Trait override ${entry.entryId}#${trait.anchor} does not resolve an inherited parent trait`);
+      relations.push(resolve(entry,parentId,"trait_override",inherited.anchor,index,trait.anchor));
+    });
     projection.crossLinks.forEach((id,index)=>relations.push(resolve(entry,id,"cross_link",null,index)));
     return {...entry,relations};
   });
@@ -274,7 +281,7 @@ function assertAcyclicPathToBase(
   const derived=projection.kind==="subclass"||projection.kind==="variant";const parents=graph.get(entryId)??[];
   if(derived&&parents.length===0)throw new Error(`Derived option ${entryId} has no explicit parent`);
   if(!derived&&parents.length>0)throw new Error(`Base option ${entryId} cannot have a parent`);
-  for(const parent of parents){const target=projections.get(parent);if(!target)throw new Error(`Hierarchy parent ${parent} does not exist in the exact source snapshot`);if(("parentClassIds" in projection)!==("parentClassIds" in target))throw new Error(`Hierarchy parent ${parent} has the wrong kind`);assertAcyclicPathToBase(parent,graph,projections,[...path,entryId]);}
+  for(const parent of parents){const target=projections.get(parent);if(!target)throw new Error(`Hierarchy parent ${parent} does not exist in the exact source snapshot`);if(("parentClassIds" in projection)!==("parentClassIds" in target))throw new Error(`Hierarchy parent ${parent} has the wrong kind`);assertAcyclicPathToBase(parent,graph,projections,[...path,entryId]);if(target.kind!==(("parentClassIds" in projection)?"class":"species"))throw new Error(`Hierarchy parent ${parent} must be a direct base option`);}
 }
 
 function inheritedTraitKeys(

@@ -427,12 +427,14 @@ async function insertSpeciesProjection(client: DbClient, revisionId: string, pro
 
 async function insertResolvedRevisionLink(client: DbClient, table: string, childColumn: string, parentColumn: string, revisionId: string, canonicalId: string, type: "class" | "species", position: number): Promise<void> {
   const key = canonicalId.slice(type.length + 1);
+  const targetTable=type==="class"?"compendium_classes":"compendium_species";const targetKind=type==="class"?"class_kind='class'":"species_kind='species'";
   const result = await client.query(`INSERT INTO ${table} (${childColumn},${parentColumn},position)
     SELECT $1,target.active_revision_id,$3 FROM compendium_revisions owner_revision
     JOIN compendium_versions owner ON owner.id=owner_revision.version_id
     JOIN compendium_entries entry ON entry.entry_type=$4 AND entry.edition=owner.edition AND entry.canonical_key=$2
     JOIN compendium_versions target ON target.entry_id=entry.id AND target.language=owner.language AND target.source_id=owner.source_id
     JOIN compendium_revisions target_revision ON target_revision.id=target.active_revision_id AND target_revision.version_id=target.id
+    JOIN ${targetTable} target_option ON target_option.revision_id=target_revision.id AND target_option.${targetKind}
     WHERE owner_revision.id=$1 AND target.lifecycle='published' AND target_revision.lifecycle='published'`, [revisionId, key, position, type]);
   if (!result.rowCount) throw new CompendiumValidationError(`Related ${type} source version ${canonicalId} was not found.`);
 }

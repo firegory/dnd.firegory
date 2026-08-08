@@ -11,7 +11,7 @@ export type OptionType = "class" | "species";
 export type OptionListOptions = RetrievalSelection & Readonly<{ kind?: "class" | "subclass" | "species" | "variant"; query?: string; limit?: number }>;
 export type OptionVersionSelection = RetrievalSelection & Readonly<{ sourceId?: string; revisionId?: string }>;
 export type OptionCitation = Readonly<{ id: string; quote: string; section: string; page: number | null; fieldPath: string | null; previewUrl: string | null; sourceUrl: string | null; sourceDetailUrl: string }>;
-export type OptionResolvedRelation = Readonly<{ targetId:string; targetRevisionId:string; targetSourceId:string; relationKind:"parent"|"feature"|"cross_link"; targetKind:string; anchor:string|null }>;
+export type OptionResolvedRelation = Readonly<{ targetId:string; targetRevisionId:string; targetSourceId:string; relationKind:"parent"|"feature"|"cross_link"|"trait_override"; targetKind:string; sourceAnchor:string; anchor:string|null }>;
 type Common = Readonly<{ id: string; revisionId: string; title: string; aliases: readonly string[]; summary: string; edition: string; language: string; source: Readonly<{ id: string; title: string; code: string | null; revision: string | null }> }>;
 export type ClassListEntry = Common & ClassProjection;
 export type SpeciesListEntry = Common & SpeciesProjection;
@@ -62,7 +62,8 @@ function boundarySql(type: OptionType, user: RetrievalUser, selection: OptionVer
   ), option_versions AS MATERIALIZED (SELECT * FROM accessible_entries n JOIN LATERAL (SELECT n.attributes) fields ON true WHERE ${typePredicate}),
   selected_options AS MATERIALIZED (SELECT option_version.*,
     (SELECT jsonb_agg(jsonb_build_object('targetId',target.entry_id,'targetRevisionId',target.revision_id,
-      'targetSourceId',target.source_id,'relationKind',relation.relation_kind,'targetKind',relation.target_kind,'anchor',relation.anchor)
+      'targetSourceId',target.source_id,'relationKind',relation.relation_kind,'targetKind',relation.target_kind,
+      'sourceAnchor',relation.source_anchor,'anchor',relation.anchor)
       ORDER BY relation.relation_kind,relation.position)
      FROM nfs_index_option_relations relation JOIN accessible_entries target
        ON target.repository_id=relation.repository_id AND target.entry_id=relation.target_entry_id
@@ -102,7 +103,7 @@ function mapDetail(type: OptionType, row: Row): OptionDetail {
   }) : [];
   return { ...base, body: String(row.plain_text), citations, accessibleCrossLinks: base.crossLinks, relations, sourceVersions: sourceVersions(row.source_versions) };
 }
-function resolvedRelations(value:unknown):OptionResolvedRelation[]{return Array.isArray(value)?value.flatMap((item)=>record(item)&&typeof item.targetId==="string"&&typeof item.targetRevisionId==="string"&&typeof item.targetSourceId==="string"&&["parent","feature","cross_link"].includes(String(item.relationKind))?[{targetId:item.targetId,targetRevisionId:item.targetRevisionId,targetSourceId:item.targetSourceId,relationKind:String(item.relationKind) as OptionResolvedRelation["relationKind"],targetKind:typeof item.targetKind==="string"?item.targetKind:"other",anchor:typeof item.anchor==="string"?item.anchor:null}]:[]):[];}
+function resolvedRelations(value:unknown):OptionResolvedRelation[]{return Array.isArray(value)?value.flatMap((item)=>record(item)&&typeof item.targetId==="string"&&typeof item.targetRevisionId==="string"&&typeof item.targetSourceId==="string"&&["parent","feature","cross_link","trait_override"].includes(String(item.relationKind))?[{targetId:item.targetId,targetRevisionId:item.targetRevisionId,targetSourceId:item.targetSourceId,relationKind:String(item.relationKind) as OptionResolvedRelation["relationKind"],targetKind:typeof item.targetKind==="string"?item.targetKind:"other",sourceAnchor:typeof item.sourceAnchor==="string"?item.sourceAnchor:"",anchor:typeof item.anchor==="string"?item.anchor:null}]:[]):[];}
 function sourceVersions(value: unknown): OptionDetail["sourceVersions"] { return Array.isArray(value) ? value.flatMap((item) => record(item) && typeof item.sourceId === "string" && typeof item.title === "string" && typeof item.revisionId === "string" ? [{ sourceId:item.sourceId,title:item.title,code:typeof item.code==="string"?item.code:null,revision:typeof item.revision==="string"?item.revision:null,revisionId:item.revisionId }] : []) : []; }
 function strings(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }
 function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

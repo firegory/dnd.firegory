@@ -29,6 +29,7 @@ test("representative hierarchy validates completeness, overrides, and reserved a
   assert.throws(()=>validateClassProjection({...COMPLETE_CLASS,features:[{...COMPLETE_CLASS.features[0],anchor:"progression"}]}),/reserved page anchor/);
   assert.throws(()=>validateClassProjection({...COMPLETE_CLASS,features:[{...COMPLETE_CLASS.features[0],anchor:"level-20"}]}),/reserved page anchor/);
   assert.throws(()=>validateSpeciesProjection({...REPRESENTATIVE_VARIANT,traits:[{...REPRESENTATIVE_VARIANT.traits[0],anchor:"section-rules"}]}),/reserved page anchor/);
+  assert.throws(()=>validateSpeciesProjection({...REPRESENTATIVE_VARIANT,traits:[{...REPRESENTATIVE_VARIANT.traits[0],anchor:"citation-forged"}]}),/reserved page anchor/);
 });
 
 test("PDF parser only classifies a complete cited 1-20 class as publishable",()=>{
@@ -57,11 +58,15 @@ test("NFS projection requires exact relation targets and validates graph and inh
   const fighter=projections.find((entry)=>entry.entryId==="class-17")!;
   assert.deepEqual(fighter.relations.map((relation)=>[relation.relationKind,relation.targetEntryId]),[["feature","feature-second-wind"],["feature","feature-action-surge"],["cross_link","species-1"]]);
   assert.equal(fighter.relations.every((relation)=>relation.sourceId===relation.targetSourceId&&relation.edition==="5.5e"&&relation.language==="en"&&relation.targetLifecycle==="active"),true);
+  const override=projections.find((entry)=>entry.entryId==="species-2")!.relations.find((relation)=>relation.relationKind==="trait_override")!;
+  assert.deepEqual({target:override.targetEntryId,sourceAnchor:override.sourceAnchor,anchor:override.anchor},{target:"species-1",sourceAnchor:"fleet",anchor:"resourceful"});
 
   assert.throws(()=>projectAll("missing-target",source,revisions.filter((revision)=>revision.entryId!=="species-1")),/exact (?:target|source snapshot)/);
   assert.throws(()=>projectAll("cycle",source,replaceProjection(revisions,"class-17",{...COMPLETE_CLASS,kind:"subclass",parentClassIds:["class-133"]})),/cycle/i);
   assert.throws(()=>projectAll("bad-kind",source,replaceProjection(revisions,"class-133",{...REPRESENTATIVE_SUBCLASS,parentClassIds:["species-1"] as never})),/wrong kind|invalid canonical ID/i);
   assert.throws(()=>projectAll("bad-override",source,replaceProjection(revisions,"species-2",{...REPRESENTATIVE_VARIANT,traits:[{...REPRESENTATIVE_VARIANT.traits[0],overrides:"missing-trait"}]})),/does not resolve/);
+  const derivedParent=[...revisions,duplicateProjection(revisions,"class-17","class-18",{...REPRESENTATIVE_SUBCLASS,parentClassIds:["class-17"]})];
+  assert.throws(()=>projectAll("derived-parent",source,replaceProjection(derivedParent,"class-133",{...REPRESENTATIVE_SUBCLASS,parentClassIds:["class-18"]})),/direct base option/);
 });
 
 test("same canonical IDs in two sources keep exact NFS relations and reader navigation isolated",async()=>{
@@ -85,7 +90,8 @@ test("same canonical IDs in two sources keep exact NFS relations and reader navi
 test("hierarchy UI retains exact-version links, responsive print tables, and deep anchors",async()=>{
   const [detail,css,list,editor]=await Promise.all([readFile("src/components/compendium/option-detail.tsx","utf8"),readFile("src/app/globals.css","utf8"),readFile("src/components/compendium/option-list.tsx","utf8"),readFile("src/app/admin/compendium/entries/editor-client.tsx","utf8")]);
   assert.match(list,/Классы и подклассы.*Classes and subclasses/s);assert.match(detail,/targetSourceId/);assert.match(detail,/targetRevisionId/);
-  assert.match(detail,/id={`level-\$\{row\.level\}`}/);assert.match(detail,/id={feature\.anchor}/);assert.match(detail,/overrides/);
+  assert.match(detail,/id={`level-\$\{row\.level\}`}/);assert.match(detail,/id={feature\.anchor}/);assert.match(detail,/relationKind==="trait_override"/);
+  assert.match(detail,/targetRevisionId/);assert.match(detail,/#\$\{resolved\.anchor\}/);
   assert.match(css,/@media print[\s\S]*\.progression-table thead[\s\S]*table-header-group/);assert.match(css,/@media \(max-width: 39\.999rem\)[\s\S]*\.option-filters,[\s\S]*grid-template-columns: 1fr/);assert.match(editor,/Progression levels 1-20 \(JSON\)/);
 });
 
@@ -98,6 +104,7 @@ function featureRevision(contentSource:ContentSource,key:string,title:string){co
 function projectAll(repositoryId:string,contentSource:ContentSource,revisions:ReturnType<typeof canonicalHierarchy>){return projectCanonicalRevisions(repositoryId,revisions,[{sourceId:contentSource.sourceId,fileId,path:contentSource.files[0].path,mediaType:contentSource.files[0].mediaType,contentHash:contentSource.files[0].contentHash,byteSize:4096}]);}
 
 function replaceProjection(revisions:ReturnType<typeof canonicalHierarchy>,entryId:string,projection:unknown){return revisions.map((revision)=>{if(revision.entryId!==entryId)return revision;const {revisionId:currentRevisionId,contentHash,...input}=revision;void currentRevisionId;void contentHash;return createCanonicalRevision({...input,entry:{...revision.entry,typedFields:Object.entries(projection as Record<string,unknown>).map(([key,value])=>typedField(key,value)).filter(Boolean)}} as never);});}
+function duplicateProjection(revisions:ReturnType<typeof canonicalHierarchy>,templateId:string,entryId:string,projection:unknown){const revision=revisions.find((item)=>item.entryId===templateId)!;const {revisionId:currentRevisionId,contentHash,...input}=revision;void currentRevisionId;void contentHash;return createCanonicalRevision({...input,entryId,entry:{...revision.entry,name:entryId,typedFields:Object.entries(projection as Record<string,unknown>).map(([key,value])=>typedField(key,value)).filter(Boolean)}} as never);}
 function typedField(key:string,value:unknown){if(value===null)return null;const stable=key.replace(/([a-z0-9])([A-Z])/g,"$1-$2").toLowerCase();const encoded=["progressionColumns","progressionRows","features","traits"].includes(key)&&Array.isArray(value)?value.map((item)=>JSON.stringify(item)):value;return{key:stable,label:key,type:Array.isArray(encoded)?"stringList":typeof encoded==="number"?"number":typeof encoded==="boolean"?"boolean":"string",value:encoded};}
 
-function readerRow(repositoryId:string,entry:IndexedEntryProjection,contentSource:ContentSource){const synced=nfsIndexEntryRow(repositoryId,entry);return{...synced,mime_type:contentSource.files[0].mediaType,source_title:contentSource.title,edition:contentSource.edition,language:contentSource.language,publication_code:contentSource.publication.code,publication_revision:contentSource.publication.revision,source_priority:contentSource.publication.sourcePriority,source_versions:[{sourceId:synced.source_id,title:contentSource.title,code:contentSource.publication.code,revision:contentSource.publication.revision,revisionId:synced.revision_id}],relations:entry.relations.map((relation)=>({targetId:relation.targetEntryId,targetRevisionId:relation.targetRevisionId,targetSourceId:relation.targetSourceId,relationKind:relation.relationKind,targetKind:relation.targetKind,anchor:relation.anchor}))};}
+function readerRow(repositoryId:string,entry:IndexedEntryProjection,contentSource:ContentSource){const synced=nfsIndexEntryRow(repositoryId,entry);return{...synced,mime_type:contentSource.files[0].mediaType,source_title:contentSource.title,edition:contentSource.edition,language:contentSource.language,publication_code:contentSource.publication.code,publication_revision:contentSource.publication.revision,source_priority:contentSource.publication.sourcePriority,source_versions:[{sourceId:synced.source_id,title:contentSource.title,code:contentSource.publication.code,revision:contentSource.publication.revision,revisionId:synced.revision_id}],relations:entry.relations.map((relation)=>({targetId:relation.targetEntryId,targetRevisionId:relation.targetRevisionId,targetSourceId:relation.targetSourceId,relationKind:relation.relationKind,targetKind:relation.targetKind,sourceAnchor:relation.sourceAnchor,anchor:relation.anchor}))};}

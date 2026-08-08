@@ -7,6 +7,7 @@ import type { CanonicalRevision } from "../../src/server/content-storage/reposit
 import { assertCanonicalRevision, loadResolvedCanonicalRevisions } from "../../src/server/content-storage/validation.ts";
 import {
   buildSyncPlan,
+  expandAffectedSourceClosure,
   claimContentIndexRun,
   heartbeatContentIndexRun,
   reconcileManagedProjectionRows,
@@ -44,6 +45,19 @@ test("canonical projection deterministically rebuilds entries, pages, and chunks
   assert.equal(first[0].chunks[1].pageNumber, null);
   assert.equal("embedding" in first[0].chunks[0], false);
   assert.equal(first[0].chunks.map((chunk) => chunk.text).join(""), first[0].plainText);
+});
+
+test("affected source closure follows incoming exact-version relations", () => {
+  const relation = (sourceEntryId: string, targetEntryId: string) => ({ sourceEntryId, targetEntryId }) as never;
+  const affected = expandAffectedSourceClosure(new Set(["target"]), [
+    { entryId: "target", fileUuid: "target-file", relations: [] },
+    { entryId: "target-file-peer", fileUuid: "target-file", relations: [] },
+    { entryId: "cross-file-source", fileUuid: "source-file", relations: [relation("cross-file-source", "target")] },
+    { entryId: "source-file-peer", fileUuid: "source-file", relations: [] },
+    { entryId: "incoming-source", fileUuid: "incoming-file", relations: [relation("incoming-source", "cross-file-source")] },
+    { entryId: "unrelated", fileUuid: "unrelated-file", relations: [] },
+  ] as never);
+  assert.deepEqual([...affected], ["target", "target-file-peer", "cross-file-source", "source-file-peer", "incoming-source"]);
 });
 
 test("projection and manifest identities are stable and content-derived", async () => {
