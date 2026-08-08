@@ -58,17 +58,40 @@ export async function isolatedDatabase(label: string): Promise<IsolatedDatabase>
   }
   const url = databaseUrlForDatabase(baseUrl, databaseName);
   const pool = new Pool({ connectionString: url, max: 4 });
+  let cleanupPromise: Promise<void> | undefined;
   return {
     databaseName,
     url,
     pool,
     async cleanup() {
-      await pool.end();
-      await admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()", [databaseName]);
-      await admin.query(`DROP DATABASE IF EXISTS ${databaseName}`);
-      await admin.end();
+      cleanupPromise ??= closeIsolatedDatabase(pool, admin, databaseName);
+      await cleanupPromise;
     },
   };
+}
+
+async function closeIsolatedDatabase(pool: Pool, admin: Client, databaseName: string): Promise<void> {
+  const errors: unknown[] = [];
+  try {
+    // Pool.end waits for checked-out clients and closes every owned socket.
+    await pool.end();
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length === 0) {
+    try {
+      await admin.query(`DROP DATABASE IF EXISTS ${databaseName}`);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  try {
+    await admin.end();
+  } catch (error) {
+    errors.push(error);
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, `Failed to close isolated QA database ${databaseName}.`);
 }
 
 export function databaseUrlForDatabase(baseUrl: string, databaseName: string): string {

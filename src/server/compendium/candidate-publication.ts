@@ -18,7 +18,7 @@ import type { CompendiumEntryType } from "./service.ts";
 import { validateSpellProjection } from "./spell-schema.ts";
 import { hierarchyTypedValue } from "./hierarchy-schema.ts";
 import { validateClassProjection, validateSpeciesProjection } from "./hierarchy-schema.ts";
-import type { SnapshotHierarchyCandidate } from "./next-dnd/hierarchy-import.ts";
+import type { SnapshotFeatureCandidate, SnapshotHierarchyCandidate } from "./next-dnd/hierarchy-import.ts";
 import { canonicalEntryId, collectorCandidateKey, CompendiumIdentityError } from "./identity.ts";
 import { validateCreatureProjection } from "./creature-schema.ts";
 import { canonicalFlatAttributes, validateFlatProjection, type FlatEntryType } from "./flat-schema.ts";
@@ -117,6 +117,15 @@ export function classifyCandidatePublication(value: unknown, context: CandidateC
     } catch (error) {
       return { payloadOrigin: "collector_snapshot", publicationCapability: "requires_extraction",
         publicationBlockReason: `Collector hierarchy requires review repair: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+  if (isSnapshotFeatureCandidate(value)) {
+    try {
+      validateSnapshotFeatureCandidate(value, context.candidateKey, context.entryType, context.snapshotEvidence ?? null);
+      return { payloadOrigin: "collector_snapshot", publicationCapability: "publishable", publicationBlockReason: null };
+    } catch (error) {
+      return { payloadOrigin: "collector_snapshot", publicationCapability: "requires_extraction",
+        publicationBlockReason: `Collector feature requires review repair: ${error instanceof Error ? error.message : String(error)}` };
     }
   }
   if (isSnapshotCreatureCandidate(value)) {
@@ -278,6 +287,29 @@ export function projectSnapshotHierarchyCandidate(value: unknown, context: Reado
         metadataEvidenceText: context.evidence.metadataEvidenceText } },
     entry: { entryType: context.entryType === "class" ? "classFeature" : "other", name: candidate.title, aliases: candidate.aliases, typedFields: fields },
     text: { plain: candidate.body, sections: [{ sectionId: `${context.entryType}-rules`, heading: candidate.title, text: candidate.body, startOffset: 0, endOffset: candidate.body.length }] },
+    citations: candidate.citations.map((citation, index) => ({ citationId: `collector-${index + 1}`, sourceId: context.source.sourceId,
+      fileId: context.fileId, page: null, section: candidate.title, quote: citation.quote, startOffset: null, endOffset: null,
+      fieldPath: citation.fieldPath, sourceUrl: citation.sourceUrl })),
+  });
+  assertCanonicalRevision(revision); return revision;
+}
+
+export function projectSnapshotFeatureCandidate(value: unknown, context: Readonly<{
+  candidateKey: string; createdAt: string; source: ContentSource; fileId: string; evidence: SnapshotSpellEvidence;
+}>): CanonicalRevision {
+  const candidate = validateSnapshotFeatureCandidate(value, context.candidateKey, "feature", context.evidence);
+  const sourceFile = context.source.files.find((file) => file.fileId === context.fileId);
+  if (!sourceFile || sourceFile.contentHash !== `sha256:${context.evidence.fileChecksumSha256}`) throw new CandidateProjectionError("Collector feature file evidence changed across review.");
+  const revision = createCanonicalRevision({ schemaVersion: 1, kind: "canonicalRevision", entryId: candidate.canonicalId,
+    createdAt: context.createdAt, source: context.source,
+    sourceVersion: { url: context.evidence.sourceUrl, fingerprintSha256: context.evidence.fingerprintSha256, rawBlobPath: context.evidence.rawBlobPath,
+      fetchedAt: context.evidence.fetchedAt, fileChecksumSha256: context.evidence.fileChecksumSha256,
+      index: { url: context.evidence.indexUrl, fingerprintSha256: context.evidence.indexFingerprintSha256, rawBlobPath: context.evidence.rawIndexBlobPath,
+        fetchedAt: context.evidence.indexFetchedAt, cardFingerprintSha256: context.evidence.indexCardFingerprintSha256,
+        metadataEvidenceText: context.evidence.metadataEvidenceText } },
+    entry: { entryType: "classFeature", name: candidate.title, aliases: candidate.aliases,
+      typedFields: Object.entries(candidate.attributes).map(([key, fieldValue]) => typedField(key, fieldValue)) },
+    text: { plain: candidate.body, sections: [{ sectionId: "class-feature-rules", heading: candidate.title, text: candidate.body, startOffset: 0, endOffset: candidate.body.length }] },
     citations: candidate.citations.map((citation, index) => ({ citationId: `collector-${index + 1}`, sourceId: context.source.sourceId,
       fileId: context.fileId, page: null, section: candidate.title, quote: citation.quote, startOffset: null, endOffset: null,
       fieldPath: citation.fieldPath, sourceUrl: citation.sourceUrl })),
@@ -506,7 +538,7 @@ function validateSnapshotCreatureCandidate(value: unknown, candidateKey: string,
       || !Array.isArray(value.aliases) || value.aliases.some((alias) => typeof alias !== "string" || !alias.trim())) throw new CandidateProjectionError("Collector creature title, aliases, or body are invalid.");
   if (typeof value.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.sha256) || typeof value.sourceUrl !== "string" || !/^https:\/\/next\.dnd\.su\//.test(value.sourceUrl)
       || !isRecord(value.sourceVersion) || value.sourceVersion.url !== value.sourceUrl || value.sourceVersion.sha256 !== value.sha256
-      || value.sourceVersion.rawBlobPath !== `blobs/${value.sha256}.html` || typeof value.sourceVersion.fetchedAt !== "string") throw new CandidateProjectionError("Collector creature source version is invalid.");
+      || !validSnapshotBlobPath(String(value.sourceVersion.rawBlobPath), value.sha256) || typeof value.sourceVersion.fetchedAt !== "string") throw new CandidateProjectionError("Collector creature source version is invalid.");
   if (!evidence || value.sourceUrl !== evidence.sourceUrl || value.sha256 !== evidence.fingerprintSha256
       || value.sourceVersion.rawBlobPath !== evidence.rawBlobPath || value.sourceVersion.fetchedAt !== evidence.fetchedAt
       || value.parserVersion !== NEXT_DND_PARSER_VERSION || !isRecord(value.sourceVersion.index)
@@ -586,6 +618,42 @@ function isSnapshotHierarchyCandidate(value: unknown): value is Record<string, u
   return isRecord(value) && value.kind === "snapshotHierarchyCandidate" && value.schemaVersion === 1;
 }
 
+function isSnapshotFeatureCandidate(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && value.kind === "snapshotFeatureCandidate" && value.schemaVersion === 1;
+}
+
+function validateSnapshotFeatureCandidate(value: unknown, candidateKey: string, entryType: string | null, evidence: SnapshotSpellEvidence | null): SnapshotFeatureCandidate {
+  if (!isSnapshotFeatureCandidate(value) || entryType !== "feature" || value.entryType !== "feature") throw new CandidateProjectionError("Collector candidate is not a typed class feature.");
+  if (!hasExactKeys(value, ["aliases", "attributes", "body", "canonicalId", "citations", "classCandidateKey", "entryType", "externalId", "extraction", "kind", "parserVersion", "schemaVersion", "sha256", "sourceUrl", "sourceVersion", "title"])) throw new CandidateProjectionError("Collector feature shape is unsupported.");
+  if (typeof value.externalId !== "string" || candidateKey !== value.externalId || value.canonicalId !== `feature-${value.externalId}`
+      || typeof value.classCandidateKey !== "string" || !/^class-[a-z0-9-]+$/.test(value.classCandidateKey)) throw new CandidateProjectionError("Collector feature identity does not match its review row.");
+  if (!evidence || value.sourceUrl !== evidence.sourceUrl || value.sha256 !== evidence.fingerprintSha256 || value.parserVersion !== NEXT_DND_PARSER_VERSION
+      || !isRecord(value.sourceVersion) || value.sourceVersion.url !== evidence.sourceUrl || value.sourceVersion.sha256 !== evidence.fingerprintSha256
+      || value.sourceVersion.rawBlobPath !== evidence.rawBlobPath || value.sourceVersion.fetchedAt !== evidence.fetchedAt || !isRecord(value.sourceVersion.index)
+      || value.sourceVersion.index.url !== evidence.indexUrl || value.sourceVersion.index.sha256 !== evidence.indexFingerprintSha256
+      || value.sourceVersion.index.rawBlobPath !== evidence.rawIndexBlobPath || value.sourceVersion.index.fetchedAt !== evidence.indexFetchedAt
+      || value.sourceVersion.index.metadataEvidenceText !== evidence.metadataEvidenceText || value.sourceVersion.index.cardFingerprintSha256 !== evidence.indexCardFingerprintSha256) throw new CandidateProjectionError("Collector feature provenance does not match persisted occurrence evidence.");
+  if (typeof value.title !== "string" || !value.title.trim() || typeof value.body !== "string" || !value.body.trim() || !Array.isArray(value.aliases)) throw new CandidateProjectionError("Collector feature text is incomplete.");
+  if (!isRecord(value.attributes)) throw new CandidateProjectionError("Collector feature attributes are invalid.");
+  const attributes = value.attributes;
+  if (!Number.isInteger(attributes.level) || Number(attributes.level) < 1 || attributes.featureKind !== "class"
+      || typeof attributes.anchor !== "string" || !attributes.anchor.trim()) throw new CandidateProjectionError("Collector feature attributes are invalid.");
+  const featureLine = evidence.metadataEvidenceText.split("\n").find((line) => line.startsWith("features="));
+  let features: unknown = null; try { features = featureLine ? JSON.parse(featureLine.slice(9)) : null; } catch { /* handled below */ }
+  const exactFeature = Array.isArray(features) && features.some((feature) => isRecord(feature) && feature.canonicalId === value.canonicalId
+    && feature.title === value.title && feature.body === value.body && feature.level === attributes.level && feature.anchor === attributes.anchor);
+  if (!exactFeature) throw new CandidateProjectionError("Collector feature does not match immutable class feature metadata.");
+  const expected = new Map<string, string>([["$.title", value.title], ["$.body", value.body],
+    ...Object.entries(attributes).map(([key, fieldValue]) => [`$.attributes.${key}`, JSON.stringify(fieldValue)] as [string, string])]);
+  if (!Array.isArray(value.citations) || value.citations.length !== expected.size) throw new CandidateProjectionError("Collector feature citations are not exact immutable evidence.");
+  for (const citation of value.citations) {
+    if (!isRecord(citation) || citation.sourceUrl !== evidence.indexUrl || typeof citation.fieldPath !== "string" || citation.quote !== expected.get(citation.fieldPath)) throw new CandidateProjectionError("Collector feature citations are not exact immutable evidence.");
+    expected.delete(citation.fieldPath);
+  }
+  if (expected.size) throw new CandidateProjectionError("Collector feature citations are incomplete.");
+  return value as unknown as SnapshotFeatureCandidate;
+}
+
 function validateSnapshotHierarchyCandidate(value: unknown, candidateKey: string, entryType: string | null, evidence: SnapshotSpellEvidence | null): SnapshotHierarchyCandidate {
   if (!isSnapshotHierarchyCandidate(value) || (entryType !== "class" && entryType !== "species") || value.entryType !== entryType) throw new CandidateProjectionError("Collector candidate is not a typed class or species hierarchy.");
   if (typeof value.externalId !== "string" || candidateKey !== collectorCandidateKey(entryType, entryType, value.externalId)) throw new CandidateProjectionError("Collector hierarchy identity does not match its review row.");
@@ -628,7 +696,7 @@ function validateSnapshotSpellCandidate(value: unknown, candidateKey: string, en
     throw new CandidateProjectionError("Collector spell source identity is invalid.");
   }
   if (!isRecord(value.sourceVersion) || value.sourceVersion.url !== value.sourceUrl || value.sourceVersion.sha256 !== value.sha256
-      || value.sourceVersion.rawBlobPath !== `blobs/${value.sha256}.html`
+      || !validSnapshotBlobPath(String(value.sourceVersion.rawBlobPath), value.sha256)
       || typeof value.sourceVersion.fetchedAt !== "string" || !Number.isFinite(Date.parse(value.sourceVersion.fetchedAt))) {
     throw new CandidateProjectionError("Collector spell source version is invalid.");
   }
@@ -653,7 +721,7 @@ function validateSnapshotSpellCandidate(value: unknown, candidateKey: string, en
       || value.sourceVersion.index.fetchedAt !== evidence.indexFetchedAt
       || value.sourceVersion.index.cardFingerprintSha256 !== evidence.indexCardFingerprintSha256
       || value.sourceVersion.index.metadataEvidenceText !== evidence.metadataEvidenceText
-      || value.sourceVersion.index.rawBlobPath !== `blobs/${value.sourceVersion.index.sha256}.html`) {
+      || !validSnapshotBlobPath(String(value.sourceVersion.index.rawBlobPath), String(value.sourceVersion.index.sha256))) {
     throw new CandidateProjectionError("Collector spell index card evidence does not match its persisted occurrence envelope.");
   }
   const metadata = parseSpellMetadataEvidence(evidence.metadataEvidenceText);
@@ -784,6 +852,10 @@ function evidenceKey(fieldPath: string): string {
 
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   return Object.keys(value).sort().join(",") === [...expected].sort().join(",");
+}
+
+function validSnapshotBlobPath(path: string, hash: unknown): boolean {
+  return typeof hash === "string" && path === `blobs/${hash}.html`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

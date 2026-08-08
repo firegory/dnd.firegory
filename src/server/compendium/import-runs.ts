@@ -23,6 +23,7 @@ type RunRow = Readonly<{
   status: ImportRunStatus;
   checkpoint: "created" | "occurrences" | "diffed" | "completed";
   lease_token: string | null;
+  allowed_review_entry_types: ImportCandidateEntryType[] | null;
 }>;
 
 export type ImportRun = Readonly<{
@@ -35,6 +36,7 @@ export type ImportRun = Readonly<{
 }>;
 
 export type CreateImportRunInput = Readonly<{
+  id?: string;
   sourceId: string;
   fileId: string;
   generationId?: string | null;
@@ -45,6 +47,7 @@ export type CreateImportRunInput = Readonly<{
   promptVersion: string;
   modelVersion: string;
   inputSha256: string;
+  allowedReviewEntryTypes?: readonly ImportCandidateEntryType[] | null;
   actor: string;
 }>;
 
@@ -168,33 +171,35 @@ export class CompendiumImportRunService {
         if (!job) throw new CompendiumValidationError("The ingestion job is outside the requested source boundary.");
       }
 
+      const allowedReviewEntryTypes = input.allowedReviewEntryTypes ? [...input.allowedReviewEntryTypes] : null;
       const values = [
         input.sourceId, input.fileId, input.generationId ?? null, normalizedJobId,
         input.importer.trim(), input.importerVersion.trim(), input.parserVersion.trim(),
-        input.promptVersion.trim(), input.modelVersion.trim(), input.inputSha256, input.actor.trim(),
+        input.promptVersion.trim(), input.modelVersion.trim(), input.inputSha256, input.id ?? null, allowedReviewEntryTypes,
       ];
       const inserted = await client.query<RunRow>(
         `INSERT INTO compendium_import_runs
-           (source_id, file_id, generation_id, ingestion_job_id, importer, importer_version,
-            parser_version, prompt_version, model_version, input_sha256)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           (id, source_id, file_id, generation_id, ingestion_job_id, importer, importer_version,
+              parser_version, prompt_version, model_version, input_sha256, allowed_review_entry_types)
+          VALUES (coalesce($11::uuid, gen_random_uuid()),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$12::text[])
          ON CONFLICT DO NOTHING
-         RETURNING id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token`,
-        values.slice(0, 10),
+         RETURNING id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token, allowed_review_entry_types`,
+        values,
       );
       let row = inserted.rows[0];
       if (!row) {
         row = (await client.query<RunRow>(
-          `SELECT id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token
+          `SELECT id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token, allowed_review_entry_types
            FROM compendium_import_runs
-           WHERE source_id = $1 AND file_id = $2 AND generation_id IS NOT DISTINCT FROM $3
-             AND ($3::uuid IS NOT NULL OR ingestion_job_id IS NOT DISTINCT FROM $4)
-             AND importer = $5 AND importer_version = $6 AND parser_version = $7
-             AND prompt_version = $8 AND model_version = $9 AND input_sha256 = $10`,
+            WHERE source_id = $1 AND file_id = $2 AND generation_id IS NOT DISTINCT FROM $3
+              AND ($3::uuid IS NOT NULL OR ingestion_job_id IS NOT DISTINCT FROM $4)
+              AND importer = $5 AND importer_version = $6 AND parser_version = $7
+              AND prompt_version = $8 AND model_version = $9 AND input_sha256 = $10`,
           values.slice(0, 10),
         )).rows[0];
       }
       if (!row) throw new CompendiumValidationError("The file, generation, or ingestion job is outside the requested source boundary.");
+      if (!sameReviewScope(row.allowed_review_entry_types ?? null, allowedReviewEntryTypes)) throw new CompendiumValidationError("The existing import run has a different allowed review entry-type scope.");
       if (inserted.rows[0]) {
         await client.query(
           `INSERT INTO compendium_import_audit (import_run_id, event_type, to_status, actor, details)
@@ -218,7 +223,7 @@ export class CompendiumImportRunService {
     }
     return this.transaction(async (client) => {
       const current = requiredRow((await client.query<RunRow & { lease_active: boolean }>(
-        `SELECT id, source_id, file_id, generation_id, status, checkpoint, lease_token,
+        `SELECT id, source_id, file_id, generation_id, status, checkpoint, lease_token, allowed_review_entry_types,
                 coalesce(lease_expires_at > now(), false) AS lease_active
          FROM compendium_import_runs WHERE id = $1 FOR UPDATE`,
         [runId],
@@ -233,7 +238,7 @@ export class CompendiumImportRunService {
              lease_token = gen_random_uuid(), lease_expires_at = now() + $2 * interval '1 millisecond',
              heartbeat_at = now()
          WHERE id = $1
-         RETURNING id, source_id, file_id, generation_id, status, checkpoint, lease_token`,
+         RETURNING id, source_id, file_id, generation_id, status, checkpoint, lease_token, allowed_review_entry_types`,
         [runId, leaseMilliseconds],
       )).rows[0], "Unable to claim import run.");
       await client.query(
@@ -549,7 +554,7 @@ export class CompendiumImportRunService {
 
 async function lockLeasedRun(client: DbClient, runId: string, leaseToken: string): Promise<RunRow> {
   const row = (await client.query<RunRow & { lease_active: boolean }>(
-    `SELECT id, source_id, file_id, generation_id, status, checkpoint, lease_token,
+    `SELECT id, source_id, file_id, generation_id, status, checkpoint, lease_token, allowed_review_entry_types,
             lease_expires_at > now() AS lease_active
      FROM compendium_import_runs WHERE id = $1 FOR UPDATE`,
     [runId],
@@ -619,11 +624,23 @@ async function audit(client: DbClient, runId: string, event: string, actor: stri
 }
 
 function validateRunInput(input: CreateImportRunInput): void {
+  if (input.id != null) requireUuid(input.id, "id");
   requireUuid(input.sourceId, "sourceId"); requireUuid(input.fileId, "fileId");
   if (input.generationId != null) requireUuid(input.generationId, "generationId");
   if (input.ingestionJobId != null) requireUuid(input.ingestionJobId, "ingestionJobId");
   for (const [field, value] of [["importer", input.importer], ["importerVersion", input.importerVersion], ["parserVersion", input.parserVersion], ["promptVersion", input.promptVersion], ["modelVersion", input.modelVersion], ["actor", input.actor]] as const) requireText(value, field);
   requireHash(input.inputSha256, "inputSha256");
+  if (input.allowedReviewEntryTypes !== undefined && input.allowedReviewEntryTypes !== null) {
+    if (!Array.isArray(input.allowedReviewEntryTypes) || input.allowedReviewEntryTypes.length === 0
+      || new Set(input.allowedReviewEntryTypes).size !== input.allowedReviewEntryTypes.length
+      || input.allowedReviewEntryTypes.some((entryType) => !IMPORT_CANDIDATE_ENTRY_TYPES.includes(entryType))) {
+      throw new CompendiumValidationError("allowedReviewEntryTypes must contain unique supported candidate entry types.");
+    }
+  }
+  const hasReviewScope = input.allowedReviewEntryTypes !== undefined && input.allowedReviewEntryTypes !== null;
+  if ((input.importer.trim() === "approved-2024-corpus-seed") !== hasReviewScope) {
+    throw new CompendiumValidationError("Only approved corpus seed runs require an explicit allowed review entry-type scope.");
+  }
 }
 
 function validateLeaseArguments(runId: string, leaseToken: string, actor: string): void {
@@ -632,6 +649,10 @@ function validateLeaseArguments(runId: string, leaseToken: string, actor: string
 
 function runFromRow(row: RunRow): ImportRun {
   return { id: row.id, sourceId: row.source_id, fileId: row.file_id, generationId: row.generation_id, status: row.status, checkpoint: row.checkpoint };
+}
+
+function sameReviewScope(left: readonly ImportCandidateEntryType[] | null, right: readonly ImportCandidateEntryType[] | null): boolean {
+  return left === null ? right === null : right !== null && left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function canonicalJson(value: unknown): string {
@@ -786,7 +807,7 @@ function validateRawOccurrenceEvidence(input: ImportOccurrenceInput): void {
   const path = input.rawBlobPath ?? null;
   const fetchedAt = input.sourceFetchedAt ?? null;
   if ((path === null) !== (fetchedAt === null)) throw new CompendiumValidationError("rawBlobPath and sourceFetchedAt must be supplied together.");
-  if (path !== null && path !== `blobs/${input.fingerprintSha256}.html`) throw new CompendiumValidationError("rawBlobPath must match the occurrence fingerprint.");
+  if (path !== null && !validRawEvidencePath(path, input.fingerprintSha256)) throw new CompendiumValidationError("rawBlobPath must match the occurrence fingerprint in cache or canonical evidence.");
   if (fetchedAt !== null && (!Number.isFinite(Date.parse(fetchedAt)) || new Date(fetchedAt).toISOString() !== fetchedAt)) {
     throw new CompendiumValidationError("sourceFetchedAt must be a canonical date-time.");
   }
@@ -800,7 +821,7 @@ function validateRawOccurrenceEvidence(input: ImportOccurrenceInput): void {
     requireHash(input.indexCardFingerprintSha256!, "indexCardFingerprintSha256");
     requireText(input.indexLocator!, "indexLocator");
     requireText(input.metadataEvidenceText!, "metadataEvidenceText");
-    if (input.rawIndexBlobPath !== `blobs/${input.indexFingerprintSha256}.html`) {
+    if (!validRawEvidencePath(input.rawIndexBlobPath!, input.indexFingerprintSha256)) {
       throw new CompendiumValidationError("rawIndexBlobPath must match the index fingerprint.");
     }
     if (!Number.isFinite(Date.parse(input.indexSourceFetchedAt!)) || new Date(input.indexSourceFetchedAt!).toISOString() !== input.indexSourceFetchedAt) {
@@ -808,6 +829,7 @@ function validateRawOccurrenceEvidence(input: ImportOccurrenceInput): void {
     }
   }
 }
+function validRawEvidencePath(path: string, hash: string): boolean { return path === `blobs/${hash}.html`; }
 
 function sha256Json(value: unknown): string { return createHash("sha256").update(canonicalJson(value)).digest("hex"); }
 function candidateIdentity(type: ImportCandidateEntryType, key: string): string { return `${type}:${key}`; }

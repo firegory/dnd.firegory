@@ -19,7 +19,7 @@ export QA_DATABASE_URL='postgres://qa:qa@127.0.0.1:5432/dnd_qa'
 
 | Group | Command | Coverage |
 | --- | --- | --- |
-| Deterministic regression | `npm run qa:unit` | Existing Node tests, including auth, SQL construction, ingestion, UI models, routes, Compose, and publication helpers. No database or browser required. |
+| Deterministic regression | `npm run qa:unit` | Existing Node tests, including auth, SQL construction, ingestion, UI models, routes, Compose, publication helpers, and synthetic corpus-seed validation/idempotency/retry/atomic-manifest contracts. No database, provider, or browser required. |
 | Database | `npm run qa:db` | Fresh, pre-0014 data upgrade, and already-applied-0014 repair paths in separate PostgreSQL 16 databases; suffix/idempotent reruns and relational projection preservation; full source/corpus role matrix; transaction rollback, stale-lease retry, exact replay, and conflicting replay. |
 | NFS publication | `npm run qa:publication` | Real temporary filesystem publication, crash hooks, and a separate worker process killed with `SIGKILL` after activation-file fsync but before rename; atomic reader visibility, retry, stale writers, and idempotency. |
 | Browser | `npm run build && npm run qa:browser` | Production Next server, random hashed sessions, real PostgreSQL/NFS-index fixtures, actual filter controls, protected deep links, rendered PDF citation preview, mobile drawer navigation, print layout CSS, editor save/denial, and review transition/denial. |

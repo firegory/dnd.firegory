@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { classifyCandidatePublication, projectSnapshotHierarchyCandidate } from "../../src/server/compendium/candidate-publication.ts";
+import { classifyCandidatePublication, projectSnapshotFeatureCandidate, projectSnapshotHierarchyCandidate } from "../../src/server/compendium/candidate-publication.ts";
 import { parseDeterministicChunk } from "../../src/server/compendium/candidate-parsers.ts";
 import { EXTRACTION_PARSER_VERSION, EXTRACTION_PROMPT_VERSION } from "../../src/server/compendium/candidate-schema.ts";
 import { validateClassProjection, validateSpeciesProjection } from "../../src/server/compendium/hierarchy-schema.ts";
 import { canonicalEntryId, collectorCandidateKey } from "../../src/server/compendium/identity.ts";
 import { nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
+import { featureCandidates, hierarchyCandidate } from "../../src/server/compendium/next-dnd/hierarchy-import.ts";
 import { OptionReadService } from "../../src/server/compendium/option-read-service.ts";
 import { projectCanonicalRevisions, type IndexedEntryProjection } from "../../src/server/content-index/projection.ts";
 import { nfsIndexEntryRow } from "../../src/server/content-index/sync.ts";
@@ -51,6 +52,14 @@ test("collector and canonical IDs share external identity with parent references
   const variant=batch.candidates[3].content as {attributes:{parentSpeciesIds:string[]}};
   assert.deepEqual(subclass.attributes.parentClassIds,["class-17"]);
   assert.deepEqual(variant.attributes.parentSpeciesIds,["species-1"]);
+});
+
+test("derived class features remain publishable with exact class snapshot evidence",()=>{
+  const detail=hierarchyDetailsFixture()[0],hierarchy=hierarchyCandidate(detail),candidate=featureCandidates(detail)[0];
+  const evidence={sourceUrl:detail.sourceUrl,fingerprintSha256:detail.sha256,rawBlobPath:detail.blobPath,fetchedAt:detail.fetchedAt,fileChecksumSha256:"d".repeat(64),indexUrl:detail.indexSource.url,indexFingerprintSha256:detail.indexSource.fingerprintSha256,rawIndexBlobPath:detail.indexSource.rawBlobPath,indexFetchedAt:detail.indexSource.fetchedAt,indexCardFingerprintSha256:detail.indexSource.cardFingerprintSha256,metadataEvidenceText:hierarchy.sourceVersion.index.metadataEvidenceText};
+  assert.equal(classifyCandidatePublication(candidate,{candidateKey:candidate.externalId,entryType:"feature",sourceId,fileId,generationId:null,edition:"5.5e",language:"en",accessTier:"open",shared:false,ownerUserId:null,chunk:null,snapshotEvidence:evidence}).publicationCapability,"publishable");
+  const revision=projectSnapshotFeatureCandidate(candidate,{candidateKey:candidate.externalId,createdAt:detail.fetchedAt,source,fileId,evidence});
+  assert.equal(revision.entryId,"feature-second-wind");assert.equal(revision.entry.entryType,"classFeature");
 });
 
 test("NFS projection requires exact relation targets and validates graph and inherited overrides",()=>{

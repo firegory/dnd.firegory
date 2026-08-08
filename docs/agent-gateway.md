@@ -2,6 +2,8 @@
 
 The agent gateway is a separate, read-only process over the PostgreSQL content index. It exposes HTTP v1 and MCP tools without granting callers database, SQL, storage-path, or filesystem access. Both adapters call the same `AgentReadService`, which applies the application source predicate from `src/server/access` before selecting indexed entries.
 
+Corpus seeding and update operations are documented in `corpus-seeding.md`. Agents remain read-only throughout that workflow: they may inspect indexed results through this gateway but cannot validate/load seed inputs, review candidates, publish, reindex, embed, or roll back. Only the worker may write canonical content.
+
 ## Start
 
 ```bash

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "planId": "synthetic-2024-test-v1",
+  "slots": [{
+    "slotId": "glossary",
+    "snapshotRoot": ".",
+    "manifestPath": "manifest.json",
+    "source": {
+      "canonicalSourceId": "synthetic-glossary-2024",
+      "title": "Synthetic 2024 Glossary",
+      "language": "en",
+      "category": "core_rules",
+      "accessTier": "open",
+      "publicationCode": "SYN-2024",
+      "publisher": "Synthetic Corpus Authors",
+      "revision": "synthetic-v1",
+      "canonicalBookId": "synthetic-glossary",
+      "originUrl": "https://next.dnd.su/glossary/",
+      "originId": "synthetic-fixture",
+      "attribution": "Synthetic fixture authored for this repository.",
+      "license": "CC0-1.0 synthetic fixture",
+      "licenseApproval": {
+        "basis": "cc0-1.0",
+        "approvedBy": "synthetic-fixture-reviewer",
+        "approvedAt": "2026-08-08T00:00:00.000Z",
+        "evidenceUri": "urn:dnd-firegory:synthetic-fixture",
+        "evidenceSha256": "0899a8636745a274aa0da39782d27f5435dfcdfb425b053c6bfbb539d6e9a024"
+      }
+    }
+  }]
+}

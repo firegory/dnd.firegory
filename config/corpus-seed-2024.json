@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "planId": "approved-2024-corpus-v1",
+  "edition": "5.5e",
+  "description": "Operator-supplied, separately licensed 2024 compendium snapshot inputs.",
+  "slots": [
+    { "id": "feature", "contentType": "feature", "snapshotCategory": "class", "inputSlotId": "class", "dependsOn": [], "required": true },
+    { "id": "class", "contentType": "class", "snapshotCategory": "class", "inputSlotId": "class", "dependsOn": ["feature"], "required": true },
+    { "id": "species", "contentType": "species", "snapshotCategory": "species", "inputSlotId": "species", "dependsOn": [], "required": true },
+    { "id": "background", "contentType": "background", "snapshotCategory": "backgrounds", "inputSlotId": "background", "dependsOn": [], "required": true },
+    { "id": "feat", "contentType": "feat", "snapshotCategory": "feats", "inputSlotId": "feat", "dependsOn": [], "required": true },
+    { "id": "spell", "contentType": "spell", "snapshotCategory": "spells", "inputSlotId": "spell", "dependsOn": [], "required": true },
+    { "id": "glossary", "contentType": "glossary", "snapshotCategory": "glossary", "inputSlotId": "glossary", "dependsOn": [], "required": true },
+    { "id": "creature", "contentType": "creature", "snapshotCategory": "bestiary", "inputSlotId": "creature", "dependsOn": [], "required": true },
+    { "id": "item", "contentType": "item", "snapshotCategory": "items", "inputSlotId": "item", "dependsOn": [], "required": true },
+    { "id": "equipment", "contentType": "equipment", "snapshotCategory": "equipment", "inputSlotId": "equipment", "dependsOn": [], "required": true }
+  ],
+  "sourceRequirements": {
+    "format": "next-dnd-snapshot-v2",
+    "operatorSupplied": true,
+    "licenseApprovalRequired": true,
+    "attributionRequired": true,
+    "provenanceRequired": true,
+    "allowedLicenseBases": ["cc-by-4.0", "cc0-1.0", "operator-permission"],
+    "approvedBy": ["corpus-legal-reviewer", "corpus-owner"],
+    "evidenceSchemes": ["https:", "urn:"]
+  },
+  "exclusions": [
+    "2014 and earlier rules",
+    "adventures and campaign narrative",
+    "images, maps, artwork, and audio",
+    "partner, user, homebrew, premium, and personal content",
+    "authentication-gated or robots-disallowed content",
+    "any source without documented operator authorization, attribution, provenance, and license basis"
+  ]
+}
