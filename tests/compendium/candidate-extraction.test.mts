@@ -162,6 +162,13 @@ test("equipment tables preserve thousands, fractional costs, and fractional weig
   parsed.forEach(({ wire }) => assertExactEvidence(wire, [evidence]));
 });
 
+test("PDF equipment parsing accepts 1.001 lb and rejects scale beyond numeric(10,3)", async () => {
+  const source = await fixture("en-equipment-numeric.txt");
+  const accepted = parseDeterministicChunk(chunk(source.replace("1/2 lb.", "1.001 lb.")), "en");
+  assert.equal(accepted[0].wire.attributes.weightLb, 1.001);
+  assert.throws(() => parseDeterministicChunk(chunk(source.replace("1/2 lb.", "1.0001 lb.")), "en"), /numeric\(10,3\)/);
+});
+
 test("astral characters use Unicode code-point citation offsets", async () => {
   const evidence = chunk(await fixture("en-astral-spell.txt"));
   const [parsed] = parseDeterministicChunk(evidence, "en");

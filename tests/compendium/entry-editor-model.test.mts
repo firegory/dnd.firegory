@@ -43,3 +43,12 @@ test("structured editor requires source citations and exact finite fields", () =
   assert.throws(() => parseEditorEntryInput({ ...valid, edition: "2024" }), /unsupported/);
   assert.throws(() => parseEditorEntryInput({ ...valid, projection: { ...valid.projection, arbitrary: true } }), /unsupported fields/);
 });
+
+test("structured editor accepts background lists and numeric(10,3) equipment weights", () => {
+  const background = parseEditorEntryInput({ ...valid, entryType: "background", projection: { type: "background", abilityScores: ["Dexterity", "Wisdom"], skillProficiencies: ["Stealth"] } });
+  assert.deepEqual(background.projection, { type: "background", abilityScores: ["Dexterity", "Wisdom"], skillProficiencies: ["Stealth"] });
+  assert.throws(() => parseEditorEntryInput({ ...valid, entryType: "background", projection: { type: "background", abilityScores: "Dexterity", skillProficiencies: "Stealth" } }), /list/i);
+  assert.throws(() => parseEditorEntryInput({ ...valid, entryType: "background", projection: { type: "background", abilityScores: [], skillProficiencies: [] } }), /nonempty list/i);
+  assert.doesNotThrow(() => parseEditorEntryInput({ ...valid, entryType: "equipment", projection: { type: "equipment", category: "tool", costCp: 1, weightLb: 1.001 } }));
+  assert.throws(() => parseEditorEntryInput({ ...valid, entryType: "equipment", projection: { type: "equipment", category: "tool", costCp: 1, weightLb: 1.0001 } }), /3 decimal places/);
+});

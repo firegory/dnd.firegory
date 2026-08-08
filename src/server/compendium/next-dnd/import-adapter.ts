@@ -4,6 +4,8 @@ import type { NextDndSnapshotManifest, SnapshotDetail } from "./collector.ts";
 import { SPELL_SCHOOLS, type SpellSchool } from "../spell-schema.ts";
 import { creatureEvidencePaths, normalizeChallengeRating, validateCreatureProjection, type CreatureBlock, type CreatureProjection } from "../creature-schema.ts";
 import { abilityEvidenceQuote, creatureFieldEvidenceSupports, parseCreatureAlignmentEvidence, passivePerceptionEvidenceQuote, speedEvidenceQuote } from "../creature-evidence.ts";
+import { canonicalFlatAttributes, FLAT_ENTRY_TYPES, projectionAttributes, validateFlatProjection, type FlatEntryType, type FlatProjection } from "../flat-schema.ts";
+import { parseMoneyToCp, parseWeights } from "../candidate-schema.ts";
 
 type ImportRunAdapterTarget = Pick<CompendiumImportRunService, "addDiagnostic" | "failRun" | "recordOccurrences" | "computeCandidateDiff">;
 
@@ -26,7 +28,8 @@ export function nextDndImportBatch(manifest: NextDndSnapshotManifest): Readonly<
       indexSourceFetchedAt: detail.indexSource.fetchedAt,
       indexCardFingerprintSha256: detail.indexSource.cardFingerprintSha256,
       metadataEvidenceText: detail.category === "spells" ? spellMetadataEvidence(detail.indexMetadata)
-        : detail.category === "bestiary" ? creatureMetadataEvidence(detail.indexMetadata) : null,
+        : detail.category === "bestiary" ? creatureMetadataEvidence(detail.indexMetadata)
+          : isFlatCategory(detail.category) ? flatMetadataEvidence(projectionAttributes(flatProjection(detail))) : null,
     })),
     candidates: details.map((detail, occurrenceIndex) => candidate(detail, occurrenceIndex)),
   };
@@ -83,7 +86,8 @@ function candidate(detail: SnapshotDetail, occurrenceIndex: number): ImportCandi
     occurrenceIndex,
     candidateKey: `${detail.category}-${detail.externalId}`,
     entryType: NEXT_DND_CATEGORIES[detail.category].entryType,
-    content: detail.category === "spells" ? spellCandidate(detail) : detail.category === "bestiary" ? creatureCandidate(detail) : {
+    content: detail.category === "spells" ? spellCandidate(detail) : detail.category === "bestiary" ? creatureCandidate(detail)
+      : isFlatCategory(detail.category) ? flatCandidate(detail) : {
       externalId: detail.externalId,
       sourceUrl: detail.sourceUrl,
       sha256: detail.sha256,
@@ -95,6 +99,116 @@ function candidate(detail: SnapshotDetail, occurrenceIndex: number): ImportCandi
     },
   };
 }
+
+export type SnapshotFlatCandidate = Readonly<{
+  schemaVersion: 1;
+  kind: "snapshotFlatCandidate";
+  entryType: FlatEntryType;
+  externalId: string;
+  sourceUrl: string;
+  sha256: string;
+  parserVersion: string;
+  title: string;
+  aliases: readonly string[];
+  body: string;
+  attributes: Readonly<Record<string, unknown>>;
+  sourceVersion: SnapshotSpellCandidate["sourceVersion"];
+  citations: readonly Readonly<{ fieldPath: string; quote: string; sourceUrl: string }>[];
+  extraction: Readonly<{ status: "ready"; missingFields: readonly [] }>;
+}>;
+
+/** Converts a collector snapshot into typed review input; review publication revalidates persisted evidence. */
+export function flatCandidate(detail: SnapshotDetail): SnapshotFlatCandidate {
+  if (!isFlatCategory(detail.category)) throw new Error("Snapshot flat projection only accepts flat compendium details.");
+  if (nextDndCardFingerprint(detail.indexMetadata) !== detail.indexSource.cardFingerprintSha256) {
+    throw new Error("Snapshot flat metadata does not match the exact collected window.LIST card fingerprint.");
+  }
+  const projection = flatProjection(detail);
+  const attributes = canonicalFlatAttributes(projection.type, projection);
+  const metadataEvidenceText = flatMetadataEvidence(attributes);
+  const aliases = typeof detail.indexMetadata.title_en === "string" && detail.indexMetadata.title_en.trim()
+    ? [detail.indexMetadata.title_en.normalize("NFC").trim()] : [];
+  return {
+    schemaVersion: 1, kind: "snapshotFlatCandidate", entryType: projection.type,
+    externalId: detail.externalId, sourceUrl: detail.sourceUrl, sha256: detail.sha256,
+    parserVersion: detail.parserVersion, title: detail.normalized.title, aliases,
+    body: detail.normalized.contentText, attributes,
+    sourceVersion: {
+      url: detail.sourceUrl, sha256: detail.sha256, rawBlobPath: detail.blobPath, fetchedAt: detail.fetchedAt,
+      index: {
+        url: detail.indexSource.url, sha256: detail.indexSource.fingerprintSha256,
+        rawBlobPath: detail.indexSource.rawBlobPath, fetchedAt: detail.indexSource.fetchedAt,
+        cardFingerprintSha256: detail.indexSource.cardFingerprintSha256, metadataEvidenceText,
+      },
+    },
+    citations: [
+      { fieldPath: "$.title", quote: detail.normalized.title, sourceUrl: detail.sourceUrl },
+      { fieldPath: "$.body", quote: detail.normalized.contentText, sourceUrl: detail.sourceUrl },
+      ...Object.entries(attributes).map(([name, value]) => ({
+        fieldPath: `$.attributes.${name}`, quote: JSON.stringify(value), sourceUrl: detail.indexSource.url,
+      })),
+    ],
+    extraction: { status: "ready", missingFields: [] },
+  };
+}
+
+export function flatMetadataEvidence(attributes: Readonly<Record<string, unknown>>): string {
+  return ["window.LIST flat projection", ...Object.entries(attributes).map(([key, value]) => `${key}=${JSON.stringify(value)}`)].join("\n");
+}
+
+function flatProjection(detail: SnapshotDetail): FlatProjection {
+  const metadata = detail.indexMetadata;
+  const explicit = record(metadata.typed_fields ?? metadata.attributes);
+  const explicitValue = (...keys: readonly string[]) => {
+    const key = keys.find((candidate) => Object.hasOwn(explicit, candidate));
+    return key ? { present: true, value: explicit[key] } : { present: false, value: keys.map((candidate) => metadata[candidate]).find((item) => item !== undefined) };
+  };
+  const value = (...keys: readonly string[]) => explicitValue(...keys).value;
+  const labelled = (labels: readonly string[]) => labelledValue(detail.normalized.contentText, labels);
+  const type = NEXT_DND_CATEGORIES[detail.category].entryType as FlatEntryType;
+  if (type === "feat") return validateFlatProjection(type, {
+    category: normalizedEnum(value("category") ?? metadata.item_prefix_title, {
+      origin: "origin", general: "general", "fighting style": "fighting_style", fighting_style: "fighting_style", "epic boon": "epic_boon", epic_boon: "epic_boon",
+      происхождение: "origin", общая: "general", "боевой стиль": "fighting_style", "эпический дар": "epic_boon",
+    }, "general"),
+    prerequisiteLevel: integer(value("prerequisiteLevel", "prerequisite_level"), 1, 20),
+    prerequisiteText: nullableString(explicitValue("prerequisiteText", "prerequisite_text").present ? value("prerequisiteText", "prerequisite_text") : labelled(["Prerequisite", "Требование"])),
+    repeatable: Boolean(value("repeatable")) || /(?:repeatable|повторяем)/iu.test(detail.normalized.contentText),
+  });
+  if (type === "background") return validateFlatProjection(type, {
+    abilityScores: stringList(value("abilityScores", "ability_scores") ?? labelled(["Ability Scores", "Характеристики"])),
+    skillProficiencies: stringList(value("skillProficiencies", "skill_proficiencies") ?? labelled(["Skill Proficiencies", "Владение навыками"])),
+  });
+  if (type === "item") return validateFlatProjection(type, {
+    category: normalizedEnum(value("category") ?? metadata.item_icon_title, Object.fromEntries(["armor", "potion", "ring", "rod", "scroll", "staff", "wand", "weapon", "wondrous", "other"].map((key) => [key, key])), "other"),
+    rarity: normalizedEnum(value("rarity") ?? metadata.item_prefix_title, { common: "common", uncommon: "uncommon", rare: "rare", "very rare": "very_rare", very_rare: "very_rare", legendary: "legendary", artifact: "artifact", varies: "varies" }, "varies"),
+    requiresAttunement: Boolean(value("requiresAttunement") ?? value("requires_attunement")) || /(?:requires attunement|требует настройк)/iu.test(detail.normalized.contentText),
+  });
+  if (type === "equipment") return validateFlatProjection(type, {
+    category: normalizedEnum(value("category") ?? metadata.item_prefix_title, {
+      "adventuring gear": "adventuring_gear", adventuring_gear: "adventuring_gear", ammunition: "ammunition", armor: "armor", focus: "focus", mount: "mount", tool: "tool", vehicle: "vehicle", weapon: "weapon", other: "other",
+      снаряжение: "adventuring_gear", боеприпасы: "ammunition", доспехи: "armor", фокусировка: "focus", транспорт: "vehicle", оружие: "weapon",
+    }, "other"),
+    costCp: explicitValue("costCp", "cost_cp").present ? integer(value("costCp", "cost_cp"), 0, 2_147_483_647) : parseMoneyToCp(String(value("cost") ?? labelled(["Cost", "Стоимость", "Цена"]) ?? ""))[0] ?? null,
+    weightLb: explicitValue("weightLb", "weight_lb").present ? finiteNumber(value("weightLb", "weight_lb")) : parseWeights(String(value("weight") ?? labelled(["Weight", "Вес"]) ?? ""))[0] ?? null,
+  });
+  return validateFlatProjection("glossary", {
+    category: nullableString(value("category") ?? metadata.item_prefix_title) ?? "rules",
+    relatedTerms: stringValues(value("relatedTerms") ?? value("related_terms")),
+  });
+}
+
+function isFlatCategory(category: string): category is "feats" | "backgrounds" | "items" | "equipment" | "glossary" {
+  return category in NEXT_DND_CATEGORIES && FLAT_ENTRY_TYPES.includes(NEXT_DND_CATEGORIES[category as keyof typeof NEXT_DND_CATEGORIES].entryType as FlatEntryType);
+}
+function normalizedEnum(value: unknown, aliases: Readonly<Record<string, string>>, fallback: string): string { const key = String(value ?? "").normalize("NFC").trim().toLocaleLowerCase("und"); return aliases[key] ?? fallback; }
+function nullableString(value: unknown): string | null { return typeof value === "string" && value.trim() ? value.normalize("NFC").trim() : null; }
+function finiteNumber(value: unknown): number | null { const number = typeof value === "number" ? value : Number.NaN; return Number.isFinite(number) ? number : null; }
+function stringList(value: unknown): readonly string[] {
+  const items = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[,;]/u) : [];
+  return [...new Set(items.map((item) => String(item).normalize("NFC").trim()).filter(Boolean))];
+}
+function stringValues(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.normalize("NFC").trim()) : []; }
 
 export type SnapshotSpellCandidate = Readonly<{
   schemaVersion: 1;

@@ -384,8 +384,8 @@ test("typed candidates receive independent canonical CAS lookups", async () => {
   ]);
 });
 
-test("unsupported extracted attribute projection is rejected before review or queue", async () => {
-  let submitted = false;
+test("equipment with unknown cost and weight approves without null typed fields", async () => {
+  let revision: { entry: { typedFields: Array<{ key: string }> } } | null = null;
   const row = candidate({
     content: unsupportedEquipment, entry_type: "equipment", candidate_key: unsupportedEquipment.candidateKey,
     ...chunkFields(unsupportedEquipmentText, secondChunkId),
@@ -396,14 +396,11 @@ test("unsupported extracted attribute projection is rejected before review or qu
     return { rows: [], rowCount: 1 };
   } };
   const service = new CompendiumImportReviewService(async (callback) => callback(db), {
-    publish: async () => { submitted = true; throw new Error("must not submit"); },
+    publish: async (input) => { revision = input.revision; return { commandPath: "/spool/unknown-equipment", existing: false }; },
     unpublish: async () => { throw new Error("unused"); },
   }, async () => new Map());
-  await assert.rejects(
-    service.act(admin, runId, { candidateIds: [candidateId], action: "approve", activeRevisionTokens: { [candidateId]: null } }),
-    /cannot be represented without changing its evidence semantics/,
-  );
-  assert.equal(submitted, false);
+  await service.act(admin, runId, { candidateIds: [candidateId], action: "approve", activeRevisionTokens: { [candidateId]: null } });
+  assert.deepEqual(revision?.entry.typedFields.map((field) => field.key), ["category"]);
 });
 
 test("projection converts #77 code-point evidence into exact canonical citation offsets", async () => {

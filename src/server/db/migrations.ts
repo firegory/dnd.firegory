@@ -15,7 +15,7 @@ export const MIGRATION_FILENAMES = [
   "0014_compendium_entry_editor.sql",
   "0015_spells_vertical_slice.sql",
   "0016_compendium_guide_candidate_type.sql",
-  // 0017 remains reserved by parallel compendium work.
+  "0017_flat_compendium_types.sql",
   "0018_bestiary_stat_blocks.sql",
 ] as const;
 
