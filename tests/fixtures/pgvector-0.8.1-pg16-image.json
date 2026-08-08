@@ -1,0 +1,18 @@
+{
+  "image": "pgvector/pgvector:0.8.1-pg16",
+  "indexDigest": "sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337",
+  "verifiedAt": "2026-08-08",
+  "source": "https://registry.hub.docker.com/v2/repositories/pgvector/pgvector/tags/0.8.1-pg16",
+  "platforms": [
+    {
+      "os": "linux",
+      "architecture": "amd64",
+      "digest": "sha256:16e62164a405447dca191079a924ee5b8a9dbf04fe53128701ffbea857b37782"
+    },
+    {
+      "os": "linux",
+      "architecture": "arm64",
+      "digest": "sha256:417eabe00c71238357315d66d024607c6b9a414be3a3ea401d442c5bcbf0c00d"
+    }
+  ]
+}

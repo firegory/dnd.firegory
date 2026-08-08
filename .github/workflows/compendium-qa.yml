@@ -19,7 +19,8 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: pgvector/pgvector:0.8.1-pg16
+        # pgvector/pgvector:0.8.1-pg16 OCI index; includes linux/amd64 and linux/arm64 manifests.
+        image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
         env:
           POSTGRES_DB: dnd_qa
           POSTGRES_USER: qa
@@ -33,14 +34,18 @@ jobs:
           --health-retries 12
     env:
       QA_DATABASE_URL: postgres://qa:qa@127.0.0.1:5432/dnd_qa
-      QA_BROWSER_SCHEMA: qa_browser
+      QA_BROWSER_DATABASE: qa_browser
       CI: "true"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.18.0
           cache: npm
+      - name: Initialize diagnostic artifact paths
+        run: |
+          mkdir -p qa-artifacts/diagnostics playwright-report test-results/results
+          printf 'run=%s\nsha=%s\narch=%s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" "$(uname -m)" > qa-artifacts/diagnostics/workflow.txt
       - name: Install dependencies
         run: npm ci
       - name: Initialize pgvector
@@ -56,17 +61,20 @@ jobs:
       - name: Typecheck, lint, and production build
         run: npm run qa:build
       - name: Install pinned Chromium runtime
-        run: npm run qa:browser:install
+        run: |
+          npm run qa:browser:install
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils
       - name: Production browser flows
         run: npm run qa:browser
       - name: Upload query plans and browser failures
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: compendium-qa-evidence
-          if-no-files-found: error
+          if-no-files-found: warn
           path: |
             qa-artifacts/
             playwright-report/
-            test-results/
+            test-results/results/
           retention-days: 14

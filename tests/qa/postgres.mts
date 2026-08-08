@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { Client, Pool, type PoolClient } from "pg";
 
 import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
-import { hashSessionToken } from "../../src/server/auth/session-token.ts";
+import { createSessionToken, hashSessionToken } from "../../src/server/auth/session-token.ts";
 
 export const IDS = {
   users: {
@@ -27,7 +27,7 @@ export const IDS = {
 } as const;
 
 export type IsolatedDatabase = Readonly<{
-  schema: string;
+  databaseName: string;
   url: string;
   pool: Pool;
   cleanup(): Promise<void>;
@@ -45,47 +45,51 @@ export function requireDatabaseUrl(): string {
 
 export async function isolatedDatabase(label: string): Promise<IsolatedDatabase> {
   const baseUrl = requireDatabaseUrl();
-  const schema = `qa_${label.replaceAll(/[^a-z0-9]/gi, "_").toLowerCase()}_${randomUUID().replaceAll("-", "")}`;
+  const databaseName = `qa_${label.replaceAll(/[^a-z0-9]/gi, "_").toLowerCase()}_${randomUUID().replaceAll("-", "")}`;
+  assertQaDatabase(databaseName);
   const admin = new Client({ connectionString: baseUrl });
   await admin.connect();
   try {
-    await assertPostgresRuntime(admin);
-    await admin.query(`CREATE SCHEMA ${schema}`);
+    await assertPostgresMajor(admin);
+    await admin.query(`CREATE DATABASE ${databaseName}`);
   } catch (error) {
     await admin.end();
     throw error;
   }
-  const url = databaseUrlForSchema(baseUrl, schema);
+  const url = databaseUrlForDatabase(baseUrl, databaseName);
   const pool = new Pool({ connectionString: url, max: 4 });
   return {
-    schema,
+    databaseName,
     url,
     pool,
     async cleanup() {
       await pool.end();
-      await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid<>pg_backend_pid()", [databaseName]);
+      await admin.query(`DROP DATABASE IF EXISTS ${databaseName}`);
       await admin.end();
     },
   };
 }
 
-export function databaseUrlForSchema(baseUrl: string, schema: string): string {
-  assertQaSchema(schema);
+export function databaseUrlForDatabase(baseUrl: string, databaseName: string): string {
+  assertQaDatabase(databaseName);
   const url = new URL(baseUrl);
-  url.searchParams.set("options", `-csearch_path=${schema},public`);
+  url.pathname = `/${databaseName}`;
+  url.searchParams.delete("options");
   return url.toString();
 }
 
-export function assertQaSchema(schema: string): void {
-  assert.match(schema, /^qa_[a-z0-9_]+$/, "QA schemas must start with qa_ and contain only lowercase letters, digits, and underscores");
-  if (["qa_public", "qa_pg_catalog", "qa_information_schema"].includes(schema)) {
-    throw new Error("QA schema name is reserved.");
-  }
+export function assertQaDatabase(databaseName: string): void {
+  assert.match(databaseName, /^qa_[a-z0-9_]+$/, "QA databases must start with qa_ and contain only lowercase letters, digits, and underscores");
+}
+
+export async function assertPostgresMajor(client: Pick<Client, "query">): Promise<void> {
+  const version = await client.query<{ major: string }>("SELECT current_setting('server_version_num')::integer / 10000 AS major");
+  assert.equal(Number(version.rows[0]?.major), 16, "QA requires PostgreSQL major version 16");
 }
 
 export async function assertPostgresRuntime(client: Pick<Client, "query">): Promise<void> {
-  const version = await client.query<{ major: string }>("SELECT current_setting('server_version_num')::integer / 10000 AS major");
-  assert.equal(Number(version.rows[0]?.major), 16, "QA requires PostgreSQL major version 16");
+  await assertPostgresMajor(client);
   const vector = await client.query<{ version: string }>("SELECT extversion AS version FROM pg_extension WHERE extname = 'vector'");
   assert.ok(vector.rows[0]?.version, "QA requires the pgvector extension to be preinstalled");
   const distance = await client.query<{ distance: number }>("SELECT '[1,0]'::vector <=> '[0,1]'::vector AS distance");
@@ -102,20 +106,38 @@ export async function runProductionMigrations(databaseUrl: string): Promise<void
     child.once("error", reject);
     child.once("exit", (code, signal) => code === 0 ? resolve() : reject(new Error(`Migration runner failed (${signal ?? code}).`)));
   });
+  const client = new Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    await assertPostgresRuntime(client);
+  } finally {
+    await client.end();
+  }
 }
 
 export async function applyMigrationPrefix(client: PoolClient, through: string): Promise<void> {
   await client.query("CREATE TABLE schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
   for (const filename of MIGRATION_FILENAMES) {
     const sql = await readFile(`migrations/${filename}`, "utf8");
-    await client.query(sql);
-    await client.query("INSERT INTO schema_migrations(version) VALUES ($1)", [filename]);
+    await client.query("BEGIN");
+    try {
+      await client.query(sql);
+      await client.query("INSERT INTO schema_migrations(version) VALUES ($1)", [filename]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
     if (filename === through) return;
   }
   throw new Error(`Unknown migration boundary: ${through}`);
 }
 
-export async function seedAccessFixture(database: Pool | PoolClient, includeReview = false): Promise<Record<string, string>> {
+export async function seedAccessFixture(database: Pool | PoolClient, options: Readonly<{
+  includeReview?: boolean;
+  storageRoot?: string;
+  fileChecksumSha256?: string;
+}> = {}): Promise<Record<string, string>> {
   const tokens: Record<string, string> = {};
   const ownsClient = database instanceof Pool;
   const client = ownsClient ? await database.connect() : database;
@@ -130,7 +152,7 @@ export async function seedAccessFixture(database: Pool | PoolClient, includeRevi
         "INSERT INTO users(id,email,password_hash,role,display_name) VALUES ($1,$2,'qa-not-a-login-password',$3,$4)",
         [id, `${name}@qa.invalid`, role, `QA ${name}`],
       );
-      const token = `qa-${name}-session-token`;
+      const token = createSessionToken();
       tokens[name] = token;
       await client.query("INSERT INTO sessions(user_id,token_hash,expires_at) VALUES ($1,$2,now()+interval '1 day')", [id, hashSessionToken(token)]);
     }
@@ -144,9 +166,9 @@ export async function seedAccessFixture(database: Pool | PoolClient, includeRevi
     ] as const;
     for (const [id, title, category, edition, tier, shared, owner, priority] of sourceRows) {
       await client.query(
-        `INSERT INTO sources(id,title,category,edition,language,access_tier,shared,owner_user_id,publication_title,publication_code,release_year,source_priority,attribution,license)
-         VALUES ($1,$2,$3,$4,'en',$5,$6,$7,$2,$8,$9,$10,'QA fixture','CC-BY-4.0')`,
-        [id, title, category, edition, tier, shared, owner, `QA${priority}`, edition === "5.5e" ? 2024 : 2014, priority],
+        `INSERT INTO sources(id,title,category,edition,language,access_tier,shared,owner_user_id,canonical_source_id,publication_title,publication_code,publisher,release_year,source_priority,canonical_book_id,attribution,license)
+         VALUES ($1,$2,$3,$4,'en',$5,$6,$7,$8,$2,$9,'QA Publisher',$10,$11,$12,'QA fixture','CC-BY-4.0')`,
+        [id, title, category, edition, tier, shared, owner, `qa-source-${id.at(-1)}`, `QA${priority}`, edition === "5.5e" ? 2024 : 2014, priority, `qa-book-${id.at(-1)}`],
       );
       const suffix = id.at(-1)!;
       const fileId = `30000000-0000-4000-8000-00000000000${suffix}`;
@@ -155,10 +177,12 @@ export async function seedAccessFixture(database: Pool | PoolClient, includeRevi
       const versionId = `60000000-0000-4000-8000-00000000000${suffix}`;
       const revisionId = `61000000-0000-4000-8000-00000000000${suffix}`;
       const chunkId = `62000000-0000-4000-8000-00000000000${suffix}`;
+      const documentId = `64000000-0000-4000-8000-00000000000${suffix}`;
+      const storagePath = `${options.storageRoot ?? "/tmp/dnd-firegory-qa-storage"}/originals/${id}/${fileId}.pdf`;
       await client.query(
         `INSERT INTO files(id,source_id,original_filename,mime_type,checksum_sha256,byte_size,storage_path)
          VALUES ($1,$2,$3,'application/pdf',$4,128,$5)`,
-        [fileId, id, `qa-${suffix}.pdf`, suffix.repeat(64), `qa/${suffix}.pdf`],
+        [fileId, id, `qa-${suffix}.pdf`, options.fileChecksumSha256 ?? suffix.repeat(64), storagePath],
       );
       await client.query(
         "INSERT INTO ingestion_generations(id,source_id,file_id,status,activated_at) VALUES ($1,$2,$3,'active',now())",
@@ -166,14 +190,18 @@ export async function seedAccessFixture(database: Pool | PoolClient, includeRevi
       );
       await client.query("UPDATE files SET active_generation_id=$2 WHERE id=$1", [fileId, generationId]);
       await client.query(
+        "INSERT INTO documents(id,source_id,file_id,generation_id,title,text) VALUES ($1,$2,$3,$4,$5,$6)",
+        [documentId, id, fileId, generationId, title, `Indexed document for ${title}`],
+      );
+      await client.query(
         `INSERT INTO chunks(id,source_id,file_id,generation_id,chunk_index,text,quote_text,section_heading,page_number)
-         VALUES ($1,$2,$3,$4,0,$5,$5,'QA evidence',12)`,
+         VALUES ($1,$2,$3,$4,0,$5,$5,'QA evidence',1)`,
         [chunkId, id, fileId, generationId, `Evidence quote for ${title}`],
       );
       await client.query("INSERT INTO compendium_entries(id,canonical_key,entry_type,edition) VALUES ($1,$2,'spell',$3)", [entryId, `qa-spell-${suffix}`, edition]);
       await client.query(
-        `INSERT INTO compendium_versions(id,entry_id,entry_type,edition,language,source_id,file_id,lifecycle,active_revision_id,published_at)
-         VALUES ($1,$2,'spell',$3,'en',$4,$5,'draft',$6,NULL)`,
+        `INSERT INTO compendium_versions(id,entry_id,entry_type,edition,language,source_id,file_id,lifecycle,active_revision_id,editor_head_revision_id,published_at)
+         VALUES ($1,$2,'spell',$3,'en',$4,$5,'draft',$6,$6,NULL)`,
         [versionId, entryId, edition, id, fileId, revisionId],
       );
       await client.query(
@@ -194,8 +222,32 @@ export async function seedAccessFixture(database: Pool | PoolClient, includeRevi
       );
       await client.query("UPDATE compendium_revisions SET lifecycle='published',published_at=now() WHERE id=$1", [revisionId]);
       await client.query("UPDATE compendium_versions SET lifecycle='published',published_at=now() WHERE id=$1", [versionId]);
+      await client.query(
+        "INSERT INTO nfs_index_managed_sources(source_id,repository_id,canonical_source_id) VALUES ($1,'qa-fixture',$2)",
+        [id, `qa-source-${suffix}`],
+      );
+      await client.query(
+        "INSERT INTO nfs_index_managed_files(file_id,source_id,repository_id,canonical_file_id,last_nfs_generation_id) VALUES ($1,$2,'qa-fixture',$3,$4)",
+        [fileId, id, `qa-file-${suffix}`, generationId],
+      );
+      const typedFields = [
+        { key: "level", value: 1 }, { key: "school", value: "evocation" },
+        { key: "casting-time", value: "1 action" }, { key: "range", value: "60 feet" },
+        { key: "duration", value: "Instantaneous" }, { key: "components", value: "V, S" },
+        { key: "classes", value: ["class:17"] }, { key: "concentration", value: false }, { key: "ritual", value: false },
+      ];
+      const canonicalPayload = {
+        citations: [{ citationId: `qa-citation-${suffix}`, quote: `Evidence quote for ${title}`, section: "QA evidence", page: 1 }],
+      };
+      await client.query(
+        `INSERT INTO nfs_index_entries(id,repository_id,entry_id,revision_id,content_hash,entry_type,name,aliases,typed_fields,plain_text,canonical_payload,source_id,file_id,generation_id,document_id,lifecycle,edition,language)
+         VALUES ($1,'qa-fixture',$2,$3,$4,'spell',$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11,$12,$13,'active',$14,'en')`,
+        [`63000000-0000-4000-8000-00000000000${suffix}`, `qa-spell-${suffix}`, `rev-${suffix.repeat(64)}`, `sha256:${suffix.repeat(64)}`, `QA Spell ${suffix}`,
+          JSON.stringify([`QA Alias ${suffix}`]), JSON.stringify(typedFields), `First paragraph for ${title}. Printable second paragraph.`, JSON.stringify(canonicalPayload),
+          id, fileId, generationId, documentId, edition],
+      );
     }
-    if (includeReview) await seedReviewFixture(client);
+    if (options.includeReview) await seedReviewFixture(client);
     await client.query("COMMIT");
   } catch (error) {
     if (transactionStarted) await client.query("ROLLBACK");

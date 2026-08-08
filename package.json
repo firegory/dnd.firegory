@@ -12,7 +12,7 @@
     "test": "node --test --experimental-strip-types 'tests/**/*.test.mts'",
     "qa:unit": "npm test",
     "qa:db": "node --test --experimental-strip-types tests/qa/database.qa.mts",
-    "qa:publication": "node --test --experimental-strip-types tests/content-storage/publication.test.mts",
+    "qa:publication": "node --test --experimental-strip-types tests/content-storage/publication.test.mts tests/qa/publication-process.qa.mts",
     "qa:performance": "node --test --experimental-strip-types tests/qa/performance.qa.mts",
     "qa:browser": "playwright test",
     "qa:browser:install": "playwright install --with-deps chromium",
