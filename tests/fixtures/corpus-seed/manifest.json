@@ -10,7 +10,7 @@
       "sourceUrl": "https://next.dnd.su/robots.txt", "finalUrl": "https://next.dnd.su/robots.txt",
       "redirectChain": [], "fetchedAt": "2026-08-08T00:00:00.000Z",
       "sha256": "16ceb5ee3e0dc13aa9adf31a3ebbe45a1d965b8c2b9f72eaf84e5911e140ed95",
-      "byteLength": 23, "parserVersion": "next-dnd-2024-v3", "blobPath": "blobs/robots.txt"
+      "byteLength": 23, "parserVersion": "next-dnd-2024-v3", "blobPath": "blobs/16ceb5ee3e0dc13aa9adf31a3ebbe45a1d965b8c2b9f72eaf84e5911e140ed95.html"
     },
     "rules": [{ "directive": "allow", "path": "/" }],
     "evaluations": [
@@ -27,14 +27,14 @@
       "sourceUrl": "https://next.dnd.su/glossary/", "finalUrl": "https://next.dnd.su/glossary/",
       "redirectChain": [], "fetchedAt": "2026-08-08T00:00:00.000Z",
       "sha256": "9fbff0a841ca8a7efee68e4398dbfd5d5f0da99cecfe21c4685d246e30d38c74",
-      "byteLength": 176, "parserVersion": "next-dnd-2024-v3", "blobPath": "blobs/index.html"
+      "byteLength": 176, "parserVersion": "next-dnd-2024-v3", "blobPath": "blobs/9fbff0a841ca8a7efee68e4398dbfd5d5f0da99cecfe21c4685d246e30d38c74.html"
     },
     "details": [{
       "kind": "detail", "category": "glossary", "externalId": "1",
       "sourceUrl": "https://next.dnd.su/glossary/1-synthetic", "finalUrl": "https://next.dnd.su/glossary/1-synthetic",
       "redirectChain": [], "fetchedAt": "2026-08-08T00:00:00.000Z",
       "sha256": "ddc9f7b44508b196cb9dec3cdb66cc73f555b676f04bf90ff431a75ccee0c0df",
-      "byteLength": 150, "parserVersion": "next-dnd-2024-v3", "blobPath": "blobs/detail.html",
+      "byteLength": 150, "parserVersion": "next-dnd-2024-v3", "blobPath": "blobs/ddc9f7b44508b196cb9dec3cdb66cc73f555b676f04bf90ff431a75ccee0c0df.html",
       "normalized": {
         "title": "Synthetic Term",
         "contentHtml": "<article><h1>Synthetic Term</h1><p>A fictional rule written for automated testing.</p></article>",
@@ -44,7 +44,7 @@
       "indexSource": {
         "url": "https://next.dnd.su/glossary/",
         "fingerprintSha256": "9fbff0a841ca8a7efee68e4398dbfd5d5f0da99cecfe21c4685d246e30d38c74",
-        "rawBlobPath": "blobs/index.html",
+        "rawBlobPath": "blobs/9fbff0a841ca8a7efee68e4398dbfd5d5f0da99cecfe21c4685d246e30d38c74.html",
         "fetchedAt": "2026-08-08T00:00:00.000Z",
         "cardFingerprintSha256": "d3140b06944c8125f507394aad272451190eaec29108fcdcc95696d7d0f5c372"
       }

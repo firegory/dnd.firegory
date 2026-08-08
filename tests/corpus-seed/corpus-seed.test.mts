@@ -15,7 +15,7 @@ test("synthetic approved input validates with provenance and stable digests", as
   assert.equal(prepared.slots[0].discovered, 1);
   assert.match(prepared.planDigest, /^[0-9a-f]{64}$/);
   assert.match(prepared.inputDigest, /^[0-9a-f]{64}$/);
-  assert.equal(prepared.slots[0].manifestDigest, "9e165dd3b6439628f2c47affa51ff4ccbb1f857009642e15e969fd871f0759f0");
+  assert.equal(prepared.slots[0].manifestDigest, "0899a8636745a274aa0da39782d27f5435dfcdfb425b053c6bfbb539d6e9a024");
 });
 
 test("input and source digest changes are observable", async () => {
