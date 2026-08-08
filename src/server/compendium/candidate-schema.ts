@@ -150,12 +150,24 @@ const attributesByType = {
   class: {
     type: "object", additionalProperties: false,
     required: ["hitDie", "primaryAbility", "spellcastingAbility"],
-    properties: { hitDie: { enum: [6, 8, 10, 12] }, primaryAbility: stringField, spellcastingAbility: nullableStringField },
+    properties: {
+      hitDie: { enum: [6, 8, 10, 12] }, primaryAbility: stringField, spellcastingAbility: nullableStringField,
+      kind: { enum: ["class", "subclass"] }, parentClassIds: { type: "array", items: stringField, uniqueItems: true },
+      progressionColumns: { type: "array", items: { type: "object", additionalProperties: false, required: ["key", "heading"], properties: { key: stringField, heading: stringField } } },
+      progressionRows: { type: "array", items: { type: "object", additionalProperties: false, required: ["level", "cells"], properties: { level: { type: "integer", minimum: 1, maximum: 20 }, cells: { type: "object", additionalProperties: stringField } } } },
+      features: { type: "array", items: { type: "object", additionalProperties: false, required: ["canonicalId", "title", "body", "level", "anchor"], properties: { canonicalId: stringField, title: stringField, body: stringField, level: { type: "integer", minimum: 1, maximum: 20 }, anchor: stringField } } },
+      crossLinks: { type: "array", items: stringField, uniqueItems: true },
+    },
   },
   species: {
     type: "object", additionalProperties: false,
     required: ["size", "speed"],
-    properties: { size: { enum: ["tiny", "small", "medium", "large", "huge", "gargantuan"] }, speed: { type: "integer", minimum: 1 } },
+    properties: {
+      size: { enum: ["tiny", "small", "medium", "large", "huge", "gargantuan"] }, speed: { type: "integer", minimum: 1 },
+      kind: { enum: ["species", "variant"] }, parentSpeciesIds: { type: "array", items: stringField, uniqueItems: true },
+      traits: { type: "array", items: { type: "object", additionalProperties: false, required: ["key", "title", "body", "anchor"], properties: { key: stringField, title: stringField, body: stringField, anchor: stringField, overrides: nullableStringField } } },
+      crossLinks: { type: "array", items: stringField, uniqueItems: true },
+    },
   },
   background: {
     type: "object", additionalProperties: false,
@@ -304,9 +316,16 @@ function citationSupportsField(candidate: CandidateWire, path: string, quote: st
   if (typeof value === "boolean") return supportsBoolean(path, value, quote);
   if (path === "$.attributes.level" && value === 0 && /(?:cantrip|заговор)/iu.test(quote)) return true;
   if (typeof value === "number") return numericValues(quote).some((number) => Math.abs(number - value) < 0.000001);
-  if (Array.isArray(value)) return scalarValues(value).every((item) => scalarTextSupported(path, item, quote));
-  if (isRecord(value)) return scalarValues(value).every((item) => scalarTextSupported(path, item, quote));
+  if (Array.isArray(value)) return scalarValues(value).every((item) => evidenceScalarSupported(path, item, quote));
+  if (isRecord(value)) return scalarValues(value).every((item) => evidenceScalarSupported(path, item, quote));
   return scalarTextSupported(path, value, quote);
+}
+
+function evidenceScalarSupported(path:string,value:unknown,quote:string):boolean {
+  if(typeof value==="number")return numericValues(quote).some((number)=>Math.abs(number-value)<0.000001);
+  if(typeof value==="boolean")return supportsBoolean(path,value,quote)||scalarTextSupported(path,value,quote);
+  if(value===null)return supportsNull(quote);
+  return scalarTextSupported(path,value,quote);
 }
 
 function blockList() {

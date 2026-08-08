@@ -46,6 +46,7 @@ type ActiveRow = {
   generation_id?: string;
 };
 export type NfsManagedBinding = Readonly<{ sourceId: string; fileId: string; ownsSource: boolean; ownsFile: boolean }>;
+export type NfsBoundEntry = Readonly<{ projection: IndexedEntryProjection; binding: NfsManagedBinding }>;
 
 export type SyncDependencies = Readonly<{
   execute?: typeof query;
@@ -192,6 +193,30 @@ export function buildSyncPlan(
   return { additions, updates, removals };
 }
 
+export function expandAffectedSourceClosure(
+  changedEntryIds: ReadonlySet<string>,
+  projections: readonly Pick<IndexedEntryProjection, "entryId" | "fileUuid" | "relations">[],
+  changedFileIds: ReadonlySet<string> = new Set(),
+): Set<string> {
+  const affected = new Set(changedEntryIds);
+  const affectedFiles = new Set(changedFileIds);
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const projection of projections) {
+      if (affected.has(projection.entryId)) affectedFiles.add(projection.fileUuid);
+    }
+    for (const projection of projections) {
+      if (affected.has(projection.entryId)) continue;
+      if (!affectedFiles.has(projection.fileUuid) && !projection.relations.some((relation) => affected.has(relation.targetEntryId))) continue;
+      affected.add(projection.entryId);
+      affectedFiles.add(projection.fileUuid);
+      expanded = true;
+    }
+  }
+  return affected;
+}
+
 export async function claimContentIndexRun(execute: typeof query, input: Readonly<{
   repositoryId: string;
   manifestHash: string;
@@ -300,15 +325,26 @@ async function applySnapshot(
   const desiredByFile = Map.groupBy(projections, (entry) => entry.fileUuid);
   const desiredBoundFileIds = new Set<string>();
   const changedEntries = new Set([...plan.additions, ...plan.updates, ...plan.removals]);
-  const affectedFiles = new Set(active.filter((entry) => changedEntries.has(entry.entry_id)).map((entry) => entry.file_id));
-  for (const entry of projections) if (changedEntries.has(entry.entryId)) affectedFiles.add(entry.fileUuid);
+  const changedFiles = new Set(active.filter((entry) => changedEntries.has(entry.entry_id)).map((entry) => entry.file_id));
+  const affectedEntries = expandAffectedSourceClosure(changedEntries, projections, changedFiles);
+  await client.query(
+    `DELETE FROM nfs_index_option_relations WHERE repository_id=$1
+       AND (source_entry_id=ANY($2::text[]) OR target_entry_id=ANY($2::text[]))`,
+    [repositoryId,[...affectedEntries]],
+  );
+  const affectedFiles = new Set(active.filter((entry) => affectedEntries.has(entry.entry_id)).map((entry) => entry.file_id));
+  for (const entry of projections) if (affectedEntries.has(entry.entryId)) affectedFiles.add(entry.fileUuid);
 
+  const boundEntries=new Map<string,NfsBoundEntry>();const bindingsByFile=new Map<string,NfsManagedBinding>();
+  for(const entries of desiredByFile.values()){
+    const binding=await resolveNfsManagedSourceAndFile(client,repositoryId,entries[0]);bindingsByFile.set(entries[0].fileUuid,binding);desiredBoundFileIds.add(binding.fileId);
+    for(const entry of entries){if(entry.sourceUuid!==entries[0].sourceUuid||entry.fileUuid!==entries[0].fileUuid||entry.source.edition!==entries[0].source.edition||entry.source.language!==entries[0].source.language)throw new Error(`Projected file ${entry.fileUuid} mixes incompatible source bindings.`);boundEntries.set(entry.entryId,{projection:entry,binding});}
+  }
   for (const entries of desiredByFile.values()) {
     if (!affectedFiles.has(entries[0].fileUuid)) continue;
-    const binding = await resolveNfsManagedSourceAndFile(client, repositoryId, entries[0]);
-    desiredBoundFileIds.add(binding.fileId);
+    const binding=bindingsByFile.get(entries[0].fileUuid);if(!binding)throw new Error(`Managed binding for projected file ${entries[0].fileUuid} is missing.`);
     await activateManagedGeneration(client, repositoryId, entries[0], binding);
-    await upsertFileIndexRows(client, repositoryId, entries, binding);
+    await upsertFileIndexRows(client, repositoryId, entries, binding, boundEntries);
   }
 
   if (plan.removals.length > 0) {
@@ -581,11 +617,12 @@ export async function activateManagedGeneration(
   await client.query("UPDATE files SET active_generation_id=$2, deleted_at=NULL WHERE id=$1", [binding.fileId, entry.generationId]);
 }
 
-async function upsertFileIndexRows(
+export async function upsertFileIndexRows(
   client: Queryable,
   repositoryId: string,
   entries: readonly IndexedEntryProjection[],
   binding: NfsManagedBinding,
+  boundEntries:ReadonlyMap<string,NfsBoundEntry>,
 ): Promise<void> {
   const first = entries[0];
   await reconcileManagedProjectionRows(client, repositoryId, entries);
@@ -657,6 +694,28 @@ async function upsertFileIndexRows(
         row.edition, row.language],
     );
   }
+  for (const relation of entries.flatMap((entry) => entry.relations)) {
+    const endpoint=bindNfsOptionRelation(relation,boundEntries);
+    await client.query(
+      `INSERT INTO nfs_index_option_relations
+        (repository_id,source_entry_id,source_revision_id,source_id,source_file_id,target_entry_id,target_revision_id,target_source_id,target_file_id,
+         edition,language,relation_kind,target_kind,target_lifecycle,source_anchor,anchor,position)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+      [repositoryId,relation.sourceEntryId,relation.sourceRevisionId,endpoint.sourceId,endpoint.sourceFileId,relation.targetEntryId,
+        relation.targetRevisionId,endpoint.targetSourceId,endpoint.targetFileId,relation.edition,relation.language,relation.relationKind,
+        relation.targetKind,relation.targetLifecycle,relation.sourceAnchor,relation.anchor,relation.position],
+    );
+  }
+}
+
+export function bindNfsOptionRelation(relation:IndexedEntryProjection["relations"][number],entries:ReadonlyMap<string,NfsBoundEntry>){
+  const source=entries.get(relation.sourceEntryId),target=entries.get(relation.targetEntryId);
+  if(!source||!target)throw new Error(`Hierarchy relation ${relation.sourceEntryId} -> ${relation.targetEntryId} has no resolved managed binding.`);
+  if(source.projection.revisionId!==relation.sourceRevisionId||target.projection.revisionId!==relation.targetRevisionId)throw new Error(`Hierarchy relation ${relation.sourceEntryId} -> ${relation.targetEntryId} has a stale exact revision.`);
+  if(source.projection.sourceUuid!==relation.sourceId||target.projection.sourceUuid!==relation.targetSourceId)throw new Error(`Hierarchy relation ${relation.sourceEntryId} -> ${relation.targetEntryId} changed projected source identity.`);
+  if(source.projection.source.edition!==relation.edition||target.projection.source.edition!==relation.edition||source.projection.source.language!==relation.language||target.projection.source.language!==relation.language)throw new Error(`Hierarchy relation ${relation.sourceEntryId} -> ${relation.targetEntryId} crosses edition or language bindings.`);
+  if(source.binding.sourceId!==target.binding.sourceId)throw new Error(`Hierarchy relation ${relation.sourceEntryId} -> ${relation.targetEntryId} resolves to mismatched managed sources.`);
+  return{sourceId:source.binding.sourceId,sourceFileId:source.binding.fileId,targetSourceId:target.binding.sourceId,targetFileId:target.binding.fileId} as const;
 }
 
 export function nfsIndexEntryRow(repositoryId: string, entry: IndexedEntryProjection) {

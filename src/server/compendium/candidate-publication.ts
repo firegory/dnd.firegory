@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import {
   createCanonicalRevision,
   type CanonicalRevision,
@@ -18,6 +16,10 @@ import {
 } from "./candidate-schema.ts";
 import type { CompendiumEntryType } from "./service.ts";
 import { validateSpellProjection } from "./spell-schema.ts";
+import { hierarchyTypedValue } from "./hierarchy-schema.ts";
+import { validateClassProjection, validateSpeciesProjection } from "./hierarchy-schema.ts";
+import type { SnapshotHierarchyCandidate } from "./next-dnd/hierarchy-import.ts";
+import { canonicalEntryId, collectorCandidateKey, CompendiumIdentityError } from "./identity.ts";
 import { validateCreatureProjection } from "./creature-schema.ts";
 import { canonicalFlatAttributes, validateFlatProjection, type FlatEntryType } from "./flat-schema.ts";
 import { creatureEvidenceCitations, flatMetadataEvidence, spellDetailEvidence, type SnapshotCreatureCandidate, type SnapshotFlatCandidate, type SnapshotSpellCandidate } from "./next-dnd/import-adapter.ts";
@@ -91,13 +93,9 @@ export class CandidateProjectionError extends Error {
 }
 
 export function canonicalCandidateEntryId(entryType: string, candidateKey: string): string {
-  if (!(entryType in CANONICAL_ENTRY_TYPES) || !STABLE_ID.test(candidateKey)) {
-    throw new CandidateProjectionError("Canonical candidate identity requires a supported entry type and stable candidate key.");
-  }
-  const value = `${entryType}-${candidateKey}`;
-  if (value.length <= 128) return value;
-  const suffix = createHash("sha256").update(`${entryType}\0${candidateKey}`).digest("hex").slice(0, 16);
-  return `${entryType}-${candidateKey.slice(0, 128 - entryType.length - suffix.length - 2)}-${suffix}`;
+  if (!(entryType in CANONICAL_ENTRY_TYPES)) throw new CandidateProjectionError("Canonical candidate identity requires a supported entry type.");
+  try { return canonicalEntryId(entryType, candidateKey); }
+  catch (error) { if (error instanceof CompendiumIdentityError) throw new CandidateProjectionError(error.message); throw error; }
 }
 
 export function classifyCandidatePublication(value: unknown, context: CandidateCapabilityContext): CandidatePublicationCapability {
@@ -110,6 +108,15 @@ export function classifyCandidatePublication(value: unknown, context: CandidateC
         payloadOrigin: "collector_snapshot", publicationCapability: "requires_extraction",
         publicationBlockReason: `Collector spell requires review repair: ${error instanceof Error ? error.message : String(error)}`,
       };
+    }
+  }
+  if (isSnapshotHierarchyCandidate(value)) {
+    try {
+      validateSnapshotHierarchyCandidate(value, context.candidateKey, context.entryType, context.snapshotEvidence ?? null);
+      return { payloadOrigin: "collector_snapshot", publicationCapability: "publishable", publicationBlockReason: null };
+    } catch (error) {
+      return { payloadOrigin: "collector_snapshot", publicationCapability: "requires_extraction",
+        publicationBlockReason: `Collector hierarchy requires review repair: ${error instanceof Error ? error.message : String(error)}` };
     }
   }
   if (isSnapshotCreatureCandidate(value)) {
@@ -161,8 +168,9 @@ export function classifyCandidatePublication(value: unknown, context: CandidateC
       ownerUserId: context.ownerUserId as string | null,
     };
     const candidate = validateExtractionEnvelope(value, context.candidateKey, context.entryType as CompendiumEntryType, boundary, context.chunk);
+    validateHierarchyAttributes(candidate);
     if (candidate.entryType === "creature") validateCreatureProjection(candidate.attributes);
-    Object.entries(candidate.attributes).forEach(([attribute, fieldValue]) => typedField(attribute, fieldValue));
+    representableAttributes(candidate).forEach(([attribute, fieldValue]) => typedField(attribute, hierarchyFieldValue(candidate.entryType, attribute, fieldValue)));
     if (context.chunk.pageNumber === null) throw new CandidateProjectionError("Extraction candidate has no source page.");
     return { payloadOrigin: "pdf_extraction", publicationCapability: "publishable", publicationBlockReason: null };
   } catch (error) {
@@ -254,6 +262,29 @@ export function projectSnapshotSpellCandidate(value: unknown, context: Readonly<
   return revision;
 }
 
+export function projectSnapshotHierarchyCandidate(value: unknown, context: Readonly<{
+  candidateKey: string; entryType: "class" | "species"; createdAt: string; source: ContentSource; fileId: string; evidence: SnapshotSpellEvidence;
+}>): CanonicalRevision {
+  const candidate = validateSnapshotHierarchyCandidate(value, context.candidateKey, context.entryType, context.evidence);
+  const sourceFile = context.source.files.find((file) => file.fileId === context.fileId);
+  if (!sourceFile || sourceFile.contentHash !== `sha256:${context.evidence.fileChecksumSha256}`) throw new CandidateProjectionError("Collector hierarchy file evidence changed across review.");
+  const fields = representableAttributes(candidate).map(([key, fieldValue]) => typedField(key, hierarchyTypedValue(key, fieldValue)));
+  const revision = createCanonicalRevision({ schemaVersion: 1, kind: "canonicalRevision",
+    entryId: canonicalCandidateEntryId(context.entryType, context.candidateKey), createdAt: context.createdAt, source: context.source,
+    sourceVersion: { url: context.evidence.sourceUrl, fingerprintSha256: context.evidence.fingerprintSha256, rawBlobPath: context.evidence.rawBlobPath,
+      fetchedAt: context.evidence.fetchedAt, fileChecksumSha256: context.evidence.fileChecksumSha256,
+      index: { url: context.evidence.indexUrl, fingerprintSha256: context.evidence.indexFingerprintSha256, rawBlobPath: context.evidence.rawIndexBlobPath,
+        fetchedAt: context.evidence.indexFetchedAt, cardFingerprintSha256: context.evidence.indexCardFingerprintSha256,
+        metadataEvidenceText: context.evidence.metadataEvidenceText } },
+    entry: { entryType: context.entryType === "class" ? "classFeature" : "other", name: candidate.title, aliases: candidate.aliases, typedFields: fields },
+    text: { plain: candidate.body, sections: [{ sectionId: `${context.entryType}-rules`, heading: candidate.title, text: candidate.body, startOffset: 0, endOffset: candidate.body.length }] },
+    citations: candidate.citations.map((citation, index) => ({ citationId: `collector-${index + 1}`, sourceId: context.source.sourceId,
+      fileId: context.fileId, page: null, section: candidate.title, quote: citation.quote, startOffset: null, endOffset: null,
+      fieldPath: citation.fieldPath, sourceUrl: citation.sourceUrl })),
+  });
+  assertCanonicalRevision(revision); return revision;
+}
+
 export function projectSnapshotCreatureCandidate(value: unknown, context: Readonly<{
   candidateKey: string; createdAt: string; source: ContentSource; fileId: string; evidence: SnapshotCollectorEvidence;
 }>): CanonicalRevision {
@@ -330,8 +361,9 @@ export function projectSnapshotFlatCandidate(value: unknown, context: Readonly<{
 
 export function projectExtractedCandidate(value: unknown, context: CandidatePublicationContext): CanonicalRevision {
   const candidate = validateExtractedCandidate(value, context);
+  validateHierarchyAttributes(candidate);
   if (candidate.entryType === "creature") validateCreatureProjection(candidate.attributes);
-  const typedFields = Object.entries(candidate.attributes).map(([attribute, fieldValue]) => typedField(attribute, fieldValue));
+  const typedFields = representableAttributes(candidate).map(([attribute, fieldValue]) => typedField(attribute, hierarchyFieldValue(candidate.entryType, attribute, fieldValue)));
   const plain = context.chunk.quoteText;
   if (context.chunk.pageNumber === null) throw new CandidateProjectionError("Canonical citation projection requires a positive source page.");
   const section = context.chunk.sectionHeading?.trim() || candidate.title;
@@ -374,6 +406,19 @@ export function projectExtractedCandidate(value: unknown, context: CandidatePubl
   });
   assertCanonicalRevision(revision);
   return revision;
+}
+
+function validateHierarchyAttributes(candidate: CandidateWire): void {
+  try {
+    if (candidate.entryType === "class") validateClassProjection(candidate.attributes);
+    if (candidate.entryType === "species") validateSpeciesProjection(candidate.attributes);
+  } catch (error) {
+    throw new CandidateProjectionError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function representableAttributes(candidate: Pick<CandidateWire, "entryType" | "attributes">): [string, unknown][] {
+  return Object.entries(candidate.attributes).filter(([key, value]) => !(candidate.entryType === "class" && key === "spellcastingAbility" && value === null));
 }
 
 function validateExtractedCandidate(value: unknown, context: CandidatePublicationContext): CandidateWire {
@@ -537,6 +582,33 @@ function validateSnapshotFlatCandidate(value: unknown, candidateKey: string, ent
   return value as unknown as SnapshotFlatCandidate;
 }
 
+function isSnapshotHierarchyCandidate(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && value.kind === "snapshotHierarchyCandidate" && value.schemaVersion === 1;
+}
+
+function validateSnapshotHierarchyCandidate(value: unknown, candidateKey: string, entryType: string | null, evidence: SnapshotSpellEvidence | null): SnapshotHierarchyCandidate {
+  if (!isSnapshotHierarchyCandidate(value) || (entryType !== "class" && entryType !== "species") || value.entryType !== entryType) throw new CandidateProjectionError("Collector candidate is not a typed class or species hierarchy.");
+  if (typeof value.externalId !== "string" || candidateKey !== collectorCandidateKey(entryType, entryType, value.externalId)) throw new CandidateProjectionError("Collector hierarchy identity does not match its review row.");
+  if (typeof value.title !== "string" || !value.title.trim() || typeof value.body !== "string" || !value.body.trim() || !Array.isArray(value.aliases)) throw new CandidateProjectionError("Collector hierarchy text is incomplete.");
+  if (!evidence || value.sourceUrl !== evidence.sourceUrl || value.sha256 !== evidence.fingerprintSha256 || value.parserVersion !== NEXT_DND_PARSER_VERSION || !isRecord(value.sourceVersion)
+      || value.sourceVersion.url !== evidence.sourceUrl || value.sourceVersion.sha256 !== evidence.fingerprintSha256
+      || value.sourceVersion.rawBlobPath !== evidence.rawBlobPath || value.sourceVersion.fetchedAt !== evidence.fetchedAt || !isRecord(value.sourceVersion.index)
+      || value.sourceVersion.index.url !== evidence.indexUrl || value.sourceVersion.index.sha256 !== evidence.indexFingerprintSha256
+      || value.sourceVersion.index.rawBlobPath !== evidence.rawIndexBlobPath || value.sourceVersion.index.fetchedAt !== evidence.indexFetchedAt
+      || value.sourceVersion.index.metadataEvidenceText !== evidence.metadataEvidenceText || value.sourceVersion.index.cardFingerprintSha256 !== evidence.indexCardFingerprintSha256) {
+    throw new CandidateProjectionError("Collector hierarchy provenance does not match persisted occurrence evidence.");
+  }
+  const attributes = entryType === "class" ? validateClassProjection(value.attributes) : validateSpeciesProjection(value.attributes);
+  for (const [key, fieldValue] of Object.entries(attributes)) if (!evidence.metadataEvidenceText.includes(`${key}=${JSON.stringify(fieldValue)}`)) throw new CandidateProjectionError(`Hierarchy field ${key} lacks exact index evidence.`);
+  const expected = new Map<string, { quote: string; sourceUrl: string }>([["$.title",{quote:String(value.title),sourceUrl:evidence.sourceUrl}],["$.body",{quote:String(value.body),sourceUrl:evidence.sourceUrl}],...Object.entries(attributes).map(([key,fieldValue])=>[`$.attributes.${key}`,{quote:JSON.stringify(fieldValue),sourceUrl:evidence.indexUrl}] as const)]);
+  if (!Array.isArray(value.citations) || value.citations.length !== expected.size) throw new CandidateProjectionError("Every hierarchy field requires one citation.");
+  for (const citation of value.citations) {
+    if (!isRecord(citation) || typeof citation.fieldPath !== "string") throw new CandidateProjectionError("Hierarchy citation shape is invalid.");
+    const exact=expected.get(citation.fieldPath);if(!exact||citation.quote!==exact.quote||citation.sourceUrl!==exact.sourceUrl) throw new CandidateProjectionError(`Hierarchy citation ${citation.fieldPath} is not exact immutable evidence.`);expected.delete(citation.fieldPath);
+  }
+  return value as unknown as SnapshotHierarchyCandidate;
+}
+
 function validateSnapshotSpellCandidate(value: unknown, candidateKey: string, entryType: string | null, evidence: SnapshotSpellEvidence | null): SnapshotSpellCandidate {
   if (!isSnapshotSpellCandidate(value) || entryType !== "spell") throw new CandidateProjectionError("Collector candidate is not a typed spell.");
   if (!hasExactKeys(value, ["aliases", "attributes", "body", "citations", "externalId", "extraction", "kind", "parserVersion", "schemaVersion", "sha256", "sourceUrl", "sourceVersion", "title"])) {
@@ -689,6 +761,8 @@ function typedField(key: string, value: unknown): Readonly<Record<string, JsonVa
   if (value !== null && typeof value === "object") return { ...base, type: "json", value: value as JsonValue };
   throw new CandidateProjectionError(`Attribute ${key} cannot be represented without changing its evidence semantics.`);
 }
+
+function hierarchyFieldValue(entryType:CompendiumEntryType,key:string,value:unknown):unknown{return entryType==="class"||entryType==="species"?hierarchyTypedValue(key,value):value;}
 
 function sameBoundary(value: Record<string, unknown>, expected: ExtractionBoundary): boolean {
   return hasExactKeys(value, ["accessTier", "edition", "fileId", "generationId", "language", "ownerUserId", "shared", "sourceId"])

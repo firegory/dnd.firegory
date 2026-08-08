@@ -2,6 +2,7 @@ import type { QueryResultRow } from "pg";
 
 import { withTransaction } from "../db/client.ts";
 import { normalizeSpellClasses, SpellValidationError, validateSpellProjection, type SpellProjection } from "./spell-schema.ts";
+import { HierarchyValidationError, validateClassProjection, validateSpeciesProjection, type ClassProjection, type SpeciesProjection } from "./hierarchy-schema.ts";
 import { challengeRatingNumber, CreatureValidationError, isLegacyCreatureProjection, validateCreatureProjection, type CreatureProjection, type LegacyCreatureProjection } from "./creature-schema.ts";
 import { isEquipmentWeight } from "./flat-schema.ts";
 
@@ -34,9 +35,12 @@ export type ProjectionInput =
   | (ProjectionBase & Omit<SpellProjection, "concentration" | "ritual"> & Readonly<{ type: "spell"; concentration?: boolean; ritual?: boolean }>)
   | (ProjectionBase & (CreatureProjection | LegacyCreatureProjection) & Readonly<{ type: "creature" }>)
   | (ProjectionBase & Readonly<{ type: "item"; category: "armor" | "potion" | "ring" | "rod" | "scroll" | "staff" | "wand" | "weapon" | "wondrous" | "other"; rarity: "common" | "uncommon" | "rare" | "very_rare" | "legendary" | "artifact" | "varies"; requiresAttunement?: boolean }>)
-  | (ProjectionBase & Readonly<{ type: "class"; hitDie: 6 | 8 | 10 | 12; primaryAbility: string; spellcastingAbility?: string | null }>)
+  | (ProjectionBase & Readonly<{ type: "class"; hitDie: 6 | 8 | 10 | 12; primaryAbility: string; spellcastingAbility?: string | null;
+      kind?: ClassProjection["kind"]; parentClassIds?: ClassProjection["parentClassIds"]; progressionColumns?: ClassProjection["progressionColumns"];
+      progressionRows?: ClassProjection["progressionRows"]; features?: ClassProjection["features"]; crossLinks?: readonly string[] }>)
   | (ProjectionBase & Readonly<{ type: "feature"; level: number; featureKind: string }>)
-  | (ProjectionBase & Readonly<{ type: "species"; size: "tiny" | "small" | "medium" | "large" | "huge" | "gargantuan"; speed: number }>)
+  | (ProjectionBase & Readonly<{ type: "species"; size: SpeciesProjection["size"]; speed: number; kind?: SpeciesProjection["kind"];
+      parentSpeciesIds?: SpeciesProjection["parentSpeciesIds"]; traits?: SpeciesProjection["traits"]; crossLinks?: readonly string[] }>)
   | (ProjectionBase & Readonly<{ type: "background"; abilityScores: readonly string[]; skillProficiencies: readonly string[] }>)
   | (ProjectionBase & Readonly<{ type: "feat"; category: "origin" | "general" | "fighting_style" | "epic_boon"; prerequisiteLevel?: number | null; prerequisiteText?: string | null; repeatable?: boolean }>)
   | (ProjectionBase & Readonly<{ type: "equipment"; category: "adventuring_gear" | "ammunition" | "armor" | "focus" | "mount" | "tool" | "vehicle" | "weapon" | "other"; costCp?: number | null; weightLb?: number | null }>)
@@ -344,9 +348,9 @@ function validateProjection(projection: ProjectionInput): void {
       }
       catch (error) { if (error instanceof CreatureValidationError) throw new CompendiumValidationError(error.message); throw error; }
       return;
-    case "class": if (![6, 8, 10, 12].includes(projection.hitDie)) throw new CompendiumValidationError("class.hitDie must be d6, d8, d10, or d12."); requireText(projection.primaryAbility, "class.primaryAbility"); optionalText(projection.spellcastingAbility, "class.spellcastingAbility"); return;
+    case "class": try { validateClassProjection(projection, { requireCompleteBase: false }); } catch (error) { if (error instanceof HierarchyValidationError) throw new CompendiumValidationError(error.message); throw error; } return;
     case "feature": integerRange(projection.level, 1, 20, "feature.level"); requireText(projection.featureKind, "feature.featureKind"); return;
-    case "species": enumValue(projection.size, ["tiny", "small", "medium", "large", "huge", "gargantuan"], "species.size"); integerRange(projection.speed, 1, 2147483647, "species.speed"); return;
+    case "species": try { validateSpeciesProjection(projection); } catch (error) { if (error instanceof HierarchyValidationError) throw new CompendiumValidationError(error.message); throw error; } return;
     case "background": stringList(projection.abilityScores, "background.abilityScores"); stringList(projection.skillProficiencies, "background.skillProficiencies"); return;
     case "feat": enumValue(projection.category, ["origin", "general", "fighting_style", "epic_boon"], "feat.category"); if (projection.prerequisiteLevel != null) integerRange(projection.prerequisiteLevel, 1, 20, "feat.prerequisiteLevel"); optionalText(projection.prerequisiteText, "feat.prerequisiteText"); optionalBoolean(projection.repeatable, "feat.repeatable"); return;
     case "equipment": enumValue(projection.category, ["adventuring_gear", "ammunition", "armor", "focus", "mount", "tool", "vehicle", "weapon", "other"], "equipment.category"); if (projection.costCp != null) integerRange(projection.costCp, 0, 2147483647, "equipment.costCp"); if (projection.weightLb != null) { numberRange(projection.weightLb, 0, 9999999.999, "equipment.weightLb"); if (!isEquipmentWeight(projection.weightLb)) throw new CompendiumValidationError("equipment.weightLb supports at most 3 decimal places."); } return;
@@ -403,15 +407,94 @@ async function insertProjection(client: DbClient, revisionId: string, projection
       return;
     }
     case "item": await client.query("INSERT INTO compendium_items (revision_id, category, rarity, requires_attunement, extension_data) VALUES ($1,$2,$3,$4,$5::jsonb)", [revisionId, projection.category, projection.rarity, projection.requiresAttunement ?? false, extension]); return;
-    case "class": await client.query("INSERT INTO compendium_classes (revision_id, hit_die, primary_ability, spellcasting_ability, extension_data) VALUES ($1,$2,$3,$4,$5::jsonb)", [revisionId, projection.hitDie, projection.primaryAbility.trim(), projection.spellcastingAbility?.trim() || null, extension]); return;
+    case "class": await insertClassProjection(client, revisionId, projection, extension); return;
     case "feature": await client.query("INSERT INTO compendium_features (revision_id, level, feature_kind, extension_data) VALUES ($1,$2,$3,$4::jsonb)", [revisionId, projection.level, projection.featureKind.trim(), extension]); return;
-    case "species": await client.query("INSERT INTO compendium_species (revision_id, size, speed, extension_data) VALUES ($1,$2,$3,$4::jsonb)", [revisionId, projection.size, projection.speed, extension]); return;
+    case "species": await insertSpeciesProjection(client, revisionId, projection, extension); return;
     case "background": await client.query("INSERT INTO compendium_backgrounds (revision_id, ability_scores, skill_proficiencies, extension_data) VALUES ($1,$2,$3,$4::jsonb)", [revisionId, normalizeStringList(projection.abilityScores), normalizeStringList(projection.skillProficiencies), extension]); return;
     case "feat": await client.query("INSERT INTO compendium_feats (revision_id, category, prerequisite_level, prerequisite_text, repeatable, extension_data) VALUES ($1,$2,$3,$4,$5,$6::jsonb)", [revisionId, projection.category, projection.prerequisiteLevel ?? null, projection.prerequisiteText?.trim() || null, projection.repeatable ?? false, extension]); return;
     case "equipment": await client.query("INSERT INTO compendium_equipment (revision_id, category, cost_cp, weight_lb, extension_data) VALUES ($1,$2,$3,$4,$5::jsonb)", [revisionId, projection.category, projection.costCp ?? null, projection.weightLb ?? null, extension]); return;
     case "glossary": await client.query("INSERT INTO compendium_glossary (revision_id, category, related_terms, extension_data) VALUES ($1,$2,$3,$4::jsonb)", [revisionId, projection.category.trim(), projection.relatedTerms.map((term) => term.trim()), extension]); return;
   }
 }
+
+async function insertClassProjection(client: DbClient, revisionId: string, projection: Extract<ProjectionInput, { type: "class" }>, extension: string): Promise<void> {
+  const normalized = validateClassProjection(projection, { requireCompleteBase: false });
+  await client.query("INSERT INTO compendium_classes (revision_id, class_kind, hit_die, primary_ability, spellcasting_ability, extension_data) VALUES ($1,$2,$3,$4,$5,$6::jsonb)",
+    [revisionId, normalized.kind, normalized.hitDie, normalized.primaryAbility, normalized.spellcastingAbility, hierarchyExtension(extension, normalized)]);
+  for (const [position, parentId] of normalized.parentClassIds.entries()) {
+    await insertResolvedRevisionLink(client, "compendium_class_parent_links", "child_revision_id", "parent_revision_id", revisionId, parentId, "class", position);
+  }
+  if (normalized.progressionRows.length) {
+    const table = await client.query<{ id: string }>("INSERT INTO compendium_class_progression_tables (class_revision_id,table_key,title) VALUES ($1,'class-progression','Class progression') RETURNING id", [revisionId]);
+    const tableId = requiredRow(table.rows[0], "Unable to create class progression table.").id;
+    const columns = new Map<string, string>();
+    for (const [position, column] of normalized.progressionColumns.entries()) {
+      const inserted = await client.query<{ id: string }>("INSERT INTO compendium_class_progression_columns (table_id,column_key,heading,position) VALUES ($1,$2,$3,$4) RETURNING id", [tableId, column.key, column.heading, position]);
+      columns.set(column.key, requiredRow(inserted.rows[0], "Unable to create progression column.").id);
+    }
+    for (const row of normalized.progressionRows) {
+      const inserted = await client.query<{ id: string }>("INSERT INTO compendium_class_progression_rows (table_id,level) VALUES ($1,$2) RETURNING id", [tableId, row.level]);
+      const rowId = requiredRow(inserted.rows[0], "Unable to create progression row.").id;
+      for (const column of normalized.progressionColumns) await client.query("INSERT INTO compendium_class_progression_cells (row_id,table_id,column_id,value) VALUES ($1,$2,$3,$4)", [rowId, tableId, columns.get(column.key), row.cells[column.key]]);
+    }
+  }
+  for (const [position, feature] of normalized.features.entries()) {
+    await insertResolvedFeatureLink(client, revisionId, feature, position);
+  }
+  await insertCrossLinks(client, revisionId, normalized.crossLinks);
+}
+
+async function insertSpeciesProjection(client: DbClient, revisionId: string, projection: Extract<ProjectionInput, { type: "species" }>, extension: string): Promise<void> {
+  const normalized = validateSpeciesProjection(projection);
+  await client.query("INSERT INTO compendium_species (revision_id, species_kind, size, speed, extension_data) VALUES ($1,$2,$3,$4,$5::jsonb)", [revisionId, normalized.kind, normalized.size, normalized.speed, hierarchyExtension(extension, normalized)]);
+  for (const [position, parentId] of normalized.parentSpeciesIds.entries()) {
+    await insertResolvedRevisionLink(client, "compendium_species_parent_links", "child_revision_id", "parent_revision_id", revisionId, parentId, "species", position);
+  }
+  for (const [position, trait] of normalized.traits.entries()) await client.query(
+    "INSERT INTO compendium_species_traits (species_revision_id,trait_key,title,body,anchor,overrides_trait_key,position) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    [revisionId, trait.key, trait.title, trait.body, trait.anchor, trait.overrides ?? null, position]);
+  await insertCrossLinks(client, revisionId, normalized.crossLinks);
+}
+
+async function insertResolvedRevisionLink(client: DbClient, table: string, childColumn: string, parentColumn: string, revisionId: string, canonicalId: string, type: "class" | "species", position: number): Promise<void> {
+  const key = canonicalId.slice(type.length + 1);
+  const targetTable=type==="class"?"compendium_classes":"compendium_species";const targetKind=type==="class"?"class_kind='class'":"species_kind='species'";
+  const result = await client.query(`INSERT INTO ${table} (${childColumn},${parentColumn},position)
+    SELECT $1,target.active_revision_id,$3 FROM compendium_revisions owner_revision
+    JOIN compendium_versions owner ON owner.id=owner_revision.version_id
+    JOIN compendium_entries entry ON entry.entry_type=$4 AND entry.edition=owner.edition AND entry.canonical_key=$2
+    JOIN compendium_versions target ON target.entry_id=entry.id AND target.language=owner.language AND target.source_id=owner.source_id
+    JOIN compendium_revisions target_revision ON target_revision.id=target.active_revision_id AND target_revision.version_id=target.id
+    JOIN ${targetTable} target_option ON target_option.revision_id=target_revision.id AND target_option.${targetKind}
+    WHERE owner_revision.id=$1 AND target.lifecycle='published' AND target_revision.lifecycle='published'`, [revisionId, key, position, type]);
+  if (!result.rowCount) throw new CompendiumValidationError(`Related ${type} source version ${canonicalId} was not found.`);
+}
+
+async function insertResolvedFeatureLink(client: DbClient, revisionId: string, feature: ClassProjection["features"][number], position: number): Promise<void> {
+  const result = await client.query(`INSERT INTO compendium_class_feature_links (class_revision_id,feature_revision_id,level,anchor,position)
+    SELECT $1,target.active_revision_id,$3,$4,$5 FROM compendium_revisions owner_revision
+    JOIN compendium_versions owner ON owner.id=owner_revision.version_id
+    JOIN compendium_entries entry ON entry.entry_type='feature' AND entry.edition=owner.edition AND entry.canonical_key=$2
+    JOIN compendium_versions target ON target.entry_id=entry.id AND target.language=owner.language AND target.source_id=owner.source_id
+    JOIN compendium_revisions target_revision ON target_revision.id=target.active_revision_id AND target_revision.version_id=target.id
+    WHERE owner_revision.id=$1 AND target.lifecycle='published' AND target_revision.lifecycle='published'`, [revisionId, feature.canonicalId.slice("feature-".length), feature.level, feature.anchor, position]);
+  if (!result.rowCount) throw new CompendiumValidationError(`Feature source version ${feature.canonicalId} was not found.`);
+}
+
+async function insertCrossLinks(client: DbClient, revisionId: string, canonicalIds: readonly string[]): Promise<void> {
+  for (const [position, canonicalId] of canonicalIds.entries()) {
+    const separator = canonicalId.indexOf("-");
+    const result = await client.query(`INSERT INTO compendium_option_cross_links (source_revision_id,target_revision_id,target_version_id,target_entry_id,position)
+      SELECT $1,target_revision.id,target.id,entry.id,$4 FROM compendium_revisions owner_revision JOIN compendium_versions owner ON owner.id=owner_revision.version_id
+      JOIN compendium_entries entry ON entry.entry_type=$2 AND entry.canonical_key=$3 AND entry.edition=owner.edition
+      JOIN compendium_versions target ON target.entry_id=entry.id AND target.source_id=owner.source_id AND target.language=owner.language AND target.lifecycle='published'
+      JOIN compendium_revisions target_revision ON target_revision.id=target.active_revision_id AND target_revision.version_id=target.id AND target_revision.lifecycle='published'
+      WHERE owner_revision.id=$1`,
+      [revisionId, canonicalId.slice(0, separator), canonicalId.slice(separator + 1), position]);
+    if (!result.rowCount) throw new CompendiumValidationError(`Cross-link target ${canonicalId} was not found.`);
+  }
+}
+function hierarchyExtension(extension: string, hierarchy: ClassProjection | SpeciesProjection): string { return JSON.stringify({ ...JSON.parse(extension), hierarchy }); }
 
 function normalizeName(value: string): string { return typeof value === "string" ? value.normalize("NFC").trim().toLowerCase().replace(/[\s._,/:;!?()-]+/gu, "-").replace(/^-|-$/g, "") : ""; }
 function requireUuid(value: string, field: string): void { if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw new CompendiumValidationError(`${field} must be a UUID.`); }

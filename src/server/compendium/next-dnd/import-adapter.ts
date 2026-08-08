@@ -2,6 +2,8 @@ import type { CompendiumImportRunService, ImportCandidateInput, ImportOccurrence
 import { NEXT_DND_CATEGORIES, nextDndCardFingerprint } from "./parser.ts";
 import type { NextDndSnapshotManifest, SnapshotDetail } from "./collector.ts";
 import { SPELL_SCHOOLS, type SpellSchool } from "../spell-schema.ts";
+import { hierarchyCandidate, hierarchyMetadataEvidence } from "./hierarchy-import.ts";
+import { collectorCandidateKey } from "../identity.ts";
 import { creatureEvidencePaths, normalizeChallengeRating, validateCreatureProjection, type CreatureBlock, type CreatureProjection } from "../creature-schema.ts";
 import { abilityEvidenceQuote, creatureFieldEvidenceSupports, parseCreatureAlignmentEvidence, passivePerceptionEvidenceQuote, speedEvidenceQuote } from "../creature-evidence.ts";
 import { canonicalFlatAttributes, FLAT_ENTRY_TYPES, projectionAttributes, validateFlatProjection, type FlatEntryType, type FlatProjection } from "../flat-schema.ts";
@@ -29,7 +31,8 @@ export function nextDndImportBatch(manifest: NextDndSnapshotManifest): Readonly<
       indexCardFingerprintSha256: detail.indexSource.cardFingerprintSha256,
       metadataEvidenceText: detail.category === "spells" ? spellMetadataEvidence(detail.indexMetadata)
         : detail.category === "bestiary" ? creatureMetadataEvidence(detail.indexMetadata)
-          : isFlatCategory(detail.category) ? flatMetadataEvidence(projectionAttributes(flatProjection(detail))) : null,
+          : detail.category === "class" || detail.category === "species" ? hierarchyMetadataEvidence(hierarchyCandidate(detail).attributes)
+            : isFlatCategory(detail.category) ? flatMetadataEvidence(projectionAttributes(flatProjection(detail))) : null,
     })),
     candidates: details.map((detail, occurrenceIndex) => candidate(detail, occurrenceIndex)),
   };
@@ -84,10 +87,11 @@ function isCompleteManifest(manifest: NextDndSnapshotManifest): boolean {
 function candidate(detail: SnapshotDetail, occurrenceIndex: number): ImportCandidateInput {
   return {
     occurrenceIndex,
-    candidateKey: `${detail.category}-${detail.externalId}`,
+    candidateKey: collectorCandidateKey(detail.category, NEXT_DND_CATEGORIES[detail.category].entryType, detail.externalId),
     entryType: NEXT_DND_CATEGORIES[detail.category].entryType,
     content: detail.category === "spells" ? spellCandidate(detail) : detail.category === "bestiary" ? creatureCandidate(detail)
-      : isFlatCategory(detail.category) ? flatCandidate(detail) : {
+      : detail.category === "class" || detail.category === "species" ? hierarchyCandidate(detail)
+        : isFlatCategory(detail.category) ? flatCandidate(detail) : {
       externalId: detail.externalId,
       sourceUrl: detail.sourceUrl,
       sha256: detail.sha256,

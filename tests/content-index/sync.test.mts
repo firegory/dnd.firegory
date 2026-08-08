@@ -8,12 +8,15 @@ import { assertCanonicalRevision, loadResolvedCanonicalRevisions } from "../../s
 import {
   activateManagedGeneration,
   buildSyncPlan,
+  bindNfsOptionRelation,
+  expandAffectedSourceClosure,
   claimContentIndexRun,
   cleanupRemovedNfsFile,
   heartbeatContentIndexRun,
   reconcileManagedProjectionRows,
   resolveNfsManagedSourceAndFile,
   synchronizeContentIndex,
+  upsertFileIndexRows,
 } from "../../src/server/content-index/sync.ts";
 import {
   CONTENT_INDEX_PROJECTOR_VERSION,
@@ -23,6 +26,7 @@ import {
   projectionHash,
 } from "../../src/server/content-index/projection.ts";
 import { mapSearchChunk } from "../../src/server/search/map-chunk.ts";
+import { OptionReadService } from "../../src/server/compendium/option-read-service.ts";
 
 const dataRoot = resolve("content-repository");
 
@@ -49,6 +53,60 @@ test("canonical projection deterministically rebuilds entries, pages, and chunks
   assert.equal(first[0].chunks.map((chunk) => chunk.text).join(""), first[0].plainText);
 });
 
+test("affected source closure follows incoming exact-version relations", () => {
+  const relation = (sourceEntryId: string, targetEntryId: string) => ({ sourceEntryId, targetEntryId }) as never;
+  const affected = expandAffectedSourceClosure(new Set(["target"]), [
+    { entryId: "target", fileUuid: "target-file", relations: [] },
+    { entryId: "target-file-peer", fileUuid: "target-file", relations: [] },
+    { entryId: "cross-file-source", fileUuid: "source-file", relations: [relation("cross-file-source", "target")] },
+    { entryId: "source-file-peer", fileUuid: "source-file", relations: [] },
+    { entryId: "incoming-source", fileUuid: "incoming-file", relations: [relation("incoming-source", "cross-file-source")] },
+    { entryId: "unrelated", fileUuid: "unrelated-file", relations: [] },
+  ] as never);
+  assert.deepEqual([...affected], ["target", "target-file-peer", "cross-file-source", "source-file-peer", "incoming-source"]);
+});
+
+test("reused source and cross-file bindings commit exact hierarchy relation FKs",async()=>{
+  const repositoryId="binding-fixture",projectedSourceId="11111111-1111-4111-8111-111111111111",boundSourceId="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const boundFileA="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",boundFileB="cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const base=fakeBoundProjection("class-17","projected-file-a",projectedSourceId,"1",[]);
+  const child=fakeBoundProjection("class-133","projected-file-a",projectedSourceId,"2",[fakeRelation("class-133","2","class-17","1",projectedSourceId,"parent")]);
+  const species=fakeBoundProjection("species-1","projected-file-b",projectedSourceId,"3",[]);
+  (base.relations as unknown[]).push(fakeRelation("class-17","1","species-1","3",projectedSourceId,"cross_link"));
+  const bindingA={sourceId:boundSourceId,fileId:boundFileA,ownsSource:false,ownsFile:false},bindingB={sourceId:boundSourceId,fileId:boundFileB,ownsSource:false,ownsFile:false};
+  const bindings=new Map([[base.entryId,{projection:base,binding:bindingA}],[child.entryId,{projection:child,binding:bindingA}],[species.entryId,{projection:species,binding:bindingB}]]) as never;
+  const entries=new Set<string>(),relations:Array<readonly unknown[]>=[];
+  const client={async query(text:string,params:readonly unknown[]=[]){
+    if(text.includes("unmanaged_collision"))return result([{unmanaged_collision:false}]);
+    if(text.includes("INSERT INTO nfs_index_entries")){entries.add(`${params[1]}:${params[2]}:${params[3]}:${params[11]}:${params[12]}`);return result([]);}
+    if(text.includes("INSERT INTO nfs_index_option_relations")){relations.push(params);return result([]);}
+    return result([]);
+  }};
+  await upsertFileIndexRows(client as never,repositoryId,[base,child] as never,bindingA,bindings);
+  await upsertFileIndexRows(client as never,repositoryId,[species] as never,bindingB,bindings);
+  assert.equal(relations.length,2);
+  assert.deepEqual(relations.map((values)=>[values[1],values[3],values[4],values[5],values[7],values[8]]),[
+    ["class-17",boundSourceId,boundFileA,"species-1",boundSourceId,boundFileB],
+    ["class-133",boundSourceId,boundFileA,"class-17",boundSourceId,boundFileA],
+  ]);
+  for(const values of relations){assert.ok(entries.has(`${values[0]}:${values[1]}:${values[2]}:${values[3]}:${values[4]}`));assert.ok(entries.has(`${values[0]}:${values[5]}:${values[6]}:${values[7]}:${values[8]}`));}
+  const childRelation=relations.find((values)=>values[1]==="class-133")!;let readerSql="";
+  const detail=await new OptionReadService({async query(sql:string){readerSql=sql;return{rows:[{entry_id:"class-133",revision_id:child.revisionId,name:"Champion",typed_fields:classReaderFields(),aliases:[],plain_text:"Champion rules.",canonical_payload:{citations:[]},source_id:boundSourceId,file_id:boundFileA,mime_type:"text/plain",source_title:"Source",edition:"5.5e",language:"en",publication_code:"SRC",publication_revision:"2024",source_versions:[],relations:[{targetId:childRelation[5],targetRevisionId:childRelation[6],targetSourceId:childRelation[7],relationKind:"parent",targetKind:"class",sourceAnchor:"",anchor:null}]}]};}}).get("class",{role:"user"},"class-133");
+  assert.deepEqual(detail.parentClassIds,["class-17"]);assert.equal(detail.relations[0].targetSourceId,boundSourceId);
+  assert.match(readerSql,/target\.file_id=relation\.target_file_id/);assert.match(readerSql,/relation\.source_file_id=option_version\.file_id/);
+});
+
+test("hierarchy relation binding fails closed on missing, stale, or mismatched endpoints",()=>{
+  const projectedSource="11111111-1111-4111-8111-111111111111",source=fakeBoundProjection("class-133","file-a",projectedSource,"2",[]),target=fakeBoundProjection("class-17","file-b",projectedSource,"1",[]);
+  const relation=fakeRelation("class-133","2","class-17","1",projectedSource,"parent"),binding={sourceId:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",fileId:"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",ownsSource:false,ownsFile:false};
+  const entries=new Map([[source.entryId,{projection:source,binding}],[target.entryId,{projection:target,binding:{...binding,fileId:"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}]]) as never;
+  assert.throws(()=>bindNfsOptionRelation(relation as never,new Map([[source.entryId,entries.get(source.entryId)]]) as never),/no resolved managed binding/);
+  assert.throws(()=>bindNfsOptionRelation({...relation,targetRevisionId:`rev-${"9".repeat(64)}`} as never,entries),/stale exact revision/);
+  assert.throws(()=>bindNfsOptionRelation({...relation,edition:"5e"} as never,entries),/crosses edition or language/);
+  const mismatched=new Map(entries);mismatched.set(target.entryId,{projection:target,binding:{...binding,sourceId:"dddddddd-dddd-4ddd-8ddd-dddddddddddd"}});
+  assert.throws(()=>bindNfsOptionRelation(relation as never,mismatched as never),/mismatched managed sources/);
+});
+
 test("projection and manifest identities are stable and content-derived", async () => {
   const resolved = await loadResolvedCanonicalRevisions(dataRoot);
   const projected = projectCanonicalRevisions(resolved.manifest.repositoryId, resolved.revisions, resolved.sourceFiles);
@@ -56,7 +114,7 @@ test("projection and manifest identities are stable and content-derived", async 
   assert.match(hash, /^sha256:[0-9a-f]{64}$/);
   assert.equal(hash, projectionHash(resolved.manifest.repositoryId, projected));
   assert.match(entryProjectionHash(projected[0]), /^sha256:[0-9a-f]{64}$/);
-  assert.equal(CONTENT_INDEX_PROJECTOR_VERSION, 3);
+  assert.equal(CONTENT_INDEX_PROJECTOR_VERSION, 5);
   const changedSize = structuredClone(projected);
   (changedSize[0].file as { byteSize: number }).byteSize++;
   assert.notEqual(hash, projectionHash(resolved.manifest.repositoryId, changedSize));
@@ -387,6 +445,9 @@ async function mockActivationTransaction(state: ActivationFixture, operation: (c
 function sourceDatabaseRow(entry: ReturnType<typeof projectCanonicalRevisions>[number], id: string) {
   return { id, title: entry.source.title, category: entry.source.category, edition: entry.source.edition, language: entry.source.language, access_tier: entry.source.accessTier, shared: entry.source.shared, owner_user_id: entry.source.ownerUserId, publication_code: entry.source.publication.code, publication_title: entry.source.publication.title, publisher: entry.source.publication.publisher, release_year: entry.source.publication.releaseYear, publication_revision: entry.source.publication.revision ?? null, external_origin_url: entry.source.publication.origin?.url ?? null, external_origin_id: entry.source.publication.origin?.id ?? null, attribution: entry.source.publication.attribution ?? null, source_priority: entry.source.publication.sourcePriority, canonical_book_id: entry.source.publication.canonicalBookId, license: entry.source.license ?? null, deleted_at: null, mapping_repository_id: null, owns_source: null };
 }
+function fakeBoundProjection(entryId:string,fileUuid:string,sourceUuid:string,revision:string,relations:unknown[]){const revisionId=`rev-${revision.repeat(64)}`;return{id:`id-${entryId}`,entryId,revisionId,contentHash:`sha256:${revision.repeat(64)}`,entryType:entryId.startsWith("species-")?"other":"classFeature",name:entryId,aliases:[],typedFields:[],plainText:`${entryId} rules`,canonicalPayload:{},source:{sourceId:"canonical-source",title:"Source",category:"core_rules",edition:"5.5e",language:"en",accessTier:"open",shared:false,ownerUserId:null,publication:{code:"SRC",title:"Source",publisher:"Fixture",releaseYear:2024,revision:"2024",sourcePriority:1,canonicalBookId:"source"},files:[]},file:{fileId:fileUuid,path:`files/${fileUuid}`,mediaType:"text/plain",contentHash:`sha256:${"f".repeat(64)}`,byteSize:10},sourceUuid,fileUuid,generationId:`gen-${fileUuid}`,documentId:`doc-${entryId}`,pages:[],chunks:[],relations} as never;}
+function fakeRelation(sourceEntryId:string,sourceRevision:string,targetEntryId:string,targetRevision:string,sourceId:string,relationKind:"parent"|"cross_link"){return{sourceEntryId,sourceRevisionId:`rev-${sourceRevision.repeat(64)}`,sourceId,targetEntryId,targetRevisionId:`rev-${targetRevision.repeat(64)}`,targetSourceId:sourceId,edition:"5.5e",language:"en",relationKind,targetKind:targetEntryId.startsWith("species-")?"species":"class",targetLifecycle:"active",sourceAnchor:"",anchor:null,position:0};}
+function classReaderFields(){return[{key:"kind",value:"subclass"},{key:"hit-die",value:10},{key:"primary-ability",value:"Strength"},{key:"parent-class-ids",value:["class-17"]},{key:"progression-columns",value:[]},{key:"progression-rows",value:[]},{key:"features",value:[]},{key:"cross-links",value:[]}];}
 function result(rows: readonly Record<string, unknown>[]) { return { rows, rowCount: rows.length, command: "SELECT", oid: 0, fields: [] } as never; }
 
 test("validate mode completes without any database access", async () => {

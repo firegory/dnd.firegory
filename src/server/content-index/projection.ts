@@ -5,8 +5,9 @@ import type { CanonicalRevision, ContentSource, JsonValue } from "../content-sto
 import { canonicalJson } from "../content-storage/repository.ts";
 import type { ValidatedSourceFile } from "../content-storage/validation.ts";
 import { chunkPage } from "../../worker/ingestion/chunking.ts";
+import { classProjectionFromTypedFields, speciesProjectionFromTypedFields } from "../compendium/hierarchy-schema.ts";
 
-export const CONTENT_INDEX_PROJECTOR_VERSION = 3 as const;
+export const CONTENT_INDEX_PROJECTOR_VERSION = 5 as const;
 
 type Citation = Readonly<{
   citationId: string;
@@ -70,6 +71,16 @@ export type IndexedEntryProjection = Readonly<{
   documentId: string;
   pages: readonly Readonly<{ pageNumber: number; text: string; citations: readonly IndexedCitation[] }>[];
   chunks: readonly IndexedChunk[];
+  relations: readonly IndexedOptionRelation[];
+}>;
+
+export type IndexedOptionRelation = Readonly<{
+  sourceEntryId: string; sourceRevisionId: string; sourceId: string;
+  targetEntryId: string; targetRevisionId: string; targetSourceId: string;
+  edition: "5e" | "5.5e"; language: "en" | "ru";
+  relationKind: "parent" | "feature" | "cross_link" | "trait_override";
+  targetKind: "class" | "subclass" | "species" | "variant" | "feature" | "other";
+  targetLifecycle: "active"; sourceAnchor: string; anchor: string | null; position: number;
 }>;
 
 export function deterministicUuid(namespace: string, ...parts: readonly string[]): string {
@@ -100,7 +111,7 @@ export function projectCanonicalRevisions(
   }
 
   const fileChunkIndexes = new Map<string, number>();
-  return sorted.map((revision) => {
+  const projected = sorted.map((revision) => {
     const citations = revision.citations as unknown as readonly Citation[];
     const sections = revision.text.sections as unknown as readonly Section[];
     const primaryCitation = citations[0];
@@ -202,9 +213,83 @@ export function projectCanonicalRevisions(
         citations: pageCitations.map(indexedCitation),
       })),
       chunks,
+      relations: [],
     };
   });
+  return resolveOptionRelations(projected);
 }
+
+function resolveOptionRelations(entries: readonly IndexedEntryProjection[]): readonly IndexedEntryProjection[] {
+  const byId = new Map(entries.map((entry) => [entry.entryId, entry]));
+  const projectionById = new Map<string, ReturnType<typeof classProjectionFromTypedFields> | ReturnType<typeof speciesProjectionFromTypedFields>>();
+  const targetKind = (target: IndexedEntryProjection): IndexedOptionRelation["targetKind"] => {
+    if (target.entryId.startsWith("class-")) return (projectionById.get(target.entryId) ?? classProjectionFromTypedFields(target.typedFields)).kind;
+    if (target.entryId.startsWith("species-")) return (projectionById.get(target.entryId) ?? speciesProjectionFromTypedFields(target.typedFields)).kind;
+    if (target.entryId.startsWith("feature-")) return "feature";
+    return "other";
+  };
+  const resolve = (source: IndexedEntryProjection, targetId: string, relationKind: IndexedOptionRelation["relationKind"], anchor: string | null, position: number, sourceAnchor = ""): IndexedOptionRelation => {
+    const target = byId.get(targetId);
+    if (!target || target.source.sourceId !== source.source.sourceId || target.source.edition !== source.source.edition || target.source.language !== source.source.language) {
+      throw new Error(`Relation ${source.entryId} -> ${targetId} requires an exact target in the same source, edition, and language snapshot`);
+    }
+    return { sourceEntryId:source.entryId,sourceRevisionId:source.revisionId,sourceId:source.sourceUuid,targetEntryId:target.entryId,
+      targetRevisionId:target.revisionId,targetSourceId:target.sourceUuid,edition:source.source.edition,language:source.source.language,
+      relationKind,targetKind:targetKind(target),targetLifecycle:"active",sourceAnchor,anchor,position };
+  };
+  for (const entry of entries) {
+    if (entry.entryId.startsWith("class-")) projectionById.set(entry.entryId, classProjectionFromTypedFields(entry.typedFields));
+    if (entry.entryId.startsWith("species-")) projectionById.set(entry.entryId, speciesProjectionFromTypedFields(entry.typedFields));
+  }
+  const graph = new Map<string, string[]>();
+  for (const [entryId, projection] of projectionById) {
+    const parents = "parentClassIds" in projection ? projection.parentClassIds : projection.parentSpeciesIds;
+    graph.set(entryId, [...parents]);
+  }
+  for (const start of graph.keys()) assertAcyclicPathToBase(start, graph, projectionById, []);
+  for (const [entryId, projection] of projectionById) if ("traits" in projection) {
+    const inherited = inheritedTraitKeys(entryId, graph, projectionById, new Set());
+    for (const trait of projection.traits) if (trait.overrides && !inherited.has(trait.overrides)) {
+      throw new Error(`Trait override ${entryId}#${trait.anchor} does not resolve an inherited parent trait`);
+    }
+  }
+  return entries.map((entry) => {
+    const projection=projectionById.get(entry.entryId);if(!projection)return entry;const relations:IndexedOptionRelation[]=[];
+    const parents="parentClassIds" in projection?projection.parentClassIds:projection.parentSpeciesIds;
+    parents.forEach((id,index)=>relations.push(resolve(entry,id,"parent",null,index)));
+    if("features" in projection)projection.features.forEach((feature,index)=>relations.push(resolve(entry,feature.canonicalId,"feature",feature.anchor,index)));
+    if("traits" in projection) projection.traits.forEach((trait,index)=>{
+      if(!trait.overrides)return;
+      const parentId=parents.find((id)=>{const parent=projectionById.get(id);return parent&&"traits" in parent&&parent.traits.some(({key})=>key===trait.overrides);});
+      const parent=parentId?projectionById.get(parentId):undefined;const inherited=parent&&"traits" in parent?parent.traits.find(({key})=>key===trait.overrides):undefined;
+      if(!parentId||!inherited)throw new Error(`Trait override ${entry.entryId}#${trait.anchor} does not resolve an inherited parent trait`);
+      relations.push(resolve(entry,parentId,"trait_override",inherited.anchor,index,trait.anchor));
+    });
+    projection.crossLinks.forEach((id,index)=>relations.push(resolve(entry,id,"cross_link",null,index)));
+    return {...entry,relations};
+  });
+}
+
+function assertAcyclicPathToBase(
+  entryId:string,
+  graph:ReadonlyMap<string,readonly string[]>,
+  projections:ReadonlyMap<string,ReturnType<typeof classProjectionFromTypedFields>|ReturnType<typeof speciesProjectionFromTypedFields>>,
+  path:readonly string[],
+):void {
+  if(path.includes(entryId))throw new Error(`Hierarchy cycle detected: ${[...path,entryId].join(" -> ")}`);
+  const projection=projections.get(entryId);if(!projection)throw new Error(`Hierarchy target ${entryId} does not exist in the exact source snapshot`);
+  const derived=projection.kind==="subclass"||projection.kind==="variant";const parents=graph.get(entryId)??[];
+  if(derived&&parents.length===0)throw new Error(`Derived option ${entryId} has no explicit parent`);
+  if(!derived&&parents.length>0)throw new Error(`Base option ${entryId} cannot have a parent`);
+  for(const parent of parents){const target=projections.get(parent);if(!target)throw new Error(`Hierarchy parent ${parent} does not exist in the exact source snapshot`);if(("parentClassIds" in projection)!==("parentClassIds" in target))throw new Error(`Hierarchy parent ${parent} has the wrong kind`);assertAcyclicPathToBase(parent,graph,projections,[...path,entryId]);if(target.kind!==(("parentClassIds" in projection)?"class":"species"))throw new Error(`Hierarchy parent ${parent} must be a direct base option`);}
+}
+
+function inheritedTraitKeys(
+  entryId:string,
+  graph:ReadonlyMap<string,readonly string[]>,
+  projections:ReadonlyMap<string,ReturnType<typeof classProjectionFromTypedFields>|ReturnType<typeof speciesProjectionFromTypedFields>>,
+  visited:Set<string>,
+):Set<string>{const result=new Set<string>();if(visited.has(entryId))return result;visited.add(entryId);for(const parent of graph.get(entryId)??[]){const projection=projections.get(parent);if(projection&&"traits" in projection)for(const trait of projection.traits)result.add(trait.key);for(const key of inheritedTraitKeys(parent,graph,projections,visited))result.add(key);}return result;}
 
 export function projectionHash(repositoryId: string, projections: readonly IndexedEntryProjection[]): string {
   return contentProjectionHash({
