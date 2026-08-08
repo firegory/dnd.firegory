@@ -1,11 +1,10 @@
 import process from "node:process";
-import { readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { getPool } from "../src/server/db/client.ts";
 import { inspectPreparedSeed, loadPreparedSeed, type SeedSlotResult } from "../src/server/corpus-seed/executor.ts";
-import { canonicalJson, prepareSeed, sha256, validatePlan, writeManifestAtomic } from "../src/server/corpus-seed/model.ts";
+import { captureSeedDescriptors, prepareCapturedSeed, sha256, writeManifestAtomic } from "../src/server/corpus-seed/model.ts";
 import { seedCommandIncomplete } from "../src/server/corpus-seed/status.ts";
 
 const usage = `Usage:
@@ -33,16 +32,6 @@ let plannedContentTypes: readonly string[] = approvedTypes;
 let databaseUsed = false;
 
 try {
-  const planBytes = await readFile(planPath);
-  planFileDigest = sha256(planBytes);
-  const planPreview = validatePlan(JSON.parse(planBytes.toString("utf8")));
-  if (planPreview.planId !== "approved-2024-corpus-v1"
-    || JSON.stringify(planPreview.slots.map(({ contentType }) => contentType).sort()) !== JSON.stringify(approvedTypes)) {
-    throw new Error("The configured seed plan is not the approved complete 2024 plan.");
-  }
-  planId = planPreview.planId;
-  planDigest = sha256(canonicalJson(planPreview));
-  plannedContentTypes = planPreview.slots.map(({ contentType }) => contentType);
   const { values, positionals } = parseArgs({
     args: process.argv.slice(2),
     options: {
@@ -59,11 +48,18 @@ try {
   if (!values.inputs || !values.manifest) throw new Error("--inputs and --manifest are required.");
   inputsPath = resolve(values.inputs);
   manifestPath = resolve(values.manifest);
-  inputDescriptorDigest = sha256(await readFile(inputsPath));
-  const prepared = await prepareSeed(planPath, inputsPath);
+  const captured = await captureSeedDescriptors(planPath, inputsPath);
+  const prepared = await prepareCapturedSeed(captured);
+  planFileDigest = sha256(captured.planBytes);
+  inputDescriptorDigest = sha256(captured.inputBytes);
+  if (prepared.plan.planId !== "approved-2024-corpus-v1"
+    || JSON.stringify(prepared.plan.slots.map(({ contentType }) => contentType).sort()) !== JSON.stringify(approvedTypes)) {
+    throw new Error("The configured seed plan is not the approved complete 2024 plan.");
+  }
   planId = prepared.plan.planId;
   planDigest = prepared.planDigest;
   inputDigest = prepared.inputDigest;
+  plannedContentTypes = prepared.plan.slots.map(({ contentType }) => contentType);
   results = prepared.slots.map((slot) => ({
     slotId: slot.planSlot.id,
     contentType: slot.planSlot.contentType,
@@ -79,6 +75,7 @@ try {
       attribution: slot.input.source.attribution,
       license: slot.input.source.license,
       evidenceReference: slot.input.source.licenseApproval.evidenceUri,
+      evidenceSha256: slot.input.source.licenseApproval.evidenceSha256,
     },
   }));
   if (command === "load") {
@@ -123,6 +120,7 @@ async function emitManifest(status: "succeeded" | "failed", failure: string | nu
       : plannedContentTypes.map((contentType) => [contentType, { discovered: 0, imported: 0, reviewed: 0, published: 0, indexed: 0, failures: status === "failed" ? 1 : 0 }])),
     sources: results.map(({ slotId, sourceId, importRunId, operation, provenance }) => ({ slotId, sourceId, importRunId, operation, provenance })),
     failures: [...results.flatMap(({ failures }) => failures), ...(failure ? [failure] : [])],
+    evidenceGate: { structuralDeclarationOnly: true, independentlyVerifiedExternalApprovalArtifactRequired: true },
     safety: { autoPublished: false, pathsRedacted: true, secretsRedacted: true },
   });
 }

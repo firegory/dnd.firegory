@@ -855,8 +855,7 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
 }
 
 function validSnapshotBlobPath(path: string, hash: unknown): boolean {
-  return typeof hash === "string" && (path === `blobs/${hash}.html`
-    || /^sources\/[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?\/evidence\/[0-9a-f]{64}\.html$/.test(path) && path.endsWith(`/${hash}.html`));
+  return typeof hash === "string" && path === `blobs/${hash}.html`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

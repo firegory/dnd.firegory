@@ -408,6 +408,17 @@ export async function validateCanonicalRevisionDependencies(
       throw new ContentIntegrityError(`Source file ${file.fileId} does not match its contentHash.`);
     }
   }
+  if (revision.sourceVersion) {
+    for (const evidence of [
+      { path: revision.sourceVersion.rawBlobPath, hash: revision.sourceVersion.fingerprintSha256 },
+      { path: revision.sourceVersion.index.rawBlobPath, hash: revision.sourceVersion.index.fingerprintSha256 },
+    ]) {
+      const bytes = await readFile(await resolveRepositoryFile(root, evidence.path));
+      if (createHash("sha256").update(bytes).digest("hex") !== evidence.hash) {
+        throw new ContentIntegrityError(`Canonical raw evidence ${evidence.path} does not match its occurrence fingerprint.`);
+      }
+    }
+  }
 }
 
 async function loadSource(root: string, sourceId: string): Promise<ContentSource> {

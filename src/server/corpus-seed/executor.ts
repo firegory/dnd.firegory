@@ -16,7 +16,7 @@ export type SeedSlotResult = Readonly<{
   operation: "loaded" | "resumed" | "noop" | "absent" | "pending" | "failed";
   counts: SeedTypeCounts;
   failures: readonly string[];
-  provenance: Readonly<{ canonicalSourceId: string; originUrl: string; originId: string; attribution: string; license: string; evidenceReference: string }>;
+  provenance: Readonly<{ canonicalSourceId: string; originUrl: string; originId: string; attribution: string; license: string; evidenceReference: string; evidenceSha256: string }>;
 }>;
 
 type Db = Readonly<{ query<T extends QueryResultRow = QueryResultRow>(sql: string, values?: readonly unknown[]): Promise<{ rows: T[]; rowCount?: number | null }> }>;
@@ -49,6 +49,7 @@ export async function loadPreparedSeed(prepared: PreparedSeed, dependencies: See
       const boundary = await ensureSourceBoundary(slot, transaction, sourceInstaller, dependencies.dataRoot ?? "test-injected");
       sourceId = boundary.sourceId;
       const run = await runs.createRun({
+        id: slot.identities.runId,
         sourceId: boundary.sourceId,
         fileId: boundary.fileId,
         importer: "approved-2024-corpus-seed",
@@ -59,6 +60,7 @@ export async function loadPreparedSeed(prepared: PreparedSeed, dependencies: See
         inputSha256: slot.inputDigest,
         actor: "corpus-seed-cli",
       });
+      if (run.id !== slot.identities.runId) throw new Error(`Seed import run identity for slot ${slot.planSlot.id} is not deterministic.`);
       runId = run.id;
       const claim = await runs.claimRun(run.id, "corpus-seed-cli");
       if (claim.completed) {
@@ -95,7 +97,7 @@ export async function inspectPreparedSeed(prepared: PreparedSeed, db: Db, dataRo
          AND run.importer = 'approved-2024-corpus-seed' AND run.input_sha256 = $3
        WHERE source.canonical_source_id = $1 AND source.deleted_at IS NULL
        ORDER BY run.created_at DESC LIMIT 1`,
-      [slot.input.source.canonicalSourceId, slot.manifestDigest, slot.inputDigest],
+       [slot.identities.versionedSourceId, slot.manifestDigest, slot.inputDigest],
     )).rows[0];
     let operation: SeedSlotResult["operation"] = row?.run_status === "succeeded" ? "noop" : row?.run_status === "failed" ? "failed" : row ? "pending" : "absent";
     const failures: string[] = row?.run_status === "failed" ? ["Durable import run is failed and remains retryable."] : [];
@@ -110,15 +112,15 @@ async function ensureSourceBoundary(slot: PreparedSeedSlot, transaction: Transac
     const source = slot.input.source;
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`corpus-seed:${source.canonicalSourceId}`]);
     await client.query(
-      `INSERT INTO sources (
-         canonical_source_id,title,category,edition,language,access_tier,shared,publication_code,
-         publication_title,publisher,release_year,publication_revision,external_origin_url,
-         external_origin_id,attribution,source_priority,canonical_book_id,license,metadata)
-       VALUES ($1,$2,$3,'5.5e',$4,$5,$6,$7,$2,$8,2024,$9,$10,$11,$12,0,$13,$14,$15::jsonb)
-       ON CONFLICT (canonical_source_id) WHERE canonical_source_id IS NOT NULL DO NOTHING`,
-      [source.canonicalSourceId, source.title, source.category, source.language, source.accessTier, source.accessTier === "premium",
+       `INSERT INTO sources (
+          id,canonical_source_id,title,category,edition,language,access_tier,shared,publication_code,
+          publication_title,publisher,release_year,publication_revision,external_origin_url,
+          external_origin_id,attribution,source_priority,canonical_book_id,license,metadata)
+        VALUES ($1,$2,$3,$4,'5.5e',$5,$6,$7,$8,$3,$9,2024,$10,$11,$12,$13,0,$14,$15,$16::jsonb)
+        ON CONFLICT (canonical_source_id) WHERE canonical_source_id IS NOT NULL DO NOTHING`,
+      [slot.identities.sourceId, slot.identities.versionedSourceId, source.title, source.category, source.language, source.accessTier, source.accessTier === "premium",
         source.publicationCode, source.publisher, source.revision, source.originUrl, source.originId, source.attribution,
-        source.canonicalBookId, source.license, JSON.stringify({ corpusSeed: { inputSlotId: slot.planSlot.inputSlotId, licenseApproval: source.licenseApproval } })],
+        source.canonicalBookId, source.license, JSON.stringify({ corpusSeed: { baseCanonicalSourceId: source.canonicalSourceId, inputSlotId: slot.planSlot.inputSlotId, versionDigest: slot.identities.versionDigest, licenseApproval: source.licenseApproval } })],
     );
     const persisted = (await client.query<{
       id: string; title: string; category: string; edition: string; language: string; access_tier: string; publication_code: string;
@@ -126,25 +128,25 @@ async function ensureSourceBoundary(slot: PreparedSeedSlot, transaction: Transac
       attribution: string; canonical_book_id: string; license: string; metadata: Record<string, unknown>;
     }>(`SELECT id,title,category,edition,language,access_tier,publication_code,publisher,release_year,publication_revision,
               external_origin_url,external_origin_id,attribution,canonical_book_id,license,metadata
-         FROM sources WHERE canonical_source_id=$1 AND deleted_at IS NULL FOR UPDATE`, [source.canonicalSourceId])).rows[0];
-    if (!persisted || persisted.title !== source.title || persisted.category !== source.category || persisted.edition !== "5.5e"
+         FROM sources WHERE canonical_source_id=$1 AND deleted_at IS NULL FOR UPDATE`, [slot.identities.versionedSourceId])).rows[0];
+    if (!persisted || persisted.id !== slot.identities.sourceId || persisted.title !== source.title || persisted.category !== source.category || persisted.edition !== "5.5e"
       || persisted.language !== source.language || persisted.access_tier !== source.accessTier || persisted.publication_code !== source.publicationCode
       || persisted.publisher !== source.publisher || persisted.release_year !== 2024 || persisted.publication_revision !== source.revision
       || persisted.external_origin_url !== source.originUrl || persisted.external_origin_id !== source.originId || persisted.attribution !== source.attribution
       || persisted.canonical_book_id !== source.canonicalBookId || persisted.license !== source.license
-      || canonicalJson(persisted.metadata?.corpusSeed ?? null) !== canonicalJson({ inputSlotId: slot.planSlot.inputSlotId, licenseApproval: source.licenseApproval })) {
-      throw new Error(`Canonical source ${source.canonicalSourceId} already exists with different approved provenance or access metadata.`);
+      || canonicalJson(persisted.metadata?.corpusSeed ?? null) !== canonicalJson({ baseCanonicalSourceId: source.canonicalSourceId, inputSlotId: slot.planSlot.inputSlotId, versionDigest: slot.identities.versionDigest, licenseApproval: source.licenseApproval })) {
+      throw new Error(`Canonical source ${slot.identities.versionedSourceId} already exists with different approved provenance or access metadata.`);
     }
     const insertedFile = (await client.query<{ id: string }>(
-      `INSERT INTO files (source_id,original_filename,mime_type,checksum_sha256,byte_size,storage_path)
-       VALUES ($1,$2,'application/vnd.dnd-firegory.snapshot+json',$3,$4,$5)
-       ON CONFLICT (source_id,checksum_sha256) WHERE deleted_at IS NULL DO NOTHING
+      `INSERT INTO files (id,source_id,original_filename,mime_type,checksum_sha256,byte_size,storage_path)
+       VALUES ($1,$2,$3,'application/vnd.dnd-firegory.snapshot+json',$4,$5,$6)
+       ON CONFLICT DO NOTHING
        RETURNING id`,
-      [persisted.id, `${slot.planSlot.inputSlotId}-snapshot-manifest.json`, slot.manifestDigest, slot.manifestByteLength, `canonical-seed:sha256:${slot.manifestDigest}`],
+      [slot.identities.fileId, persisted.id, `${slot.planSlot.inputSlotId}-snapshot-manifest.json`, slot.manifestDigest, slot.manifestByteLength, `canonical-seed:sha256:${slot.manifestDigest}`],
     )).rows[0];
     const file = insertedFile ?? (await client.query<{ id: string; byte_size: string; mime_type: string }>(
-      `SELECT id,byte_size,mime_type FROM files WHERE source_id=$1 AND checksum_sha256=$2 AND deleted_at IS NULL FOR SHARE`,
-      [persisted.id, slot.manifestDigest],
+      `SELECT id,byte_size,mime_type FROM files WHERE id=$1 AND source_id=$2 AND checksum_sha256=$3 AND deleted_at IS NULL FOR SHARE`,
+      [slot.identities.fileId, persisted.id, slot.manifestDigest],
     )).rows[0];
     if (file && (Number("byte_size" in file ? file.byte_size : slot.manifestByteLength) !== slot.manifestByteLength
       || ("mime_type" in file && file.mime_type !== "application/vnd.dnd-firegory.snapshot+json"))) throw new Error(`Seed file boundary for slot ${slot.planSlot.id} conflicts with durable metadata.`);
@@ -165,6 +167,13 @@ async function resultFromState(slot: PreparedSeedSlot, db: Db, sourceId: string 
   }
   const { manifest, generation } = await loadResolvedRepositoryManifest(dataRoot);
   const active = manifest.entries.map(({ entryId, revisionId }) => ({ entryId, revisionId }));
+  const counts = await seedSlotCounts(slot, db, sourceId, runId, { repositoryId: manifest.repositoryId, generation, entries: active });
+  return { ...baseResult(slot, sourceId, runId, operation, failures), counts: { ...counts, failures: failures.length } };
+}
+
+export async function seedSlotCounts(slot: PreparedSeedSlot, db: Db, sourceId: string, runId: string, activeState: Readonly<{
+  repositoryId: string; generation: string | null; entries: readonly Readonly<{ entryId: string; revisionId: string }>[];
+}>): Promise<Omit<SeedTypeCounts, "failures">> {
   const row = (await db.query<{ imported: number; reviewed: number; published: number; indexed: number }>(
     `WITH active AS (SELECT * FROM jsonb_to_recordset($6::jsonb) AS item("entryId" text, "revisionId" text))
       SELECT count(DISTINCT candidate.id)::integer AS imported,
@@ -178,9 +187,9 @@ async function resultFromState(slot: PreparedSeedSlot, db: Db, sourceId: string 
          AND indexed.revision_id=active."revisionId" AND indexed.source_id=$4 AND indexed.file_id=candidate.file_id AND indexed.lifecycle='active'
          AND (SELECT sync.repository_generation FROM nfs_index_sync_runs sync WHERE sync.repository_id=$3 AND sync.status='succeeded' ORDER BY sync.finished_at DESC, sync.id DESC LIMIT 1) IS NOT DISTINCT FROM $5
        WHERE candidate.import_run_id=$1 AND candidate.entry_type::text=$2`,
-    [runId, slot.planSlot.contentType, manifest.repositoryId, sourceId, generation, JSON.stringify(active)],
+    [runId, slot.planSlot.contentType, activeState.repositoryId, sourceId, activeState.generation, JSON.stringify(activeState.entries)],
   )).rows[0];
-  return { ...baseResult(slot, sourceId, runId, operation, failures), counts: { discovered: slot.discovered, imported: Number(row?.imported ?? 0), reviewed: Number(row?.reviewed ?? 0), published: Number(row?.published ?? 0), indexed: Number(row?.indexed ?? 0), failures: failures.length } };
+  return { discovered: slot.discovered, imported: Number(row?.imported ?? 0), reviewed: Number(row?.reviewed ?? 0), published: Number(row?.published ?? 0), indexed: Number(row?.indexed ?? 0) };
 }
 
 function baseResult(slot: PreparedSeedSlot, sourceId: string | null, importRunId: string | null, operation: SeedSlotResult["operation"], failures: readonly string[]): SeedSlotResult {
@@ -188,7 +197,8 @@ function baseResult(slot: PreparedSeedSlot, sourceId: string | null, importRunId
   return {
     slotId: slot.planSlot.id, contentType: slot.planSlot.contentType, sourceId, importRunId, operation,
     counts: { discovered: slot.discovered, imported: 0, reviewed: 0, published: 0, indexed: 0, failures: failures.length }, failures,
-    provenance: { canonicalSourceId: source.canonicalSourceId, originUrl: source.originUrl, originId: source.originId, attribution: source.attribution, license: source.license, evidenceReference: source.licenseApproval.evidenceUri },
+    provenance: { canonicalSourceId: slot.identities.versionedSourceId, originUrl: source.originUrl, originId: source.originId, attribution: source.attribution, license: source.license,
+      evidenceReference: source.licenseApproval.evidenceUri, evidenceSha256: source.licenseApproval.evidenceSha256 },
   };
 }
 

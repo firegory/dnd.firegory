@@ -8,17 +8,19 @@ import { assertContentSource, loadRepositoryBootstrapDescriptor } from "../conte
 import { assertCanonicalRegularFile, canonicalRoot, ensureCanonicalDirectory, openDirectoryNoFollow, openExclusiveNoFollow } from "../../worker/publication/safe-filesystem.ts";
 import { canonicalJson, sha256, type PreparedSeedSlot } from "./model.ts";
 
-export async function installSeedSource(slot: PreparedSeedSlot, fileId: string, dataRoot: string): Promise<void> {
+export async function installSeedSource(slot: PreparedSeedSlot, fileId: string, dataRoot: string, hooks: Readonly<{ afterTemporaryWritten?: (target: string) => void | Promise<void> }> = {}): Promise<void> {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(fileId)) throw new Error("Seed source fileId must be a UUID.");
   const root = await canonicalRoot(dataRoot);
   await loadRepositoryBootstrapDescriptor(root);
   await assertWritableCanonicalRoot(root);
+  if (fileId !== slot.identities.fileId) throw new Error("Seed source fileId does not match its deterministic approved identity.");
   const source = slot.input.source;
-  const relativeFilePath = `sources/${source.canonicalSourceId}/files/${fileId}.snapshot`;
+  const sourceId = slot.identities.versionedSourceId;
+  const relativeFilePath = `sources/${sourceId}/files/${fileId}.snapshot`;
   const contentSource: ContentSource = {
     schemaVersion: 1,
     kind: "source",
-    sourceId: source.canonicalSourceId,
+    sourceId,
     title: source.title,
     category: source.category,
     edition: "5.5e",
@@ -41,26 +43,27 @@ export async function installSeedSource(slot: PreparedSeedSlot, fileId: string, 
     files: [{ fileId, path: relativeFilePath, mediaType: "application/vnd.dnd-firegory.snapshot+json", contentHash: `sha256:${slot.manifestDigest}` }],
   };
   assertContentSource(contentSource);
-  const sourcePath = sourceMetadataPath(root, source.canonicalSourceId);
+  const sourcePath = sourceMetadataPath(root, sourceId);
   const filePath = resolve(root, relativeFilePath);
   await ensureCanonicalDirectory(root, dirname(sourcePath));
   await ensureCanonicalDirectory(root, dirname(filePath));
   for (const evidence of slot.evidenceFiles) {
     const evidencePath = resolve(root, evidence.canonicalPath);
     await ensureCanonicalDirectory(root, dirname(evidencePath));
-    await installImmutable(root, evidencePath, evidence.bytes, (bytes) => bytes.byteLength === evidence.byteLength && sha256(bytes) === evidence.sha256);
+    await installImmutable(root, evidencePath, evidence.bytes, (bytes) => bytes.byteLength === evidence.byteLength && sha256(bytes) === evidence.sha256, hooks);
   }
-  await installImmutable(root, filePath, slot.manifestBytes, (bytes) => bytes.byteLength === slot.manifestByteLength && sha256(bytes) === slot.manifestDigest);
+  await installImmutable(root, filePath, slot.manifestBytes, (bytes) => bytes.byteLength === slot.manifestByteLength && sha256(bytes) === slot.manifestDigest, hooks);
   const sourceBytes = Buffer.from(`${canonicalJson(contentSource as unknown as JsonValue)}\n`);
   await installImmutable(root, sourcePath, sourceBytes, (bytes) => {
     try { return canonicalJson(JSON.parse(bytes.toString("utf8"))) === canonicalJson(contentSource); } catch { return false; }
-  });
+  }, hooks);
   await verifySeedSource(slot, fileId, root);
 }
 
 export async function verifySeedSource(slot: PreparedSeedSlot, fileId: string, dataRoot: string): Promise<void> {
   const root = await canonicalRoot(dataRoot);
-  const sourcePath = sourceMetadataPath(root, slot.input.source.canonicalSourceId);
+  if (fileId !== slot.identities.fileId) throw new Error("Seed source fileId does not match its deterministic approved identity.");
+  const sourcePath = sourceMetadataPath(root, slot.identities.versionedSourceId);
   const sourceBytes = await readCanonicalRegular(root, sourcePath);
   const source = JSON.parse(sourceBytes.toString("utf8")) as ContentSource;
   assertContentSource(source);
@@ -74,7 +77,8 @@ export async function verifySeedSource(slot: PreparedSeedSlot, fileId: string, d
   }
 }
 
-async function installImmutable(root: string, target: string, bytes: Buffer, matches: (existing: Buffer) => boolean): Promise<void> {
+async function installImmutable(root: string, target: string, bytes: Buffer, matches: (existing: Buffer) => boolean,
+  hooks: Readonly<{ afterTemporaryWritten?: (target: string) => void | Promise<void> }>): Promise<void> {
   try {
     const existing = await readCanonicalRegular(root, target);
     if (!matches(existing)) throw new Error(`Canonical seed dependency already exists with different immutable content: ${target}`);
@@ -87,6 +91,7 @@ async function installImmutable(root: string, target: string, bytes: Buffer, mat
   try {
     await handle.writeFile(bytes);
     await handle.sync();
+    await hooks.afterTemporaryWritten?.(target);
   } catch (error) {
     await handle.close();
     await unlink(temporary).catch(() => undefined);

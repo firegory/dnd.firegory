@@ -5,10 +5,17 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { CompendiumImportRunService, ImportRunConflictError } from "../../src/server/compendium/import-runs.ts";
+import { projectSnapshotFlatCandidate } from "../../src/server/compendium/candidate-publication.ts";
+import { recordImportReviewPublicationOutcome } from "../../src/server/compendium/import-review-outcomes.ts";
 import { CompendiumNotFoundError, CompendiumReadService } from "../../src/server/compendium/read-service.ts";
-import { loadPreparedSeed } from "../../src/server/corpus-seed/executor.ts";
+import { seedImportBatch } from "../../src/server/corpus-seed/batch.ts";
+import { inspectPreparedSeed, loadPreparedSeed, seedSlotCounts } from "../../src/server/corpus-seed/executor.ts";
 import { prepareSeed } from "../../src/server/corpus-seed/model.ts";
+import { synchronizeContentIndex } from "../../src/server/content-index/sync.ts";
+import { formatPublicationGeneration, type ContentSource } from "../../src/server/content-storage/repository.ts";
 import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
+import { PostgresPublicationFenceManager } from "../../src/worker/publication/fence.ts";
+import { publishCanonicalRevision } from "../../src/worker/publication/publisher.ts";
 import { applyMigrationPrefix, IDS, isolatedDatabase, runProductionMigrations, seedAccessFixture } from "./postgres.mts";
 
 test("QA integration: fresh and prefix-upgrade migrations are database-isolated and preserve data", async (t) => {
@@ -209,6 +216,37 @@ test("QA integration: fresh corpus seed persists candidates and identical input 
     }
   };
   const prepared = await prepareSeed("tests/fixtures/corpus-seed/plan.json", "tests/fixtures/corpus-seed/inputs.json");
+  let rollBackAfterNfs = true;
+  const nfsBeforeDbCrash = async <T>(callback: (client: import("pg").PoolClient) => Promise<T>): Promise<T> => {
+    const client = await db.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await callback(client);
+      if (rollBackAfterNfs) {
+        rollBackAfterNfs = false;
+        throw new Error("injected crash after canonical NFS installation before database commit");
+      }
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  };
+  const crashed = await loadPreparedSeed(prepared, {
+    transaction: nfsBeforeDbCrash as never,
+    db: db.pool,
+    runs: new CompendiumImportRunService(nfsBeforeDbCrash as never),
+    dataRoot,
+  });
+  assert.equal(crashed[0].operation, "failed");
+  assert.match(crashed[0].failures[0], /injected crash/);
+  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM sources")).rows[0].count), 0);
+  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM files")).rows[0].count), 0);
+  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_runs")).rows[0].count), 0);
+  assert.equal((await readFile(join(dataRoot, `sources/${prepared.slots[0].identities.versionedSourceId}/source.json`), "utf8")).includes(prepared.slots[0].identities.fileId), true);
   const dependencies = { transaction: transaction as never, db: db.pool, runs: new CompendiumImportRunService(transaction as never), dataRoot };
   const first = await loadPreparedSeed(prepared, dependencies);
   assert.equal(first[0].operation, "loaded", JSON.stringify(first[0]));
@@ -218,8 +256,75 @@ test("QA integration: fresh corpus seed persists candidates and identical input 
   assert.equal(second[0].importRunId, first[0].importRunId);
   assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_runs")).rows[0].count), 1);
   assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_candidates")).rows[0].count), 1);
-  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_candidate_reviews")).rows[0].count), 0);
-  assert.equal((await readFile(join(dataRoot, "sources/synthetic-glossary-2024/source.json"), "utf8")).includes("synthetic-glossary-2024"), true);
+  const candidateId = (await db.pool.query<{ id: string }>("SELECT id FROM compendium_import_candidates WHERE import_run_id=$1", [first[0].importRunId])).rows[0].id;
+  const reviewValues = [candidateId, first[0].importRunId, "review-qa-corpus-seed", "qa-corpus-reviewer"];
+  await assert.rejects(db.pool.query(
+    `INSERT INTO compendium_import_candidate_reviews
+       (candidate_id,import_run_id,decision,publication_status,publication_attempt,idempotency_key,
+        expected_active_revision_captured,reviewed_by,reviewed_at,canonical_revision_id)
+     VALUES ($1,$2,'approved','completed',1,$3,true,$4,now(),NULL)`, reviewValues,
+  ), /compendium_review_canonical_revision_shape/);
+  await db.pool.query(
+    `INSERT INTO compendium_import_candidate_reviews
+       (candidate_id,import_run_id,decision,publication_status,publication_attempt,idempotency_key,
+        expected_active_revision_captured,reviewed_by,reviewed_at)
+     VALUES ($1,$2,'approved','queued',1,$3,true,$4,now())`, reviewValues,
+  );
+  const stale = await inspectPreparedSeed(prepared, db.pool, dataRoot);
+  assert.deepEqual({ reviewed: stale[0].counts.reviewed, published: stale[0].counts.published, indexed: stale[0].counts.indexed }, { reviewed: 1, published: 0, indexed: 0 });
+  const batch = seedImportBatch(prepared.slots[0]);
+  const occurrence = batch.occurrences[0];
+  const source = JSON.parse(await readFile(join(dataRoot, `sources/${prepared.slots[0].identities.versionedSourceId}/source.json`), "utf8")) as ContentSource;
+  const revision = projectSnapshotFlatCandidate(batch.candidates[0].content, {
+    candidateKey: batch.candidates[0].candidateKey!,
+    entryType: "glossary",
+    createdAt: prepared.slots[0].manifest.collectedAt,
+    source,
+    fileId: prepared.slots[0].identities.fileId,
+    evidence: {
+      sourceUrl: occurrence.locator,
+      fingerprintSha256: occurrence.fingerprintSha256,
+      rawBlobPath: occurrence.rawBlobPath!,
+      fetchedAt: occurrence.sourceFetchedAt!,
+      fileChecksumSha256: prepared.slots[0].manifestDigest,
+      indexUrl: occurrence.indexLocator!,
+      indexFingerprintSha256: occurrence.indexFingerprintSha256!,
+      rawIndexBlobPath: occurrence.rawIndexBlobPath!,
+      indexFetchedAt: occurrence.indexSourceFetchedAt!,
+      indexCardFingerprintSha256: occurrence.indexCardFingerprintSha256!,
+      metadataEvidenceText: occurrence.metadataEvidenceText!,
+    },
+  });
+  await publishCanonicalRevision({
+    dataRoot,
+    command: { schemaVersion: 2, kind: "publishCanonicalRevision", idempotencyKey: reviewValues[2], generation: formatPublicationGeneration(1n), expectedActiveRevisionId: null, revision },
+    leaseManager: { async acquire() { return { ownerId: "70000000-0000-4000-8000-000000000001", async renew() { return true; }, async release() { return true; } }; } },
+    fenceManager: new PostgresPublicationFenceManager(() => db.pool.connect()),
+  });
+  await recordImportReviewPublicationOutcome(reviewValues[2], "completed", null, revision.revisionId, transaction as never);
+  assert.equal((await db.pool.query<{ canonical_revision_id: string }>("SELECT canonical_revision_id FROM compendium_import_candidate_reviews WHERE candidate_id=$1", [candidateId])).rows[0].canonical_revision_id, revision.revisionId);
+  const published = await inspectPreparedSeed(prepared, db.pool, dataRoot);
+  assert.deepEqual({ reviewed: published[0].counts.reviewed, published: published[0].counts.published, indexed: published[0].counts.indexed }, { reviewed: 1, published: 1, indexed: 0 });
+  const sync = await synchronizeContentIndex({ mode: "incremental", dataRoot }, {
+    execute: db.pool.query.bind(db.pool) as never,
+    transaction: transaction as never,
+    ownerToken: "70000000-0000-4000-8000-000000000002",
+  });
+  assert.equal(sync.plan.additions.includes(revision.entryId), true);
+  const exact = await inspectPreparedSeed(prepared, db.pool, dataRoot);
+  assert.deepEqual(exact[0].counts, { discovered: 1, imported: 1, reviewed: 1, published: 1, indexed: 1, failures: 0 });
+  const active = { repositoryId: sync.repositoryId, generation: sync.generation, entries: [{ entryId: revision.entryId, revisionId: revision.revisionId }] };
+  const staleRevision = await seedSlotCounts(prepared.slots[0], db.pool, first[0].sourceId!, first[0].importRunId!, {
+    ...active, entries: [{ entryId: revision.entryId, revisionId: `rev-${"d".repeat(64)}` }],
+  });
+  assert.deepEqual({ published: staleRevision.published, indexed: staleRevision.indexed }, { published: 0, indexed: 0 });
+  await db.pool.query(`INSERT INTO nfs_index_sync_runs(id,repository_id,mode,manifest_hash,projection_hash,projector_version,repository_generation,status,
+    planned_additions,planned_updates,planned_removals,finished_at) VALUES($1,$2,'incremental',$3,$3,1,$4,'succeeded',0,0,0,now()+interval '1 second')`,
+    ["70000000-0000-4000-8000-000000000005", sync.repositoryId, `sha256:${"e".repeat(64)}`, "20260808000000000000000000000001"]);
+  const oldGeneration = await seedSlotCounts(prepared.slots[0], db.pool, first[0].sourceId!, first[0].importRunId!, active);
+  assert.equal(oldGeneration.indexed, 0);
+  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_candidate_reviews")).rows[0].count), 1);
+  assert.equal((await readFile(join(dataRoot, `sources/${prepared.slots[0].identities.versionedSourceId}/source.json`), "utf8")).includes("synthetic-glossary-2024"), true);
 });
 
 const LEGACY_ENTRY_ID = "50000000-0000-4000-8000-000000000099";

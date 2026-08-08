@@ -69,6 +69,8 @@ Create `/srv/dnd-firegory/seed-inputs/inputs.json` with `schemaVersion: 1`, `pla
 
 `snapshotRoot` is the collector `--output` directory containing `blobs`, `cache`, and `runs`; both paths are relative to the descriptor and the manifest must remain inside that root. The CLI rejects missing/extra slots and fields, absolute or escaping snapshot/blob paths, wrong category/type mappings, partial collector runs, stale parser versions, non-HTTPS or credential-bearing provenance, missing approvals, changed blob hashes/sizes, and unsupported source corpus fields. Evidence references are identifiers only; do not put credentials or private license documents in the descriptor.
 
+The descriptor is only a structural declaration. It is not legal approval by itself. `evidenceSha256` must identify an independently verified external approval artifact available at `evidenceUri`; the committed policy rejects unapproved bases, approvers and URI schemes, future timestamps, zero digests, and obvious placeholder, TODO, example, or test legal metadata.
+
 ## Validate And Load
 
 Run the filesystem-only gate first. Every invocation, including a failed one after argument parsing, writes a mode-0600, fsynced temporary manifest and atomically renames it over the target. Output redacts credential-like keys, bearer values, and database URLs.
@@ -94,7 +96,7 @@ npm run corpus-seed -- load \
 
 `load` never calls review or publication APIs. `CORPUS_SEED_WRITER_ROLE=worker` is only a defense-in-depth assertion, not authorization. Authorization is the deployment boundary: the process must run under the worker OS identity with canonical storage mounted read-write; application and agent containers retain read-only mounts. The loader probes and fsyncs that writable boundary and fails otherwise. It validates the repository bootstrap, creates or verifies exact source metadata, atomically installs all hash-verified raw evidence, then the durable external manifest and matching `source.json`, creates/claims the existing durable import run, records occurrences/candidates, and completes the run. A crash after source installation is retryable because identical files are verified rather than replaced. A failed run is lease-reclaimable and immutable phases replay exactly. An identical successful input resolves the succeeded DB run and reports `operation: "noop"`; the output file is not used as authority.
 
-A changed snapshot or approval record must use a new `canonicalSourceId` and `canonicalBookId` revision boundary. Existing canonical source records and file lists are immutable because published revisions embed and validate the complete source record. The loader fails rather than appending changed bytes to an already-published source.
+A changed snapshot or approval record produces a distinct deterministic versioned source, file, and run identity from the captured plan/input/provenance digest. Existing canonical source records and file lists remain immutable because published revisions embed the complete source record; retries reconcile the same deterministic identities, while changed approved bytes never append to an old source version.
 
 Refresh counts at any time without mutation:
 
@@ -130,6 +132,8 @@ done < /secure/review-actions.jsonl
 ```
 
 The administrator must inspect provenance, diff, typed fields, citations, and payload capability before submitting. Do not bulk approve an empty selection. `requires_extraction`, invalid, or duplicate candidates fail closed and need supported repair/rejection; they are not auto-published. Wait for worker terminal outcomes, then run `corpus-seed status` again.
+
+Process the ten output slots in this exact order: `feature`, `class`, `species`, `background`, `feat`, `spell`, `glossary`, `creature`, `item`, `equipment`. For each run, fetch the current candidates, inspect them, submit consecutive batches of at most 200, and wait until every batch has a successful worker publication outcome before moving to the next run. After publishing `feature`, run canonical validation, incremental indexing, and `corpus-seed status`; do not approve the `class` run until the feature slot reports current `reviewed`, `published`, and `indexed` counts equal to `discovered`, with no failures. Apply the same current-status gate after every later slot. A queued command, old completed review, stale revision, unrelated same-key entry, or previous index generation does not satisfy the gate.
 
 ## Reindex And Embed
 

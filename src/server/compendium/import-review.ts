@@ -892,7 +892,7 @@ function isSnapshotFlatContent(value: Record<string, unknown>): boolean { return
 function isSnapshotHierarchyContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotHierarchyCandidate" && value.schemaVersion === 1; }
 function isSnapshotFeatureContent(value: Record<string, unknown>): boolean { return value.kind === "snapshotFeatureCandidate" && value.schemaVersion === 1; }
 function isSnapshotCollectorContent(value: Record<string, unknown>): boolean { return isSnapshotSpellContent(value) || isSnapshotCreatureContent(value) || isSnapshotFlatContent(value) || isSnapshotHierarchyContent(value) || isSnapshotFeatureContent(value); }
-function validSnapshotBlobPath(path: string, hash: string): boolean { return path === `blobs/${hash}.html` || /^sources\/[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?\/evidence\/[0-9a-f]{64}\.html$/.test(path) && path.endsWith(`/${hash}.html`); }
+function validSnapshotBlobPath(path: string, hash: string): boolean { return path === `blobs/${hash}.html`; }
 function number(value: unknown): number { return Number(value ?? 0); }
 function iso(value: unknown): string { return value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString(); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message.slice(0, 4000) : "Publication failed."; }

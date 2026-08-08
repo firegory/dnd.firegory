@@ -7,6 +7,7 @@ import { NEXT_DND_CATEGORIES, NEXT_DND_PARSER_VERSION, parseNextDndDetail, parse
 import { nextDndImportBatch } from "../compendium/next-dnd/import-adapter.ts";
 import type { NextDndSnapshotManifest, SnapshotDetail } from "../compendium/next-dnd/collector.ts";
 import { featureCandidates } from "../compendium/next-dnd/hierarchy-import.ts";
+import { deterministicUuid } from "../content-index/projection.ts";
 
 export const SEED_SCHEMA_VERSION = 1;
 const HASH = /^[0-9a-f]{64}$/;
@@ -59,17 +60,32 @@ export type PreparedSeedSlot = Readonly<{
   manifestByteLength: number;
   inputManifestDigest: string;
   evidenceFiles: readonly Readonly<{ sha256: string; byteLength: number; mediaType: "text/html"; bytes: Buffer; canonicalPath: string }>[];
+  identities: Readonly<{ versionedSourceId: string; sourceId: string; fileId: string; runId: string; versionDigest: string }>;
   inputDigest: string;
   discovered: number;
 }>;
 export type PreparedSeed = Readonly<{ plan: SeedPlan; inputs: SeedInputs; planDigest: string; inputDigest: string; slots: readonly PreparedSeedSlot[] }>;
+export type CapturedSeedDescriptors = Readonly<{ planPath: string; inputsPath: string; planBytes: Buffer; inputBytes: Buffer }>;
 
 export async function prepareSeed(planPath: string, inputsPath: string, now = new Date()): Promise<PreparedSeed> {
-  const planBytes = await readStableFile(resolve(planPath), dirname(resolve(planPath)), "seed plan");
-  const inputBytes = await readStableFile(resolve(inputsPath), dirname(resolve(inputsPath)), "seed inputs");
+  return prepareCapturedSeed(await captureSeedDescriptors(planPath, inputsPath), now);
+}
+
+export async function captureSeedDescriptors(planPath: string, inputsPath: string): Promise<CapturedSeedDescriptors> {
+  const resolvedPlanPath = resolve(planPath);
+  const resolvedInputsPath = resolve(inputsPath);
+  const [planBytes, inputBytes] = await Promise.all([
+    readStableFile(resolvedPlanPath, dirname(resolvedPlanPath), "seed plan"),
+    readStableFile(resolvedInputsPath, dirname(resolvedInputsPath), "seed inputs"),
+  ]);
+  return { planPath: resolvedPlanPath, inputsPath: resolvedInputsPath, planBytes, inputBytes };
+}
+
+export async function prepareCapturedSeed(captured: CapturedSeedDescriptors, now = new Date()): Promise<PreparedSeed> {
+  const { planBytes, inputBytes } = captured;
   const plan = validatePlan(parseJson(planBytes, "seed plan"));
   const inputs = validateInputs(parseJson(inputBytes, "seed inputs"), plan, now);
-  const inputsDirectory = dirname(resolve(inputsPath));
+  const inputsDirectory = dirname(captured.inputsPath);
   const slots: PreparedSeedSlot[] = [];
   for (const planSlot of plan.slots) {
     const input = inputs.slots.find(({ slotId }) => slotId === planSlot.inputSlotId)!;
@@ -83,12 +99,16 @@ export async function prepareSeed(planPath: string, inputsPath: string, now = ne
     const inputManifestBytes = await readStableFile(manifestPath, snapshotRoot, `slot ${planSlot.id} manifest`);
     const inputManifest = validateSnapshot(parseJson(inputManifestBytes, `slot ${planSlot.id} manifest`), planSlot);
     if (input.source.originUrl !== inputManifest.categories[0].index!.sourceUrl) throw new Error(`Input slot ${planSlot.id} provenance origin does not match its snapshot index.`);
-    const evidenceFiles = await validateSnapshotBlobs(inputManifest, snapshotRoot, input.source.canonicalSourceId);
-    const manifest = durableManifest(inputManifest, input.source.canonicalSourceId);
+    const evidenceFiles = await validateSnapshotBlobs(inputManifest, snapshotRoot);
+    const manifest = durableManifest(inputManifest);
     const manifestBytes = Buffer.from(`${canonicalJson(manifest)}\n`);
     nextDndImportBatch(manifest);
     const discovered = planSlot.contentType === "feature" ? manifest.categories[0].details.reduce((count, detail) => count + featureCandidates(detail).length, 0) : manifest.categories[0].entryCount;
     if (discovered < 1) throw new Error(`Required slot ${planSlot.id} discovered no publishable candidates.`);
+    const sourceVersionInput = { planId: plan.planId, inputSlotId: planSlot.inputSlotId, input, manifest: JSON.parse(inputManifestBytes.toString("utf8")) };
+    const versionDigest = sha256(canonicalJson({ planDigest: sha256(canonicalJson(plan)), sourceVersionInput }));
+    const inputDigest = sha256(canonicalJson({ sourceVersionInput, contentType: planSlot.contentType, dependsOn: planSlot.dependsOn }));
+    const versionedSourceId = `${input.source.canonicalSourceId.slice(0, 109).replace(/-+$/g, "")}-${versionDigest.slice(0, 16)}`;
     slots.push({
       planSlot,
       input,
@@ -98,7 +118,14 @@ export async function prepareSeed(planPath: string, inputsPath: string, now = ne
       manifestByteLength: manifestBytes.byteLength,
       inputManifestDigest: sha256(inputManifestBytes),
       evidenceFiles,
-      inputDigest: sha256(canonicalJson({ input, manifest: JSON.parse(inputManifestBytes.toString("utf8")), contentType: planSlot.contentType })),
+      identities: {
+        versionedSourceId,
+        sourceId: deterministicUuid("corpus-seed-source", versionDigest),
+        fileId: deterministicUuid("corpus-seed-file", versionDigest, sha256(manifestBytes)),
+        runId: deterministicUuid("corpus-seed-run", versionDigest, planSlot.id),
+        versionDigest,
+      },
+      inputDigest,
       discovered,
     });
   }
@@ -139,7 +166,7 @@ export function validatePlan(value: unknown): SeedPlan {
   exactKeys(requirements, ["format", "operatorSupplied", "licenseApprovalRequired", "attributionRequired", "provenanceRequired", "allowedLicenseBases", "approvedBy", "evidenceSchemes"], "sourceRequirements");
   if (requirements.format !== "next-dnd-snapshot-v2" || requirements.operatorSupplied !== true || requirements.licenseApprovalRequired !== true || requirements.attributionRequired !== true || requirements.provenanceRequired !== true) throw new Error("Seed source requirements may not weaken the approved evidence gate.");
   if (!Array.isArray(requirements.allowedLicenseBases) || requirements.allowedLicenseBases.length === 0 || requirements.allowedLicenseBases.some((item) => typeof item !== "string" || !LICENSE_BASES.has(item))) throw new Error("Seed plan license bases are unsupported.");
-  if (!Array.isArray(requirements.approvedBy) || requirements.approvedBy.length === 0 || requirements.approvedBy.some((item) => typeof item !== "string" || !SLOT_ID.test(item) || /^(?:test|example|placeholder)/.test(item))) throw new Error("Seed plan approver allowlist is invalid.");
+  if (!Array.isArray(requirements.approvedBy) || requirements.approvedBy.length === 0 || requirements.approvedBy.some((item) => typeof item !== "string" || !SLOT_ID.test(item) || obviousPlaceholder(item))) throw new Error("Seed plan approver allowlist is invalid.");
   if (!Array.isArray(requirements.evidenceSchemes) || requirements.evidenceSchemes.length === 0 || requirements.evidenceSchemes.some((item) => item !== "https:" && item !== "urn:")) throw new Error("Seed plan evidence schemes are unsupported.");
   if (!Array.isArray(plan.exclusions) || plan.exclusions.length === 0 || plan.exclusions.some((item) => typeof item !== "string" || !item.trim())) throw new Error("Seed plan exclusions must be non-empty strings.");
   return { ...plan, slots } as unknown as SeedPlan;
@@ -157,6 +184,7 @@ export function validateInputs(value: unknown, plan: SeedPlan, now = new Date())
     const source = record(slot.source, `Input slot ${slot.slotId} source must be an object.`);
     exactKeys(source, ["canonicalSourceId", "title", "language", "category", "accessTier", "publicationCode", "publisher", "revision", "canonicalBookId", "originUrl", "originId", "attribution", "license", "licenseApproval"], `input slot ${slot.slotId} source`);
     for (const field of ["canonicalSourceId", "title", "publicationCode", "publisher", "revision", "canonicalBookId", "originUrl", "originId", "attribution", "license"] as const) text(source[field], field);
+    for (const field of ["publisher", "attribution", "license"] as const) if (obviousPlaceholder(source[field] as string)) throw new Error(`Input slot ${slot.slotId} ${field} contains placeholder legal metadata.`);
     if (!SOURCE_ID.test(source.canonicalSourceId as string) || !SOURCE_ID.test(source.canonicalBookId as string)) throw new Error(`Input slot ${slot.slotId} canonical source identifiers are invalid.`);
     if (!['en', 'ru'].includes(source.language as string) || !['core_rules', 'official_supplement'].includes(source.category as string) || source.accessTier !== 'open') throw new Error(`Input slot ${slot.slotId} source corpus fields are unapproved.`);
     const origin = new URL(source.originUrl as string);
@@ -165,11 +193,12 @@ export function validateInputs(value: unknown, plan: SeedPlan, now = new Date())
     const approvalKeys = Object.keys(approval);
     if (approvalKeys.some((key) => !["basis", "approvedBy", "approvedAt", "evidenceUri", "evidenceSha256"].includes(key)) || approvalKeys.length !== 5) throw new Error(`input slot ${slot.slotId} licenseApproval contains missing or unknown fields.`);
     text(approval.basis, "basis"); text(approval.approvedBy, "approvedBy"); text(approval.evidenceUri, "evidenceUri"); timestamp(approval.approvedAt, "approvedAt");
+    if (obviousPlaceholder(approval.approvedBy as string) || obviousPlaceholder(approval.evidenceUri as string)) throw new Error(`Input slot ${slot.slotId} license approval contains placeholder legal metadata.`);
     if (!plan.sourceRequirements.allowedLicenseBases.includes(approval.basis as string) || !plan.sourceRequirements.approvedBy.includes(approval.approvedBy as string)) throw new Error(`Input slot ${slot.slotId} license approval is outside the committed plan policy.`);
     if (Date.parse(approval.approvedAt as string) > now.getTime()) throw new Error(`Input slot ${slot.slotId} approval timestamp is in the future.`);
     const evidence = new URL(approval.evidenceUri as string);
     if (!plan.sourceRequirements.evidenceSchemes.includes(evidence.protocol) || evidence.username || evidence.password || evidence.search || evidence.hash) throw new Error(`Input slot ${slot.slotId} evidence URI is not permitted.`);
-    if (typeof approval.evidenceSha256 !== "string" || !HASH.test(approval.evidenceSha256)) throw new Error(`Input slot ${slot.slotId} evidenceSha256 is invalid.`);
+    if (typeof approval.evidenceSha256 !== "string" || !HASH.test(approval.evidenceSha256) || /^0{64}$/.test(approval.evidenceSha256)) throw new Error(`Input slot ${slot.slotId} evidenceSha256 is invalid.`);
     return { ...slot, source: { ...source, licenseApproval: approval } } as unknown as SeedInputSlot;
   });
   const expected = [...new Set(plan.slots.map(({ inputSlotId }) => inputSlotId))].sort();
@@ -217,7 +246,7 @@ function validateSnapshot(value: unknown, slot: SeedPlanSlot): NextDndSnapshotMa
   return manifest;
 }
 
-async function validateSnapshotBlobs(manifest: NextDndSnapshotManifest, root: string, canonicalSourceId: string): Promise<PreparedSeedSlot["evidenceFiles"]> {
+async function validateSnapshotBlobs(manifest: NextDndSnapshotManifest, root: string): Promise<PreparedSeedSlot["evidenceFiles"]> {
   const resources = [manifest.robots!.snapshot, ...manifest.categories.flatMap(({ index, details }) => [index!, ...details])];
   const bytesByPath = new Map<string, Buffer>();
   const evidenceByHash = new Map<string, PreparedSeedSlot["evidenceFiles"][number]>();
@@ -236,7 +265,7 @@ async function validateSnapshotBlobs(manifest: NextDndSnapshotManifest, root: st
     if (bytes.byteLength !== resource.byteLength || sha256(bytes) !== resource.sha256) throw new Error(`Snapshot blob integrity check failed for ${resource.sourceUrl}.`);
     bytesByPath.set(resource.blobPath, bytes);
     evidenceByHash.set(resource.sha256, { sha256: resource.sha256, byteLength: bytes.byteLength, mediaType: "text/html", bytes,
-      canonicalPath: `sources/${canonicalSourceId}/evidence/${resource.sha256}.html` });
+      canonicalPath: `blobs/${resource.sha256}.html` });
   }
   const category = manifest.categories[0];
   const indexBytes = bytesByPath.get(category.index!.blobPath)!;
@@ -257,8 +286,8 @@ async function validateSnapshotBlobs(manifest: NextDndSnapshotManifest, root: st
   return [...evidenceByHash.values()].sort((left, right) => left.sha256.localeCompare(right.sha256));
 }
 
-function durableManifest(manifest: NextDndSnapshotManifest, canonicalSourceId: string): NextDndSnapshotManifest {
-  const durablePath = (hash: string) => `sources/${canonicalSourceId}/evidence/${hash}.html`;
+function durableManifest(manifest: NextDndSnapshotManifest): NextDndSnapshotManifest {
+  const durablePath = (hash: string) => `blobs/${hash}.html`;
   const resource = <T extends { sha256: string; blobPath: string }>(value: T): T => ({ ...value, blobPath: durablePath(value.sha256) });
   return {
     ...manifest,
@@ -354,3 +383,4 @@ function sensitiveKey(key: string): boolean {
   const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
   return ["password", "passwd", "pwd", "secret", "clientsecret", "token", "accesstoken", "refreshtoken", "authorization", "cookie", "setcookie", "databaseurl", "apikey", "credential", "credentials"].some((item) => normalized === item || normalized.endsWith(item) || normalized.startsWith(item));
 }
+function obviousPlaceholder(value: string): boolean { return /(?:^|[^a-z])(?:todo|fixme|test|example|placeholder)(?:[^a-z]|$)/i.test(value); }

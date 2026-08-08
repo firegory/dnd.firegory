@@ -35,6 +35,7 @@ export type ImportRun = Readonly<{
 }>;
 
 export type CreateImportRunInput = Readonly<{
+  id?: string;
   sourceId: string;
   fileId: string;
   generationId?: string | null;
@@ -171,26 +172,26 @@ export class CompendiumImportRunService {
       const values = [
         input.sourceId, input.fileId, input.generationId ?? null, normalizedJobId,
         input.importer.trim(), input.importerVersion.trim(), input.parserVersion.trim(),
-        input.promptVersion.trim(), input.modelVersion.trim(), input.inputSha256, input.actor.trim(),
+        input.promptVersion.trim(), input.modelVersion.trim(), input.inputSha256, input.id ?? null, input.actor.trim(),
       ];
       const inserted = await client.query<RunRow>(
         `INSERT INTO compendium_import_runs
-           (source_id, file_id, generation_id, ingestion_job_id, importer, importer_version,
-            parser_version, prompt_version, model_version, input_sha256)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           (id, source_id, file_id, generation_id, ingestion_job_id, importer, importer_version,
+             parser_version, prompt_version, model_version, input_sha256)
+          VALUES (coalesce($11::uuid, gen_random_uuid()),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
          ON CONFLICT DO NOTHING
          RETURNING id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token`,
-        values.slice(0, 10),
+        values.slice(0, 11),
       );
       let row = inserted.rows[0];
       if (!row) {
         row = (await client.query<RunRow>(
           `SELECT id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token
            FROM compendium_import_runs
-           WHERE source_id = $1 AND file_id = $2 AND generation_id IS NOT DISTINCT FROM $3
-             AND ($3::uuid IS NOT NULL OR ingestion_job_id IS NOT DISTINCT FROM $4)
-             AND importer = $5 AND importer_version = $6 AND parser_version = $7
-             AND prompt_version = $8 AND model_version = $9 AND input_sha256 = $10`,
+            WHERE source_id = $1 AND file_id = $2 AND generation_id IS NOT DISTINCT FROM $3
+              AND ($3::uuid IS NOT NULL OR ingestion_job_id IS NOT DISTINCT FROM $4)
+              AND importer = $5 AND importer_version = $6 AND parser_version = $7
+              AND prompt_version = $8 AND model_version = $9 AND input_sha256 = $10`,
           values.slice(0, 10),
         )).rows[0];
       }
@@ -619,6 +620,7 @@ async function audit(client: DbClient, runId: string, event: string, actor: stri
 }
 
 function validateRunInput(input: CreateImportRunInput): void {
+  if (input.id != null) requireUuid(input.id, "id");
   requireUuid(input.sourceId, "sourceId"); requireUuid(input.fileId, "fileId");
   if (input.generationId != null) requireUuid(input.generationId, "generationId");
   if (input.ingestionJobId != null) requireUuid(input.ingestionJobId, "ingestionJobId");
@@ -808,7 +810,7 @@ function validateRawOccurrenceEvidence(input: ImportOccurrenceInput): void {
     }
   }
 }
-function validRawEvidencePath(path: string, hash: string): boolean { return path === `blobs/${hash}.html` || /^sources\/[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?\/evidence\/[0-9a-f]{64}\.html$/.test(path) && path.endsWith(`/${hash}.html`); }
+function validRawEvidencePath(path: string, hash: string): boolean { return path === `blobs/${hash}.html`; }
 
 function sha256Json(value: unknown): string { return createHash("sha256").update(canonicalJson(value)).digest("hex"); }
 function candidateIdentity(type: ImportCandidateEntryType, key: string): string { return `${type}:${key}`; }

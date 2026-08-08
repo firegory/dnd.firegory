@@ -1,15 +1,20 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
 import { loadPreparedSeed } from "../../src/server/corpus-seed/executor.ts";
-import { prepareSeed, redact, validatePlan, writeManifestAtomic } from "../../src/server/corpus-seed/model.ts";
-import { installSeedSource } from "../../src/server/corpus-seed/source-installer.ts";
+import { captureSeedDescriptors, prepareCapturedSeed, prepareSeed, redact, sha256, validatePlan, writeManifestAtomic } from "../../src/server/corpus-seed/model.ts";
+import { installSeedSource, verifySeedSource } from "../../src/server/corpus-seed/source-installer.ts";
 import { reviewActionBatches, seedImportBatch } from "../../src/server/corpus-seed/batch.ts";
 import { seedCommandIncomplete } from "../../src/server/corpus-seed/status.ts";
 import { hierarchyDetailsFixture } from "../fixtures/character-options.mts";
+import { COMPLETE_CLASS } from "../fixtures/character-options.mts";
+import { nextDndCardFingerprint, parseNextDndDetail, parseNextDndIndex } from "../../src/server/compendium/next-dnd/parser.ts";
+import { projectSnapshotFeatureCandidate, projectSnapshotHierarchyCandidate } from "../../src/server/compendium/candidate-publication.ts";
+import { validateCanonicalRevisionDependencies } from "../../src/server/content-storage/validation.ts";
+import { projectCanonicalRevisions } from "../../src/server/content-index/projection.ts";
 
 const fixture = resolve("tests/fixtures/corpus-seed");
 
@@ -18,7 +23,7 @@ test("synthetic approved input validates with provenance and stable digests", as
   assert.equal(prepared.slots[0].discovered, 1);
   assert.match(prepared.planDigest, /^[0-9a-f]{64}$/);
   assert.match(prepared.inputDigest, /^[0-9a-f]{64}$/);
-  assert.equal(prepared.slots[0].manifestDigest, "f6b2708b17effd1b29117bd646d0320736bef96421ecae8a7e21eab1ecf78f22");
+  assert.equal(prepared.slots[0].manifestDigest, "57e9670b540a3e8bb0586e26a86c9aff9d878c017fbc90557b66a26cd4f2dd27");
 });
 
 test("input and source digest changes are observable", async () => {
@@ -31,6 +36,9 @@ test("input and source digest changes are observable", async () => {
   const changed = await prepareSeed(join(root, "plan.json"), join(root, "inputs.json"));
   assert.notEqual(changed.inputDigest, original.inputDigest);
   assert.notEqual(changed.slots[0].inputDigest, original.slots[0].inputDigest);
+  assert.notEqual(changed.slots[0].identities.versionedSourceId, original.slots[0].identities.versionedSourceId);
+  assert.notEqual(changed.slots[0].identities.fileId, original.slots[0].identities.fileId);
+  assert.notEqual(changed.slots[0].identities.runId, original.slots[0].identities.runId);
   assert.equal(changed.slots[0].manifestDigest, original.slots[0].manifestDigest);
 });
 
@@ -59,7 +67,7 @@ test("malformed plan, unapproved type, source, and missing evidence fail closed"
 
 test("fresh seed creates candidates, identical success is durable no-op, and never publishes", async () => {
   const prepared = await prepareSeed(join(fixture, "plan.json"), join(fixture, "inputs.json"));
-  const harness = fakeDependencies();
+  const harness = fakeDependencies(prepared.slots[0]);
   const first = await loadPreparedSeed(prepared, harness.dependencies);
   assert.equal(first[0].operation, "loaded");
   assert.deepEqual(first[0].counts, { discovered: 1, imported: 1, reviewed: 0, published: 0, indexed: 0, failures: 0 });
@@ -72,7 +80,7 @@ test("fresh seed creates candidates, identical success is durable no-op, and nev
 
 test("partial failure remains retryable and replays immutable import work", async () => {
   const prepared = await prepareSeed(join(fixture, "plan.json"), join(fixture, "inputs.json"));
-  const harness = fakeDependencies();
+  const harness = fakeDependencies(prepared.slots[0]);
   let inject = true;
   harness.dependencies.afterImport = async () => { if (inject) { inject = false; throw new Error("injected partial failure token=private"); } };
   const failed = await loadPreparedSeed(prepared, harness.dependencies);
@@ -89,14 +97,60 @@ test("worker source installation is immutable, retryable, and publication-ready"
   const prepared = await prepareSeed(join(fixture, "plan.json"), join(fixture, "inputs.json"));
   const dataRoot = await mkdtemp(join(tmpdir(), "corpus-seed-source-"));
   await cp("content-repository", dataRoot, { recursive: true });
-  const fileId = "10000000-0000-4000-8000-000000000009";
+  const fileId = prepared.slots[0].identities.fileId;
   await Promise.all(Array.from({ length: 4 }, () => installSeedSource(prepared.slots[0], fileId, dataRoot)));
-  const source = JSON.parse(await readFile(join(dataRoot, "sources/synthetic-glossary-2024/source.json"), "utf8"));
+  const source = JSON.parse(await readFile(join(dataRoot, `sources/${prepared.slots[0].identities.versionedSourceId}/source.json`), "utf8"));
   assert.equal(source.files[0].contentHash, `sha256:${prepared.slots[0].manifestDigest}`);
   assert.equal(source.files[0].mediaType, "application/vnd.dnd-firegory.snapshot+json");
-  const installed = join(dataRoot, `sources/synthetic-glossary-2024/files/${fileId}.snapshot`);
+  const installed = join(dataRoot, `sources/${prepared.slots[0].identities.versionedSourceId}/files/${fileId}.snapshot`);
   await writeFile(installed, "tampered");
   await assert.rejects(installSeedSource(prepared.slots[0], fileId, dataRoot), /different immutable content/);
+  assert.equal((await readdir(join(dataRoot, `sources/${prepared.slots[0].identities.versionedSourceId}/files`))).some((name) => name.endsWith(".tmp")), false);
+});
+
+test("ambiguous commit after canonical install retries with the same deterministic identities", async () => {
+  const prepared = await prepareSeed(join(fixture, "plan.json"), join(fixture, "inputs.json"));
+  const dataRoot = await mkdtemp(join(tmpdir(), "corpus-seed-commit-")); await cp("content-repository", dataRoot, { recursive: true });
+  const harness = fakeDependencies(prepared.slots[0]);
+  const baseTransaction = harness.dependencies.transaction;
+  let failCommit = true;
+  harness.dependencies.transaction = (async (callback: never) => {
+    const result = await (baseTransaction as never as (callback: never) => Promise<unknown>)(callback);
+    if (failCommit) { failCommit = false; throw new Error("connection lost after COMMIT"); }
+    return result;
+  }) as never;
+  harness.dependencies.sourceInstaller = installSeedSource;
+  harness.dependencies.dataRoot = dataRoot;
+  const failed = await loadPreparedSeed(prepared, harness.dependencies);
+  assert.equal(failed[0].operation, "failed");
+  const sourcePath = join(dataRoot, `sources/${prepared.slots[0].identities.versionedSourceId}/source.json`);
+  assert.equal(JSON.parse(await readFile(sourcePath, "utf8")).files[0].fileId, prepared.slots[0].identities.fileId);
+  const retried = await loadPreparedSeed(prepared, harness.dependencies);
+  assert.equal(retried[0].operation, "loaded");
+  assert.equal(retried[0].sourceId, prepared.slots[0].identities.sourceId);
+  assert.equal(retried[0].importRunId, prepared.slots[0].identities.runId);
+});
+
+test("interrupted immutable installation removes temporary files and retries cleanly", async () => {
+  const prepared = await prepareSeed(join(fixture, "plan.json"), join(fixture, "inputs.json"));
+  const dataRoot = await mkdtemp(join(tmpdir(), "corpus-seed-temp-cleanup-")); await cp("content-repository", dataRoot, { recursive: true });
+  let interrupted = false;
+  await assert.rejects(installSeedSource(prepared.slots[0], prepared.slots[0].identities.fileId, dataRoot, {
+    afterTemporaryWritten: () => { if (!interrupted) { interrupted = true; throw new Error("simulated process death before link"); } },
+  }), /simulated process death/);
+  const blobNames = await readdir(join(dataRoot, "blobs")); assert.equal(blobNames.some((name) => name.endsWith(".tmp")), false);
+  await installSeedSource(prepared.slots[0], prepared.slots[0].identities.fileId, dataRoot);
+  await verifySeedSource(prepared.slots[0], prepared.slots[0].identities.fileId, dataRoot);
+});
+
+test("captured descriptor bytes cannot be replaced before preparation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "corpus-seed-capture-")); await cp(fixture, root, { recursive: true });
+  const captured = await captureSeedDescriptors(join(root, "plan.json"), join(root, "inputs.json"));
+  await writeFile(join(root, "plan.json"), JSON.stringify({ schemaVersion: 1, planId: "replaced" }));
+  await writeFile(join(root, "inputs.json"), JSON.stringify({ schemaVersion: 1, planId: "replaced", slots: [] }));
+  const prepared = await prepareCapturedSeed(captured);
+  assert.equal(prepared.plan.planId, "synthetic-2024-test-v1");
+  assert.equal(prepared.slots[0].input.source.canonicalSourceId, "synthetic-glossary-2024");
 });
 
 test("run manifests are atomic, mode-restricted, redacted, and preserve old target on serialization failure", async () => {
@@ -144,10 +198,38 @@ test("class snapshots produce separate feature candidates before dependent class
   assert.equal(classes.candidates[0].entryType, "class");
 });
 
+test("prepared and installed class evidence passes actual feature and class canonical projectors", async () => {
+  const root = await syntheticClassSeedFixture();
+  const prepared = await prepareSeed(join(root, "plan.json"), join(root, "inputs.json"));
+  const dataRoot = await mkdtemp(join(tmpdir(), "corpus-seed-class-nfs-")); await cp("content-repository", dataRoot, { recursive: true });
+  assert.equal(prepared.slots[0].planSlot.contentType, "feature"); assert.equal(prepared.slots[1].planSlot.contentType, "class");
+  assert.equal(prepared.slots[0].identities.versionedSourceId, prepared.slots[1].identities.versionedSourceId);
+  await installSeedSource(prepared.slots[0], prepared.slots[0].identities.fileId, dataRoot);
+  const source = JSON.parse(await readFile(join(dataRoot, `sources/${prepared.slots[0].identities.versionedSourceId}/source.json`), "utf8"));
+  const featureBatch = seedImportBatch(prepared.slots[0]); const classBatch = seedImportBatch(prepared.slots[1]);
+  const evidence = (occurrence: typeof featureBatch.occurrences[number]) => ({ sourceUrl: occurrence.locator, fingerprintSha256: occurrence.fingerprintSha256,
+    rawBlobPath: occurrence.rawBlobPath!, fetchedAt: occurrence.sourceFetchedAt!, fileChecksumSha256: prepared.slots[0].manifestDigest,
+    indexUrl: occurrence.indexLocator!, indexFingerprintSha256: occurrence.indexFingerprintSha256!, rawIndexBlobPath: occurrence.rawIndexBlobPath!,
+    indexFetchedAt: occurrence.indexSourceFetchedAt!, indexCardFingerprintSha256: occurrence.indexCardFingerprintSha256!, metadataEvidenceText: occurrence.metadataEvidenceText! });
+  const features = featureBatch.candidates.map((candidate, index) => projectSnapshotFeatureCandidate(candidate.content, {
+    candidateKey: candidate.candidateKey!, createdAt: prepared.slots[0].manifest.collectedAt, source,
+    fileId: prepared.slots[0].identities.fileId, evidence: evidence(featureBatch.occurrences[index]),
+  }));
+  const classRevision = projectSnapshotHierarchyCandidate(classBatch.candidates[0].content, { candidateKey: classBatch.candidates[0].candidateKey!, entryType: "class",
+    createdAt: prepared.slots[1].manifest.collectedAt, source, fileId: prepared.slots[1].identities.fileId, evidence: evidence(classBatch.occurrences[0]) });
+  for (const revision of [...features, classRevision]) await validateCanonicalRevisionDependencies(dataRoot, revision);
+  const declaredFile = source.files[0], installedFile = join(dataRoot, declaredFile.path);
+  const projections = projectCanonicalRevisions("seed-class-test", [...features, classRevision], [{ sourceId: source.sourceId, fileId: declaredFile.fileId,
+    path: declaredFile.path, mediaType: declaredFile.mediaType, contentHash: declaredFile.contentHash, byteSize: (await stat(installedFile)).size }]);
+  assert.deepEqual(features.map(({ entryId }) => entryId), COMPLETE_CLASS.features.map(({ canonicalId }) => canonicalId));
+  assert.equal(classRevision.entryId, "class-17");
+  assert.deepEqual(projections.find(({ entryId }) => entryId === "class-17")!.relations.map(({ targetEntryId }) => targetEntryId), COMPLETE_CLASS.features.map(({ canonicalId }) => canonicalId));
+});
+
 test("status fails closed for absent, pending, partial, stale publication, and stale index counts", () => {
   const result = (operation: "absent" | "pending" | "noop", counts: Partial<ReturnType<typeof baseCounts>> = {}) => ({
     slotId: "class", contentType: "class", sourceId: null, importRunId: null, operation,
-    counts: { ...baseCounts(), ...counts }, failures: [], provenance: { canonicalSourceId: "source", originUrl: "https://next.dnd.su/class/", originId: "id", attribution: "test", license: "test", evidenceReference: "urn:test" },
+    counts: { ...baseCounts(), ...counts }, failures: [], provenance: { canonicalSourceId: "source", originUrl: "https://next.dnd.su/class/", originId: "id", attribution: "synthetic", license: "synthetic", evidenceReference: "urn:approval", evidenceSha256: "a".repeat(64) },
   });
   assert.equal(seedCommandIncomplete("status", [result("absent")]), true);
   assert.equal(seedCommandIncomplete("status", [result("pending")]), true);
@@ -170,6 +252,9 @@ test("snapshot roots and blob evidence reject symbolic links", async () => {
   const blob = join(copied, manifest.categories[0].details[0].blobPath);
   const external = join(root, "external.html"); await writeFile(external, await readFile(blob)); await unlink(blob); await symlink(external, blob);
   await assert.rejects(prepareSeed(join(copied, "plan.json"), join(copied, "inputs.json")), /symbolic link/);
+
+  const configLink = join(root, "linked-plan.json"); await symlink(join(fixture, "plan.json"), configLink);
+  await assert.rejects(prepareSeed(configLink, join(fixture, "inputs.json")), /symbolic link/);
 });
 
 test("approval policy and redaction fail closed on adversarial values", async () => {
@@ -178,6 +263,20 @@ test("approval policy and redaction fail closed on adversarial values", async ()
   inputs.slots[0].source.licenseApproval.approvedAt = "2999-01-01T00:00:00.000Z";
   await writeFile(join(root, "inputs.json"), JSON.stringify(inputs));
   await assert.rejects(prepareSeed(join(root, "plan.json"), join(root, "inputs.json")), /future/);
+  for (const value of ["TODO legal review", "test reviewer", "placeholder approval"]) {
+    const changed = JSON.parse(await readFile(join(fixture, "inputs.json"), "utf8"));
+    changed.slots[0].source.licenseApproval.approvedBy = value;
+    await writeFile(join(root, "inputs.json"), JSON.stringify(changed));
+    await assert.rejects(prepareSeed(join(root, "plan.json"), join(root, "inputs.json")), /placeholder|outside/);
+  }
+  const zero = JSON.parse(await readFile(join(fixture, "inputs.json"), "utf8")); zero.slots[0].source.licenseApproval.evidenceSha256 = "0".repeat(64);
+  await writeFile(join(root, "inputs.json"), JSON.stringify(zero));
+  await assert.rejects(prepareSeed(join(root, "plan.json"), join(root, "inputs.json")), /evidenceSha256/);
+  for (const [field, value, expected] of [["basis", "operator-permission", /outside/], ["approvedBy", "unlisted-legal-reviewer", /outside/],
+    ["evidenceUri", "https://legal.invalid/approval", /not permitted/]] as const) {
+    const changed = JSON.parse(await readFile(join(fixture, "inputs.json"), "utf8")); changed.slots[0].source.licenseApproval[field] = value;
+    await writeFile(join(root, "inputs.json"), JSON.stringify(changed)); await assert.rejects(prepareSeed(join(root, "plan.json"), join(root, "inputs.json")), expected);
+  }
   const redacted = redact({ Api_Key: "secret", clientSecretValue: "secret", message: "Basic dXNlcjpwYXNz eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature ghp_abcdefghijklmnop https://user:pass@example.test/path?access_token=secret&safe=yes" }) as Record<string, unknown>;
   assert.equal(redacted.Api_Key, "[REDACTED]"); assert.equal(redacted.clientSecretValue, "[REDACTED]");
   assert.doesNotMatch(String(redacted.message), /dXNlc|eyJ|ghp_|user:pass|access_token=secret/);
@@ -185,16 +284,57 @@ test("approval policy and redaction fail closed on adversarial values", async ()
 
 function baseCounts() { return { discovered: 1, imported: 1, reviewed: 1, published: 1, indexed: 1, failures: 0 }; }
 
-function fakeDependencies() {
+async function syntheticClassSeedFixture(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "corpus-seed-class-fixture-")); await mkdir(join(root, "blobs"));
+  const metadata = { link: "/class/17-fighter", title: "Fighter", title_en: "Fighter", kind: COMPLETE_CLASS.kind, hit_die: `d${COMPLETE_CLASS.hitDie}`,
+    primary_ability: COMPLETE_CLASS.primaryAbility, spellcasting_ability: COMPLETE_CLASS.spellcastingAbility, parent_class_ids: [],
+    progression_columns: COMPLETE_CLASS.progressionColumns, progression_rows: COMPLETE_CLASS.progressionRows, features: COMPLETE_CLASS.features, cross_links: [] };
+  const indexUrl = "https://next.dnd.su/class/", detailUrl = "https://next.dnd.su/class/17-fighter", collectedAt = "2026-08-08T00:00:00.000Z";
+  const indexHtml = `<script>window.LIST = ${JSON.stringify({ category: "class", cards: [metadata], order: {} })};</script>`;
+  const detailHtml = '<article class="card" data-id="class:17"><h1 class="card-title" data-copy="Fighter">Fighter</h1><p>Complete synthetic Fighter rules.</p></article>';
+  const robots = "User-agent: *\nAllow: /\n";
+  const resources = { robots: Buffer.from(robots), index: Buffer.from(indexHtml), detail: Buffer.from(detailHtml) };
+  const hashes = Object.fromEntries(Object.entries(resources).map(([key, bytes]) => [key, sha256(bytes)])) as Record<keyof typeof resources, string>;
+  for (const [key, bytes] of Object.entries(resources)) await writeFile(join(root, `blobs/${hashes[key as keyof typeof resources]}.html`), bytes);
+  const normalized = parseNextDndDetail(detailHtml, "class", "17");
+  const parsed = parseNextDndIndex(indexHtml, indexUrl, "class").entries[0];
+  const resource = (kind: "robots" | "index" | "detail", sourceUrl: string, hash: string, byteLength: number, category: "class" | null, externalId: string | null) => ({
+    kind, category, externalId, sourceUrl, finalUrl: sourceUrl, redirectChain: [], fetchedAt: collectedAt, sha256: hash, byteLength,
+    parserVersion: "next-dnd-2024-v3", blobPath: `blobs/${hash}.html`,
+  });
+  const manifest = { schemaVersion: 2, parserVersion: "next-dnd-2024-v3", status: "complete", collectedAt,
+    robots: { userAgent: "dnd.firegory.site-snapshot", snapshot: resource("robots", "https://next.dnd.su/robots.txt", hashes.robots, resources.robots.byteLength, null, null),
+      rules: [{ directive: "allow", path: "/" }], evaluations: [indexUrl, detailUrl].map((sourceUrl) => ({ sourceUrl, allowed: true })) },
+    categories: [{ requestedCategory: "class", discoveredCategory: "class", entryCount: 1,
+      index: resource("index", indexUrl, hashes.index, resources.index.byteLength, "class", null),
+      details: [{ ...resource("detail", detailUrl, hashes.detail, resources.detail.byteLength, "class", "17"), normalized, indexMetadata: parsed.metadata,
+        indexSource: { url: indexUrl, fingerprintSha256: hashes.index, rawBlobPath: `blobs/${hashes.index}.html`, fetchedAt: collectedAt, cardFingerprintSha256: nextDndCardFingerprint(parsed.metadata) } }] }],
+    parserFailures: [], diagnostics: [] };
+  await writeFile(join(root, "manifest.json"), JSON.stringify(manifest));
+  await writeFile(join(root, "plan.json"), JSON.stringify({ schemaVersion: 1, planId: "synthetic-class-2024-v1", edition: "5.5e", description: "Synthetic class and feature lifecycle.",
+    slots: [{ id: "feature", contentType: "feature", snapshotCategory: "class", inputSlotId: "class", dependsOn: [], required: true },
+      { id: "class", contentType: "class", snapshotCategory: "class", inputSlotId: "class", dependsOn: ["feature"], required: true }],
+    sourceRequirements: { format: "next-dnd-snapshot-v2", operatorSupplied: true, licenseApprovalRequired: true, attributionRequired: true, provenanceRequired: true,
+      allowedLicenseBases: ["cc0-1.0"], approvedBy: ["corpus-legal-reviewer"], evidenceSchemes: ["urn:"] }, exclusions: ["All non-synthetic content"] }));
+  await writeFile(join(root, "inputs.json"), JSON.stringify({ schemaVersion: 1, planId: "synthetic-class-2024-v1", slots: [{ slotId: "class", snapshotRoot: ".", manifestPath: "manifest.json",
+    source: { canonicalSourceId: "synthetic-class-2024", title: "Synthetic Fighter", language: "en", category: "core_rules", accessTier: "open",
+      publicationCode: "SYN-CLASS", publisher: "Synthetic Corpus Authors", revision: "v1", canonicalBookId: "synthetic-class", originUrl: indexUrl,
+      originId: "synthetic-class-fixture", attribution: "Synthetic corpus authored for automated verification.", license: "CC0-1.0 synthetic corpus",
+      licenseApproval: { basis: "cc0-1.0", approvedBy: "corpus-legal-reviewer", approvedAt: collectedAt,
+        evidenceUri: "urn:dnd-firegory:legal-approval:synthetic-class", evidenceSha256: "a".repeat(64) } } }] }));
+  return root;
+}
+
+function fakeDependencies(slot: Awaited<ReturnType<typeof prepareSeed>>["slots"][number]) {
   const state = { completed: false, failed: false, diffCalls: 0, publicationCalls: 0 };
   const sourceRow = {
-    id: "10000000-0000-4000-8000-000000000001", title: "Synthetic 2024 Glossary", category: "core_rules", edition: "5.5e", language: "en",
-    access_tier: "open", publication_code: "SYN-2024", publisher: "Test Fixture Authors", release_year: 2024,
+    id: slot.identities.sourceId, title: "Synthetic 2024 Glossary", category: "core_rules", edition: "5.5e", language: "en",
+    access_tier: "open", publication_code: "SYN-2024", publisher: "Synthetic Corpus Authors", release_year: 2024,
     publication_revision: "synthetic-v1", external_origin_url: "https://next.dnd.su/glossary/", external_origin_id: "synthetic-fixture",
     attribution: "Synthetic fixture authored for this repository.", canonical_book_id: "synthetic-glossary", license: "CC0-1.0 synthetic fixture",
-    metadata: { corpusSeed: { inputSlotId: "glossary", licenseApproval: { basis: "cc0-1.0", approvedBy: "synthetic-fixture-reviewer", approvedAt: "2026-08-08T00:00:00.000Z", evidenceUri: "urn:dnd-firegory:synthetic-fixture", evidenceSha256: "0899a8636745a274aa0da39782d27f5435dfcdfb425b053c6bfbb539d6e9a024" } } },
+    metadata: { corpusSeed: { baseCanonicalSourceId: "synthetic-glossary-2024", inputSlotId: "glossary", versionDigest: slot.identities.versionDigest, licenseApproval: { basis: "cc0-1.0", approvedBy: "synthetic-fixture-reviewer", approvedAt: "2026-08-08T00:00:00.000Z", evidenceUri: "urn:dnd-firegory:synthetic-fixture", evidenceSha256: "0899a8636745a274aa0da39782d27f5435dfcdfb425b053c6bfbb539d6e9a024" } } },
   };
-  const run = { id: "10000000-0000-4000-8000-000000000003", sourceId: sourceRow.id, fileId: "10000000-0000-4000-8000-000000000002", generationId: null, status: "pending" as "pending" | "failed" | "succeeded", checkpoint: "created" as "created" | "diffed" | "completed" };
+  const run = { id: slot.identities.runId, sourceId: sourceRow.id, fileId: slot.identities.fileId, generationId: null, status: "pending" as "pending" | "failed" | "succeeded", checkpoint: "created" as "created" | "diffed" | "completed" };
   const lease = "10000000-0000-4000-8000-000000000004";
   const transaction = async <T>(callback: (client: { query(sql: string): Promise<{ rows: unknown[]; rowCount: number }> }) => Promise<T>) => callback({
     async query(sql: string) {
@@ -213,7 +353,7 @@ function fakeDependencies() {
     async failRun() { state.failed = true; },
   };
   const db = { async query() { return { rows: [{ imported: 1, reviewed: 0, published: state.publicationCalls, indexed: 0 }] }; } };
-  const dependencies: { transaction: never; runs: never; db: typeof db; sourceInstaller: () => Promise<void>; afterImport?: () => Promise<void> } = {
+  const dependencies: { transaction: never; runs: never; db: typeof db; sourceInstaller: typeof installSeedSource | (() => Promise<void>); dataRoot?: string; afterImport?: () => Promise<void> } = {
     transaction: transaction as never,
     runs: runs as never,
     db,
