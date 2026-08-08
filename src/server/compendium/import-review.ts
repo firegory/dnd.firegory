@@ -327,7 +327,7 @@ export class CompendiumImportReviewService {
     else if (input.activeRevisionTokens !== undefined) throw new ImportReviewError("Active revision tokens are not accepted for reject actions.");
 
     const prepared = await this.transaction(async (client) => {
-      const rows = await client.query<CandidateRow>(candidateSelect("AND candidate.id = ANY($2::uuid[]) ORDER BY candidate.id FOR UPDATE OF candidate"), [runId, ids]);
+      const rows = await client.query<CandidateRow>(candidateSelect("AND candidate.id = ANY($2::uuid[]) ORDER BY candidate.candidate_order, candidate.id FOR UPDATE OF candidate"), [runId, ids]);
       if (rows.rows.length !== ids.length) throw new ImportReviewError("One or more candidates were not found in this run.", 404);
       const outsideScope = rows.rows.find((row) => reviewScopeError(row));
       if (outsideScope) throw new ImportReviewError(reviewScopeError(outsideScope)!, 409);
