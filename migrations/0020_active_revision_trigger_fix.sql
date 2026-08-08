@@ -35,3 +35,26 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
+
+CREATE OR REPLACE FUNCTION compendium_validate_published_import_links() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE target_revision uuid;
+BEGIN
+  IF TG_TABLE_NAME = 'compendium_revisions' THEN
+    target_revision := NEW.id;
+  ELSE
+    target_revision := NEW.revision_id;
+  END IF;
+  IF target_revision IS NOT NULL AND EXISTS (
+    SELECT 1
+    FROM compendium_revisions revision
+    JOIN compendium_import_links link ON link.revision_id = revision.id
+    JOIN compendium_import_occurrences occurrence ON occurrence.id = link.occurrence_id
+    JOIN compendium_import_runs run ON run.id = occurrence.import_run_id
+    WHERE revision.id = target_revision AND revision.lifecycle = 'published'
+      AND run.status <> 'succeeded'
+  ) THEN
+    RAISE EXCEPTION 'published revisions require successful import provenance';
+  END IF;
+  RETURN NEW;
+END $$;

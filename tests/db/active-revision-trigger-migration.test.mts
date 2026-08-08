@@ -12,4 +12,6 @@ test("0020 safely branches before reading table-specific trigger records", () =>
   assert.match(sql, /IF TG_TABLE_NAME = 'compendium_versions' THEN\s+target_version := NEW\.id;\s+ELSE\s+target_version := NEW\.version_id;/);
   assert.doesNotMatch(sql, /target_version := CASE/);
   assert.match(sql, /compendium_revision_has_projection\(active_revision, active_type\)/);
+  assert.match(sql, /IF TG_TABLE_NAME = 'compendium_revisions' THEN\s+target_revision := NEW\.id;\s+ELSE\s+target_revision := NEW\.revision_id;/);
+  assert.doesNotMatch(sql, /target_revision := CASE/);
 });
