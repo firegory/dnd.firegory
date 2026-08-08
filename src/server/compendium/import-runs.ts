@@ -181,7 +181,7 @@ export class CompendiumImportRunService {
         `INSERT INTO compendium_import_runs
            (id, source_id, file_id, generation_id, ingestion_job_id, importer, importer_version,
               parser_version, prompt_version, model_version, input_sha256, allowed_review_entry_types)
-          VALUES (coalesce($11::uuid, gen_random_uuid()),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$12::compendium_entry_type[])
+          VALUES (coalesce($11::uuid, gen_random_uuid()),$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$12::text[])
          ON CONFLICT DO NOTHING
          RETURNING id, source_id, file_id, generation_id, ingestion_job_id, status, checkpoint, lease_token, allowed_review_entry_types`,
         values,
