@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { CompendiumImportRunService, ImportRunConflictError } from "../../src/server/compendium/import-runs.ts";
 import { CompendiumNotFoundError, CompendiumReadService } from "../../src/server/compendium/read-service.ts";
+import { loadPreparedSeed } from "../../src/server/corpus-seed/executor.ts";
+import { prepareSeed } from "../../src/server/corpus-seed/model.ts";
 import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 import { applyMigrationPrefix, IDS, isolatedDatabase, runProductionMigrations, seedAccessFixture } from "./postgres.mts";
 
@@ -180,6 +185,41 @@ test("QA integration: transactional import crash rolls back, stale lease retries
   assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_candidates WHERE import_run_id=$1", [run.id])).rows[0]?.count), 1);
   await service.completeRun(run.id, retry.leaseToken, "qa-retry");
   assert.deepEqual(await service.claimRun(run.id, "qa-after-complete"), { run: { ...run, status: "succeeded", checkpoint: "completed" }, leaseToken: null, completed: true });
+});
+
+test("QA integration: fresh corpus seed persists candidates and identical input is a DB-backed no-op", async (t) => {
+  const db = await isolatedDatabase("corpus_seed");
+  t.after(() => db.cleanup());
+  const dataRoot = await mkdtemp(join(tmpdir(), "qa-corpus-seed-nfs-"));
+  t.after(() => rm(dataRoot, { recursive: true, force: true }));
+  await cp("content-repository", dataRoot, { recursive: true });
+  await runProductionMigrations(db.url);
+  const transaction = async <T>(callback: (client: import("pg").PoolClient) => Promise<T>): Promise<T> => {
+    const client = await db.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await callback(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  };
+  const prepared = await prepareSeed("tests/fixtures/corpus-seed/plan.json", "tests/fixtures/corpus-seed/inputs.json");
+  const dependencies = { transaction: transaction as never, db: db.pool, runs: new CompendiumImportRunService(transaction as never), dataRoot };
+  const first = await loadPreparedSeed(prepared, dependencies);
+  assert.equal(first[0].operation, "loaded");
+  assert.deepEqual(first[0].counts, { discovered: 1, imported: 1, reviewed: 0, published: 0, indexed: 0, failures: 0 });
+  const second = await loadPreparedSeed(prepared, dependencies);
+  assert.equal(second[0].operation, "noop");
+  assert.equal(second[0].importRunId, first[0].importRunId);
+  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_runs")).rows[0].count), 1);
+  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_candidates")).rows[0].count), 1);
+  assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM compendium_import_candidate_reviews")).rows[0].count), 0);
+  assert.equal((await readFile(join(dataRoot, "sources/synthetic-glossary-2024/source.json"), "utf8")).includes("synthetic-glossary-2024"), true);
 });
 
 const LEGACY_ENTRY_ID = "50000000-0000-4000-8000-000000000099";

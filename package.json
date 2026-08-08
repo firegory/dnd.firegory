@@ -22,6 +22,7 @@
     "ingest": "node --experimental-strip-types scripts/ingest.mts",
     "content-index": "node --experimental-strip-types scripts/content-index.mts",
     "collect:next-dnd": "node --experimental-strip-types scripts/collect-next-dnd-snapshots.mts",
+    "corpus-seed": "node --experimental-strip-types scripts/corpus-seed.mts",
     "corpus-export": "node --experimental-strip-types scripts/corpus-export.mts",
     "agent-gateway": "node --experimental-strip-types scripts/agent-gateway.mts",
     "agent-healthcheck": "node --experimental-strip-types scripts/agent-healthcheck.mts",

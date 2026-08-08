@@ -408,6 +408,7 @@ npm start           # Start production server
 npm test            # Run test suite
 npm run db:migrate  # Run database migrations
 npm run ingest      # CLI ingestion
+npm run corpus-seed -- validate --inputs <inputs.json> --manifest <run.json>
 npm run content-index -- validate      # Validate canonical NFS content
 npm run content-index -- incremental   # Sync changed managed content
 npm run content-index -- clean         # Reconcile all managed content
@@ -423,6 +424,8 @@ performance groups are documented in [docs/compendium-qa.md](docs/compendium-qa.
 See [docs/backups.md](docs/backups.md) for backup and restore procedures for PostgreSQL data and file storage.
 
 Canonical NFS index validation, clean/incremental synchronization, dry-run, restart checkpoints, and embedding backfill are documented in [docs/content-index-sync.md](docs/content-index-sync.md).
+
+The approved 2024 seed plan, external evidence gate, resumable candidate load, review/publication, snapshot/PDF/manual maintenance, and rollback commands are documented in [docs/corpus-seeding.md](docs/corpus-seeding.md).
 
 Database-free deterministic agent corpus generation, incremental/removal manifests, artifact validation, and atomic latest publication are documented in [docs/corpus-exports.md](docs/corpus-exports.md).
 

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "planId": "synthetic-2024-test-v1",
+  "edition": "5.5e",
+  "description": "Synthetic test-only glossary seed.",
+  "slots": [
+    { "id": "glossary", "contentType": "glossary", "snapshotCategory": "glossary", "required": true }
+  ],
+  "sourceRequirements": {
+    "format": "next-dnd-snapshot-v2",
+    "operatorSupplied": true,
+    "licenseApprovalRequired": true,
+    "attributionRequired": true,
+    "provenanceRequired": true
+  },
+  "exclusions": ["All non-synthetic content"]
+}

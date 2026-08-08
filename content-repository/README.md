@@ -61,6 +61,8 @@ Files under `generations`, `snapshots`, and `exports` are derived views. They ma
 
 Portable Markdown and one-entry-per-line JSONL agent exports are documented in [`docs/corpus-exports.md`](../docs/corpus-exports.md). They use the resolved delta-fold state, retain complete source/citation provenance, and publish immutable generation-ordered records under the versioned `exports/latest.json` reader contract only after validating an export. Export generation and validation do not require PostgreSQL.
 
+The repository contains no production 2024 source corpus. The external-input seed evidence gate, worker-owned immutable source installation, and review, publication, index, embedding, and rollback boundaries are documented in [`docs/corpus-seeding.md`](../docs/corpus-seeding.md).
+
 PostgreSQL index synchronization is documented in [`docs/content-index-sync.md`](../docs/content-index-sync.md). Canonical schema version 1 is complete enough to derive structured index entries, ingestion generations, pages, and chunks without a separate generation artifact manifest. Authentication, sessions, audit history, operational state, and unmanaged content are outside this rebuild boundary and still require PostgreSQL backups.
 
 ## Publication ownership and filesystem assumptions

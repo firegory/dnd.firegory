@@ -10,7 +10,7 @@ The admin workspace at `/admin/compendium/imports` exposes successful and failed
 - `invalid` and `duplicate` candidates require an explicit merged JSON payload before publication.
 - Only `missing` candidates can enqueue unpublication.
 - Bulk mutations lock and validate every selected candidate before persisting any decision.
-- Candidate payloads are classified by origin and publication capability. #77 PDF extraction payloads with complete evidence are `publishable`; #78 collector snapshots and unknown payloads are `requires_extraction` and cannot enter publication actions.
+- Candidate payloads are classified by origin and publication capability. #77 PDF extraction payloads with complete evidence and supported #78 typed collector projections are `publishable`; incomplete, unsupported, or unknown payloads are `requires_extraction` and cannot enter publication actions.
 - A `missing` row has no current occurrence. It is `can_unpublish` only when its immutable `previous_candidate_id` chain has the same source, file, type, and key; points to prior #77 chunk/page evidence; and has a completed approved or merged publication whose reconstructed revision is still the displayed active CAS target. It can never be approved or merged as new content.
 - Every decision and publication transition records actor and timestamp. Terminal outcomes are written by the worker, not by dashboard reads.
 - Completed publication rows and audit events are immutable in PostgreSQL.
@@ -29,7 +29,7 @@ The worker serializes canonical changes and installs an immutable activation del
 
 Approved or merged candidate `content` remains the immutable #77 shape: `title`, `body`, typed `attributes`, field citations, extraction metadata, review metadata, and source boundary. Before review state or queue submission is written, the service revalidates every derived field against the database-owned chunk and exact quote spans. It projects the title and attributes into canonical entry/typed fields, the complete source chunk into contiguous canonical text/sections, and every field citation into canonical source/file/chunk/page/section provenance. Unicode code-point extraction spans are converted to canonical JavaScript text offsets without changing their quoted evidence. Nullable or structured attribute values that the canonical typed-field contract cannot represent are rejected rather than coerced.
 
-#78 snapshot payloads contain normalized HTML/text and source hashes but no canonical chunk/page field evidence. Review responses expose them as `payloadOrigin: "collector_snapshot"` and `publicationCapability: "requires_extraction"`; they require a future canonical extraction pass rather than a manual merge rewrite.
+#78 snapshot payloads retain normalized text plus exact detail/index hashes and evidence. Supported typed projections are revalidated against immutable occurrence evidence and may be `publishable`; other snapshot payloads are exposed as `payloadOrigin: "collector_snapshot"` and `publicationCapability: "requires_extraction"` rather than being made publishable by an unsafe manual rewrite.
 
 For `missing` candidates, review evidence fields (`locator`, `chunkId`, `page`, and the `evidenceSourceId` / `evidenceFileId` / `evidenceGenerationId` boundary) come from the previous candidate's occurrence and chunk, never from the empty current occurrence. Collector-derived previous chains remain `requires_extraction` and cannot authorize unpublication.
 
