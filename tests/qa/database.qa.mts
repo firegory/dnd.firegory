@@ -10,6 +10,7 @@ import { handleImportReviewAction } from "../../src/server/compendium/import-rev
 import { CompendiumImportReviewService } from "../../src/server/compendium/import-review.ts";
 import { recordImportReviewPublicationOutcome } from "../../src/server/compendium/import-review-outcomes.ts";
 import { CompendiumNotFoundError, CompendiumReadService } from "../../src/server/compendium/read-service.ts";
+import { OptionReadService } from "../../src/server/compendium/option-read-service.ts";
 import { nextDndCardFingerprint } from "../../src/server/compendium/next-dnd/parser.ts";
 import { seedImportBatch } from "../../src/server/corpus-seed/batch.ts";
 import { inspectPreparedSeed, loadPreparedSeed, seedSlotCounts } from "../../src/server/corpus-seed/executor.ts";
@@ -21,7 +22,7 @@ import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 import { PostgresPublicationFenceManager } from "../../src/worker/publication/fence.ts";
 import { publishCanonicalRevision } from "../../src/worker/publication/publisher.ts";
 import { COMPLETE_CLASS, hierarchyDetailsFixture } from "../fixtures/character-options.mts";
-import { applyMigrationPrefix, IDS, isolatedDatabase, runProductionMigrations, seedAccessFixture } from "./postgres.mts";
+import { applyMigrationPrefix, IDS, isolatedDatabase, runProductionMigrations, seedAccessFixture, seedClassesFixture } from "./postgres.mts";
 
 test("QA integration: concurrent isolated database cleanup closes owned pools before dropping", async () => {
   const databases = await Promise.all([isolatedDatabase("cleanup_a"), isolatedDatabase("cleanup_b")]);
@@ -47,6 +48,7 @@ test("QA integration: fresh and prefix-upgrade migrations are database-isolated 
   const fresh = await isolatedDatabase("fresh");
   t.after(() => fresh.cleanup());
   await runProductionMigrations(fresh.url);
+  assert.deepEqual(await new OptionReadService(fresh.pool).list("class", { role: "user" }), { options: [], count: 0 });
   const freshApplied = await fresh.pool.query<{ version: string }>("SELECT version FROM schema_migrations ORDER BY version");
   assert.deepEqual(freshApplied.rows.map(({ version }) => version), [...MIGRATION_FILENAMES].sort());
   assert.equal((await fresh.pool.query("SELECT '[1,2,3]'::vector(3)")).rowCount, 1);
@@ -119,6 +121,7 @@ test("QA integration: live role matrix is authorization-, source-, and corpus-sc
   t.after(() => db.cleanup());
   await runProductionMigrations(db.url);
   await seedAccessFixture(db.pool);
+  await seedClassesFixture(db.pool);
   const service = new CompendiumReadService(db.pool);
 
   const cases = [
@@ -153,6 +156,22 @@ test("QA integration: live role matrix is authorization-, source-, and corpus-sc
   );
   assert.equal(Number(boundaries.rows[0]?.invalid), 0);
   assert.equal(Number((await db.pool.query<{ count: string }>("SELECT count(*) FROM nfs_index_entries WHERE edition IS NULL OR language IS NULL")).rows[0]?.count), 0);
+
+  const options = new OptionReadService(db.pool);
+  const classes = await options.list("class", { role: "user", userId: IDS.users.regular }, { edition: "5.5e", language: "en" });
+  assert.deepEqual(classes.options.map(({ id }) => id), ["class-champion", "class-fighter", "class-partial"]);
+  assert.deepEqual(classes.options.find(({ id }) => id === "class-partial"), {
+    id:"class-partial",revisionId:`rev-${"d".repeat(64)}`,title:"QA Partial",aliases:[],summary:"QA Partial rules.",edition:"5.5e",language:"en",
+    source:{id:IDS.sources.open,title:"Open 2024 Rules",code:"QA100",revision:null},kind:"class",hitDie:10,primaryAbility:"Strength",spellcastingAbility:null,
+    parentClassIds:[],progressionColumns:[],progressionRows:[],features:[],crossLinks:[],
+  });
+  assert.deepEqual(await options.list("class", { role: "user", userId: IDS.users.empty }, { category: "homebrew" }), { options: [], count: 0 });
+  assert.deepEqual((await options.list("class", { role: "admin", userId: IDS.users.admin }, { category: "homebrew" })).options.map(({ id }) => id), ["class-private"]);
+  const fighter = await options.get("class", { role: "admin", userId: IDS.users.admin }, "class-fighter");
+  assert.deepEqual(fighter.features.map(({ canonicalId }) => canonicalId), ["feature-second-wind"]);
+  assert.deepEqual(fighter.sourceVersions.map(({ sourceId }) => sourceId), [IDS.sources.open, IDS.sources.premium]);
+  const premiumFighter = await options.get("class", { role: "admin", userId: IDS.users.admin }, "class-fighter", { sourceId: IDS.sources.premium, revisionId: `rev-${"e".repeat(64)}` });
+  assert.equal(premiumFighter.title, "QA Fighter Premium");
 });
 
 test("QA integration: transactional import crash rolls back, stale lease retries, and replay conflicts fail closed", async (t) => {
