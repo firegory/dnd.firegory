@@ -286,6 +286,81 @@ export async function seedAccessFixture(database: Pool | PoolClient, options: Re
   return tokens;
 }
 
+export async function seedClassesFixture(database: Pool | PoolClient): Promise<void> {
+  const ownsClient = database instanceof Pool;
+  const client = ownsClient ? await database.connect() : database;
+  const sourceRows = [
+    { sourceId: IDS.sources.open, suffix: "1", repositoryId: "qa-classes-open", entries: [
+      { id: "class-fighter", revision: "a", name: "QA Fighter", fields: classFields({ features: [{ canonicalId: "feature-second-wind", title: "Second Wind", body: "Regain stamina.", level: 1, anchor: "second-wind" }] }) },
+      { id: "class-champion", revision: "b", name: "QA Champion", fields: classFields({ kind: "subclass", parentClassIds: ["class-fighter"] }) },
+      { id: "feature-second-wind", revision: "c", name: "Second Wind", fields: [{ key: "level", value: 1 }, { key: "feature-kind", value: "class" }] },
+      { id: "class-partial", revision: "d", name: "QA Partial", fields: classFields({ progressionColumns: null, progressionRows: null, features: null, crossLinks: null }) },
+    ] },
+    { sourceId: IDS.sources.premium, suffix: "2", repositoryId: "qa-classes-premium", entries: [
+      { id: "class-fighter", revision: "e", name: "QA Fighter Premium", fields: classFields() },
+    ] },
+    { sourceId: IDS.sources.otherPersonal, suffix: "4", repositoryId: "qa-classes-private", entries: [
+      { id: "class-private", revision: "f", name: "QA Private Class", fields: classFields() },
+    ] },
+  ] as const;
+  try {
+    await client.query("BEGIN");
+    await client.query("SET CONSTRAINTS ALL DEFERRED");
+    for (const source of sourceRows) {
+      const fileId = `30000000-0000-4000-8000-00000000000${source.suffix}`;
+      const generationId = `40000000-0000-4000-8000-00000000000${source.suffix}`;
+      const documentId = `64000000-0000-4000-8000-00000000000${source.suffix}`;
+      for (const [index, entry] of source.entries.entries()) {
+        await client.query(
+          `INSERT INTO nfs_index_entries
+             (id,repository_id,entry_id,revision_id,content_hash,entry_type,name,aliases,typed_fields,plain_text,canonical_payload,
+              source_id,file_id,generation_id,document_id,lifecycle,edition,language,indexed_at)
+           VALUES ($1,$2,$3,$4,$5,'classFeature',$6,'[]'::jsonb,$7::jsonb,$8,$9::jsonb,$10,$11,$12,$13,'active','5.5e','en',now()+($14*interval '1 second'))`,
+          [`8${source.suffix}${String(index).padStart(6, "0")}-0000-4000-8000-000000000001`, source.repositoryId, entry.id,
+            `rev-${entry.revision.repeat(64)}`, `sha256:${entry.revision.repeat(64)}`, entry.name, JSON.stringify(entry.fields), `${entry.name} rules.`,
+            JSON.stringify({ citations: [] }), source.sourceId, fileId, generationId, documentId, index],
+        );
+      }
+    }
+    const relationValues = (sourceId: string, repositoryId: string, sourceEntryId: string, sourceRevision: string, targetEntryId: string, targetRevision: string, kind: string, targetKind: string, anchor: string | null) => [
+      repositoryId, sourceEntryId, `rev-${sourceRevision.repeat(64)}`, sourceId, "30000000-0000-4000-8000-000000000001",
+      targetEntryId, `rev-${targetRevision.repeat(64)}`, sourceId, "30000000-0000-4000-8000-000000000001", kind, targetKind, anchor,
+    ];
+    await client.query(
+      `INSERT INTO nfs_index_option_relations
+         (repository_id,source_entry_id,source_revision_id,source_id,source_file_id,target_entry_id,target_revision_id,target_source_id,target_file_id,
+          edition,language,relation_kind,target_kind,target_lifecycle,source_anchor,anchor,position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'5.5e','en',$10,$11,'active','',$12,0)`,
+      relationValues(IDS.sources.open, "qa-classes-open", "class-champion", "b", "class-fighter", "a", "parent", "class", null),
+    );
+    await client.query(
+      `INSERT INTO nfs_index_option_relations
+         (repository_id,source_entry_id,source_revision_id,source_id,source_file_id,target_entry_id,target_revision_id,target_source_id,target_file_id,
+          edition,language,relation_kind,target_kind,target_lifecycle,source_anchor,anchor,position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'5.5e','en',$10,$11,'active','',$12,0)`,
+      relationValues(IDS.sources.open, "qa-classes-open", "class-fighter", "a", "feature-second-wind", "c", "feature", "feature", "second-wind"),
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    if (ownsClient) client.release();
+  }
+}
+
+function classFields(overrides: Readonly<Record<string, unknown>> = {}): readonly Readonly<{ key: string; value: unknown }>[] {
+  const projection: Record<string, unknown> = {
+    kind: "class", hitDie: 10, primaryAbility: "Strength", spellcastingAbility: null, parentClassIds: [],
+    progressionColumns: [], progressionRows: [], features: [], crossLinks: [], ...overrides,
+  };
+  return Object.entries(projection).map(([key, value]) => ({
+    key: key.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase(),
+    value: ["progressionColumns", "progressionRows", "features"].includes(key) && Array.isArray(value)
+      ? value.map((item) => JSON.stringify(item)) : value,
+  }));
+}
+
 async function seedReviewFixture(client: Pool | PoolClient): Promise<void> {
   const sourceId = IDS.sources.open;
   const fileId = "30000000-0000-4000-8000-000000000001";

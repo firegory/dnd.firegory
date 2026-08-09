@@ -52,14 +52,14 @@ function boundarySql(type: OptionType, user: RetrievalUser, selection: OptionVer
   if(selection.sourceId)exact.push(`option_version.source_id=$${access.params.push(selection.sourceId)}`);
   if(selection.revisionId)exact.push(`option_version.revision_id=$${access.params.push(selection.revisionId)}`);
   if(exact.length===0)exact.push("option_version.source_rank=1");
-  const typePredicate = type === "class" ? "n.entry_type='classFeature' AND n.entry_id LIKE 'class-%' AND fields.attributes ? 'hit-die'" : "n.entry_type='other' AND n.entry_id LIKE 'species-%' AND fields.attributes ? 'size' AND fields.attributes ? 'speed'";
+  const typePredicate = type === "class" ? "n.entry_type='classFeature' AND n.entry_id LIKE 'class-%' AND n.attributes ? 'hit-die'" : "n.entry_type='other' AND n.entry_id LIKE 'species-%' AND n.attributes ? 'size' AND n.attributes ? 'speed'";
   return { params: [...access.params], sql: `WITH accessible_entries AS MATERIALIZED (
-    SELECT n.*,s.title AS source_title,s.edition,s.language,s.publication_code,s.publication_revision,s.source_priority,f.mime_type,
+    SELECT n.*,s.title AS source_title,s.publication_code,s.publication_revision,s.source_priority,f.mime_type,
       lower(n.name) AS sort_title,fields.attributes,row_number() OVER (PARTITION BY n.entry_id ORDER BY s.source_priority DESC,n.indexed_at DESC,n.revision_id) AS source_rank
     FROM nfs_index_entries n JOIN sources s ON s.id=n.source_id JOIN files f ON f.id=n.file_id AND f.source_id=s.id
     CROSS JOIN LATERAL (SELECT coalesce(jsonb_object_agg(field->>'key',field->'value'),'{}') AS attributes FROM jsonb_array_elements(n.typed_fields) field) fields
     WHERE ${access.sql} AND s.deleted_at IS NULL AND f.deleted_at IS NULL AND n.lifecycle='active'
-  ), option_versions AS MATERIALIZED (SELECT * FROM accessible_entries n JOIN LATERAL (SELECT n.attributes) fields ON true WHERE ${typePredicate}),
+  ), option_versions AS MATERIALIZED (SELECT n.* FROM accessible_entries n WHERE ${typePredicate}),
   selected_options AS MATERIALIZED (SELECT option_version.*,
     (SELECT jsonb_agg(jsonb_build_object('targetId',target.entry_id,'targetRevisionId',target.revision_id,
       'targetSourceId',target.source_id,'relationKind',relation.relation_kind,'targetKind',relation.target_kind,

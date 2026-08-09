@@ -5,7 +5,7 @@ import test from "node:test";
 import { classifyCandidatePublication, projectSnapshotFeatureCandidate, projectSnapshotHierarchyCandidate } from "../../src/server/compendium/candidate-publication.ts";
 import { parseDeterministicChunk } from "../../src/server/compendium/candidate-parsers.ts";
 import { EXTRACTION_PARSER_VERSION, EXTRACTION_PROMPT_VERSION } from "../../src/server/compendium/candidate-schema.ts";
-import { validateClassProjection, validateSpeciesProjection } from "../../src/server/compendium/hierarchy-schema.ts";
+import { classProjectionFromTypedFields, validateClassProjection, validateSpeciesProjection } from "../../src/server/compendium/hierarchy-schema.ts";
 import { canonicalEntryId, collectorCandidateKey } from "../../src/server/compendium/identity.ts";
 import { nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
 import { featureCandidates, hierarchyCandidate } from "../../src/server/compendium/next-dnd/hierarchy-import.ts";
@@ -98,12 +98,39 @@ test("same canonical IDs in two sources keep exact NFS relations and reader navi
   assert.match(syncSource,/INSERT INTO nfs_index_option_relations[\s\S]*source_revision_id[\s\S]*target_revision_id[\s\S]*target_source_id/);
 });
 
+test("classes reader SQL matches post-0017 index columns and parses nullable optional hierarchy fields",async()=>{
+  const statements:string[]=[];
+  const partial={
+    entry_id:"class-partial",revision_id:`rev-${"a".repeat(64)}`,name:"Partial Class",aliases:null,plain_text:"Partial class rules.",canonical_payload:null,
+    source_id:sourceId,file_id:fileId,mime_type:"text/plain",source_title:"Optional Source",edition:"5.5e",language:"en",publication_code:null,publication_revision:null,
+    typed_fields:[{key:"kind",value:"class"},{key:"hit-die",value:8},{key:"primary-ability",value:"Wisdom"},{key:"spellcasting-ability",value:null},
+      {key:"progression-columns",value:null},{key:"progression-rows",value:null},{key:"features",value:[]},{key:"cross-links",value:null}],
+    relations:null,source_versions:null,
+  };
+  let call=0;
+  const result=await new OptionReadService({async query(sql:string){statements.push(sql);return{rows:call++===0?[partial]:[{count:"1"}]};}}).list("class",{role:"user"});
+  assert.equal(result.count,1);assert.deepEqual(result.options[0],{
+    id:"class-partial",revisionId:`rev-${"a".repeat(64)}`,title:"Partial Class",aliases:[],summary:"Partial class rules.",edition:"5.5e",language:"en",
+    source:{id:sourceId,title:"Optional Source",code:null,revision:null},kind:"class",hitDie:8,primaryAbility:"Wisdom",spellcastingAbility:null,
+    parentClassIds:[],progressionColumns:[],progressionRows:[],features:[],crossLinks:[],
+  });
+  for(const sql of statements){assert.doesNotMatch(sql,/s\.edition,s\.language/);assert.doesNotMatch(sql,/JOIN LATERAL \(SELECT n\.attributes\)/);assert.match(sql,/SELECT n\.\* FROM accessible_entries n/);}
+});
+
+test("hierarchy typed fields accept current JSON strings and historical JSON objects but reject malformed JSON",()=>{
+  const fields=[{key:"kind",value:"class"},{key:"hit-die",value:8},{key:"primary-ability",value:"Wisdom"},
+    {key:"progression-columns",value:[{key:"slots",heading:"Slots"}]},{key:"progression-rows",value:[JSON.stringify({level:1,cells:{slots:"2"}})]}];
+  assert.deepEqual(classProjectionFromTypedFields(fields).progressionRows,[{level:1,cells:{slots:"2"}}]);
+  assert.throws(()=>classProjectionFromTypedFields([...fields,{key:"features",value:["not-json"]}]),/malformed JSON/);
+});
+
 test("hierarchy UI retains exact-version links, responsive print tables, and deep anchors",async()=>{
-  const [detail,css,list,editor]=await Promise.all([readFile("src/components/compendium/option-detail.tsx","utf8"),readFile("src/app/globals.css","utf8"),readFile("src/components/compendium/option-list.tsx","utf8"),readFile("src/app/admin/compendium/entries/editor-client.tsx","utf8")]);
+  const [detail,css,list,editor,route]=await Promise.all([readFile("src/components/compendium/option-detail.tsx","utf8"),readFile("src/app/globals.css","utf8"),readFile("src/components/compendium/option-list.tsx","utf8"),readFile("src/app/admin/compendium/entries/editor-client.tsx","utf8"),readFile("src/app/classes/page.tsx","utf8")]);
   assert.match(list,/Классы и подклассы.*Classes and subclasses/s);assert.match(detail,/targetSourceId/);assert.match(detail,/targetRevisionId/);
   assert.match(detail,/id={`level-\$\{row\.level\}`}/);assert.match(detail,/id={feature\.anchor}/);assert.match(detail,/relationKind==="trait_override"/);
   assert.match(detail,/targetRevisionId/);assert.match(detail,/#\$\{resolved\.anchor\}/);
   assert.match(css,/@media print[\s\S]*\.progression-table thead[\s\S]*table-header-group/);assert.match(css,/@media \(max-width: 39\.999rem\)[\s\S]*\.option-filters,[\s\S]*grid-template-columns: 1fr/);assert.match(editor,/Progression levels 1-20 \(JSON\)/);
+  assert.match(route,/new OptionReadService\(\)\.list\("class",retrievalUser\(user\),options\)/);assert.doesNotMatch(route,/catch\s*\(/);
 });
 
 function collectorBatch(){const details=hierarchyDetailsFixture();return nextDndImportBatch({schemaVersion:2,parserVersion:"next-dnd-2024-v3",status:"complete",collectedAt:details[0].fetchedAt,robots:{userAgent:"fixture",snapshot:{} as never,rules:[],evaluations:[]},categories:[{requestedCategory:"class",discoveredCategory:"class",entryCount:2,index:{} as never,details:details.slice(0,2)},{requestedCategory:"species",discoveredCategory:"species",entryCount:2,index:{} as never,details:details.slice(2)}],parserFailures:[],diagnostics:[]});}

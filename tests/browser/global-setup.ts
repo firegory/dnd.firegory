@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 
 import { Client, Pool } from "pg";
 
-import { assertQaDatabase, databaseUrlForDatabase, IDS, requireDatabaseUrl, runProductionMigrations, seedAccessFixture } from "../qa/postgres.mts";
+import { assertQaDatabase, databaseUrlForDatabase, IDS, requireDatabaseUrl, runProductionMigrations, seedAccessFixture, seedClassesFixture } from "../qa/postgres.mts";
 
 export default async function globalSetup(): Promise<void> {
   const databaseName = process.env.QA_BROWSER_DATABASE?.trim() || "qa_browser";
@@ -39,6 +39,7 @@ export default async function globalSetup(): Promise<void> {
         storageRoot,
         fileChecksumSha256: createHash("sha256").update(pdf).digest("hex"),
       });
+      await seedClassesFixture(pool);
     } finally {
       await pool.end();
     }

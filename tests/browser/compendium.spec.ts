@@ -61,12 +61,27 @@ test("@user mobile drawer performs a real navigation and restores main focus", a
   expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
 });
 
+test("@user Classes navigation renders classes, subclasses, features, and source metadata", async ({ page }) => {
+  await page.goto("/en/compendium");
+  await page.getByRole("link", { name: "Classes", exact: true }).click();
+  await expect(page).toHaveURL(/\/classes$/);
+  await expect(page.getByRole("heading", { name: "Classes and subclasses" })).toBeVisible();
+  await expect(page.locator(".option-list > li")).toHaveCount(3);
+  await page.getByRole("link", { name: /QA Fighter/ }).click();
+  await expect(page.getByRole("heading", { name: "QA Fighter" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Second Wind" })).toBeVisible();
+  await expect(page.getByText("QA100", { exact: true })).toBeVisible();
+});
+
 test("@no-access otherwise matching English homebrew corpus is authorization-empty", async ({ page, request }) => {
   const response = await request.get("/api/compendium/entries?edition=5.5e&language=en&category=homebrew");
   expect(response.ok()).toBeTruthy();
   expect(await response.json()).toMatchObject({ entries: [], count: 0 });
   await page.goto("/en/compendium/entries/50000000-0000-4000-8000-000000000003");
   await expect(page.getByRole("heading", { name: "This page could not be found." })).toBeVisible();
+  await page.goto("/classes?category=homebrew");
+  await expect(page.getByRole("heading", { name: "Classes and subclasses" })).toBeVisible();
+  await expect(page.getByText("No accessible options found.")).toBeVisible();
 });
 
 test("@premium premium cannot read another user's personal source", async ({ request }) => {
