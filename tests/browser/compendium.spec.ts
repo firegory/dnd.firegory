@@ -3,6 +3,13 @@ import { expect, test } from "@playwright/test";
 import { IDS } from "../qa/postgres.mts";
 
 test("@anonymous landing redirects and APIs reject without a session", async ({ page, request }) => {
+  for (const path of ["/favicon.ico", "/icon.svg"]) {
+    const icon = await request.get(path, { maxRedirects: 0 });
+    expect(icon.status(), path).toBe(200);
+    expect(icon.headers()["content-type"], path).toMatch(/^image\//);
+    expect(icon.headers()["cache-control"], path).toMatch(/(?:public|max-age)/);
+    expect((await icon.body()).subarray(0, 256).toString("utf8"), path).toMatch(/<svg|PNG|JFIF/);
+  }
   await page.goto("/en/compendium");
   await expect(page).toHaveURL(/\/login\?next=%2Fen%2Fcompendium/);
   const response = await request.get("/api/compendium/entries");
