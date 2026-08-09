@@ -44,9 +44,20 @@ test("staged persistence is generation-scoped so replacement tails cannot mix", 
 });
 
 test("pipeline validates quality before atomic activation and cleans failures", () => {
+  const pageQuality = pipeline.indexOf("findPageQualityFailures");
+  const persistPages = pipeline.indexOf("await persistPages");
   const quality = pipeline.indexOf("generateQualityReport");
   const rejectFailed = pipeline.indexOf('qualityReport.overall.status === "failed"');
   const activate = pipeline.indexOf("await activateGeneration(stagedGenerationId)");
+  assert.ok(pageQuality < persistPages);
   assert.ok(quality < rejectFailed && rejectFailed < activate);
   assert.match(pipeline, /await discardStagedGeneration\(generationId\)/);
+});
+
+test("corrupt page failure occurs before chunk construction and generation activation", () => {
+  const rejectPage = pipeline.indexOf("Ingestion page quality validation failed");
+  const chunk = pipeline.indexOf("const chunks = chunkPages");
+  const persist = pipeline.indexOf("await persistPages");
+  const activate = pipeline.indexOf("await activateGeneration(stagedGenerationId)");
+  assert.ok(rejectPage < chunk && chunk < persist && persist < activate);
 });

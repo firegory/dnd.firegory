@@ -31,6 +31,15 @@ export type IngestionJobRecord = Readonly<{
   finishedAt: string | null;
 }>;
 
+export async function getSourceLanguage(sourceId: string): Promise<SourceLanguage> {
+  const result = await query<{ language: SourceLanguage }>(
+    "SELECT language FROM sources WHERE id = $1",
+    [sourceId],
+  );
+  if (!result.rows[0]) throw new Error(`Source ${sourceId} not found`);
+  return result.rows[0].language;
+}
+
 type IngestionJobRow = Readonly<{
   id: string;
   kind: string;

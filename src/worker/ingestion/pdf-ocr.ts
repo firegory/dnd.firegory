@@ -6,7 +6,7 @@
  * re-extracts text from it.
  */
 
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
@@ -14,6 +14,9 @@ import { promisify } from "node:util";
 import { isCommandAvailable } from "./dependencies.ts";
 
 const execFile = promisify(execFileCb);
+const OCR_TIMEOUT_MS = 300_000;
+const OCR_MAX_PDF_BYTES = 512 * 1024 * 1024;
+const OCR_MAX_OUTPUT_BYTES = 1024 * 1024;
 
 export type OcrResult = Readonly<{
   ocrPdfPath: string | null;
@@ -67,23 +70,28 @@ export async function ocrPdf(
   }
 
   const ocrPdfPath = join(outputDir, "ocr.pdf");
+  const sidecarPath = join(outputDir, "ocr-sidecar.txt");
   const errors: string[] = [];
 
   try {
+    const inputSize = (await stat(inputPdfPath)).size;
+    if (inputSize > OCR_MAX_PDF_BYTES) {
+      throw new Error(`PDF exceeds OCR size limit of ${OCR_MAX_PDF_BYTES} bytes`);
+    }
     // Build pages-to-OCR argument
     // ocrmypdf --pages takes page ranges like "1,3,5" or "1-5"
     const pageRanges = pagesNeedingOcr.map(String).join(",");
 
-    await execFile("ocrmypdf", [
-      "--language", "eng+rus",
-      "--deskew",            // Fix skewed scans
-      "--remove-background", // Clean up scanned backgrounds
-      "--sidecar", join(outputDir, "ocr-sidecar.txt"), // Extract text alongside
-      "--pages", pageRanges,
-      "--output-type", "pdf",
+    await execFile("ocrmypdf", buildOcrArguments(
       inputPdfPath,
       ocrPdfPath,
-    ], { timeout: 300_000 }); // 5 min timeout for large PDFs
+      sidecarPath,
+      pageRanges,
+    ), {
+      timeout: OCR_TIMEOUT_MS,
+      maxBuffer: OCR_MAX_OUTPUT_BYTES,
+      killSignal: "SIGKILL",
+    });
 
     return {
       ocrPdfPath,
@@ -94,6 +102,10 @@ export async function ocrPdf(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     errors.push(`ocrmypdf failed: ${message}`);
+    await Promise.allSettled([
+      rm(ocrPdfPath, { force: true }),
+      rm(sidecarPath, { force: true }),
+    ]);
 
     return {
       ocrPdfPath: null,
@@ -102,6 +114,25 @@ export async function ocrPdf(
       errors,
     };
   }
+}
+
+export function buildOcrArguments(
+  inputPdfPath: string,
+  outputPdfPath: string,
+  sidecarPath: string,
+  pageRanges: string,
+): readonly string[] {
+  return [
+    "--language", "eng+rus",
+    "--force-ocr",
+    "--deskew",
+    "--remove-background",
+    "--sidecar", sidecarPath,
+    "--pages", pageRanges,
+    "--output-type", "pdf",
+    inputPdfPath,
+    outputPdfPath,
+  ];
 }
 
 /**

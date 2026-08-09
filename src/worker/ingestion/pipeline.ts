@@ -13,8 +13,13 @@ import {
   extractTextFromPdf,
   saveExtractionResults,
 } from "./pdf-extract.ts";
-import { ocrPdf, readOcrSidecar, isOcrAvailable } from "./pdf-ocr.ts";
+import { ocrPdf, isOcrAvailable } from "./pdf-ocr.ts";
 import { chunkPages } from "./chunking.ts";
+import {
+  assessPagesTextQuality,
+  findPageQualityFailures,
+  MIN_LANGUAGE_QUALITY_CHARACTERS,
+} from "./page-quality.ts";
 import { extractPageBboxes, computeChunkBboxes, type ChunkBbox } from "./bbox.ts";
 import {
   generateEmbeddings,
@@ -33,6 +38,7 @@ import {
   markJobFailed,
   updateJobProgress,
   getIngestionJob,
+  getSourceLanguage,
 } from "../../server/ingestion/storage.ts";
 import { artifactsRootPath } from "../../server/ingestion/paths.ts";
 import {
@@ -121,6 +127,13 @@ export async function runPipeline(input: {
       normalizeResult.normalizedPath,
       extractDir,
     );
+    const sourceLanguage = await getSourceLanguage(sourceId);
+    const initialPageQuality = assessPagesTextQuality(extractionResult.pages, sourceLanguage);
+    const corruptTextLayerPages = new Set(
+      initialPageQuality
+        .filter((quality) => quality.status === "corrupt")
+        .map((quality) => quality.pageNumber),
+    );
 
     // === Stage 4: OCR fallback ===
     await updateJobProgress(jobId, 35);
@@ -136,9 +149,10 @@ export async function runPipeline(input: {
       ocrAvailable = false;
     }
 
-    const pagesNeedingOcr = extractionResult.pages
-      .filter((p) => p.isOcrCandidate)
-      .map((p) => p.pageNumber);
+    const pagesNeedingOcr = [...new Set(extractionResult.pages
+      .filter((page) => page.isOcrCandidate || corruptTextLayerPages.has(page.pageNumber))
+      .map((page) => page.pageNumber))];
+    const ocrReplacementPages = new Set<number>();
 
     if (pagesNeedingOcr.length > 0 && ocrAvailable) {
       const ocrResult = await ocrPdf(
@@ -150,22 +164,34 @@ export async function runPipeline(input: {
       ocrPagesOcred = ocrResult.ocredPages;
       ocrErrors = [...ocrResult.errors];
 
-      // If OCR produced a new PDF, re-extract text from OCR'd pages
+      // Forced OCR rasterizes selected pages, so re-extract from that PDF
+      // rather than trusting the original custom-font text layer or sidecar.
       if (ocrResult.ocrPdfPath) {
-        const sidecarPath = join(ocrDir, "ocr-sidecar.txt");
-        const ocrTexts = await readOcrSidecar(sidecarPath);
+        const ocrExtraction = await extractTextFromPdf(
+          ocrResult.ocrPdfPath,
+          join(ocrDir, "extract"),
+        );
+        const ocrPages = new Map(ocrExtraction.pages.map((page) => [page.pageNumber, page]));
 
         // Merge OCR text back into extraction results
         const mergedPages = extractionResult.pages.map((page) => {
-          if (!page.isOcrCandidate) return page;
+          if (!pagesNeedingOcr.includes(page.pageNumber)) return page;
 
-          const ocrText = ocrTexts[page.pageNumber - 1] ?? "";
-          if (ocrText.trim().length > page.text.trim().length) {
+          const ocrPage = ocrPages.get(page.pageNumber);
+          const ocrText = ocrPage?.text ?? "";
+          const forceReplacement = corruptTextLayerPages.has(page.pageNumber);
+          if (ocrText.trim().length > 0
+            && (forceReplacement || ocrText.trim().length > page.text.trim().length)) {
+            if (!forceReplacement
+              || [...ocrText].filter((character) => !/\s/u.test(character)).length
+                >= MIN_LANGUAGE_QUALITY_CHARACTERS) {
+              ocrReplacementPages.add(page.pageNumber);
+            }
             return {
               ...page,
               text: ocrText,
               charCount: ocrText.length,
-              isOcrCandidate: false,
+              isOcrCandidate: ocrPage?.isOcrCandidate ?? false,
             };
           }
           return page;
@@ -179,6 +205,28 @@ export async function runPipeline(input: {
           pagesNeedingOcr: mergedPages.filter((p) => p.isOcrCandidate).length,
         };
       }
+    }
+
+    const finalPageQuality = assessPagesTextQuality(extractionResult.pages, sourceLanguage);
+    const pageQualityFailures = findPageQualityFailures({
+      initiallyCorruptPages: corruptTextLayerPages,
+      finalQuality: finalPageQuality,
+      ocrAvailable,
+      ocrReplacementPages,
+    });
+
+    await mkdir(jobArtifactsDir, { recursive: true });
+    await writeFile(join(jobArtifactsDir, "page-quality.json"), JSON.stringify({
+      language: sourceLanguage,
+      initial: initialPageQuality,
+      final: finalPageQuality,
+      failures: pageQualityFailures,
+    }, null, 2));
+    if (pageQualityFailures.length > 0) {
+      const details = pageQualityFailures
+        .map((failure) => `page ${failure.pageNumber}: ${failure.reason}`)
+        .join("; ");
+      throw new Error(`Ingestion page quality validation failed: ${details}`);
     }
 
     // Save extraction results
