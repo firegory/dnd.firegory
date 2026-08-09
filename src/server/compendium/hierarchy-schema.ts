@@ -71,7 +71,7 @@ export function validateClassProjection(value: unknown, options: Readonly<{ requ
 
 export function validateSpeciesProjection(value: unknown): SpeciesProjection {
   if (!record(value)) fail("Species projection must be an object.");
-  const kind = value.kind ?? "species";
+  const kind = Object.hasOwn(value, "kind") ? value.kind : "species";
   if (kind !== "species" && kind !== "variant") fail("Species kind must be species or variant.");
   const sizes = ["tiny", "small", "medium", "large", "huge", "gargantuan"] as const;
   if (typeof value.size !== "string" || !sizes.includes(value.size as typeof sizes[number])) fail("Species size is unsupported.");
@@ -97,7 +97,7 @@ export function hierarchyTypedValue(key: string, value: unknown): unknown {
 export function classProjectionFromTypedFields(fields: unknown): ClassProjection { return validateClassProjection(typedObject(fields), { requireCompleteBase: false }); }
 export function speciesProjectionFromTypedFields(fields: unknown): SpeciesProjection {
   const projection = typedObject(fields);
-  if (projection.kind == null && Array.isArray(projection.parentSpeciesIds) && projection.parentSpeciesIds.length > 0) projection.kind = "variant";
+  if (!Object.hasOwn(projection, "kind") && Array.isArray(projection.parentSpeciesIds) && projection.parentSpeciesIds.length > 0) projection.kind = "variant";
   return validateSpeciesProjection(projection);
 }
 

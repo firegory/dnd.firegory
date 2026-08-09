@@ -127,15 +127,22 @@ test("hierarchy typed fields accept current JSON strings and historical JSON obj
   assert.throws(()=>classProjectionFromTypedFields([...fields,{key:"features",value:["not-json"]}]),/malformed JSON/);
 });
 
-test("historical species typed fields infer a variant from its canonical parent list",()=>{
-  const fields=[{key:"size",value:"medium"},{key:"speed",value:35},{key:"parent-species-ids",value:["species-1"]},
+test("historical species typed fields infer kind only when the property is absent",async()=>{
+  const required=[{key:"size",value:"medium"},{key:"speed",value:35}];
+  const fields=[...required,{key:"parent-species-ids",value:["species-1"]},
     {key:"traits",value:[{key:"fleet",title:"Fleet",body:"Your Speed increases.",anchor:"fleet",overrides:null}]},
     {key:"cross-links",value:null}];
   assert.deepEqual(speciesProjectionFromTypedFields(fields),{
     kind:"variant",size:"medium",speed:35,parentSpeciesIds:["species-1"],
     traits:[{key:"fleet",title:"Fleet",body:"Your Speed increases.",anchor:"fleet",overrides:null}],crossLinks:[],
   });
-  assert.throws(()=>speciesProjectionFromTypedFields([{key:"size",value:"medium"},{key:"speed",value:30},{key:"kind",value:"legacy"}]),/kind must be species or variant/i);
+  assert.equal(speciesProjectionFromTypedFields([...required,{key:"parent-species-ids",value:[]}]).kind,"species");
+  for(const parents of [[],["species-1"]]) for(const kind of [null,"legacy",42,{},[]]) {
+    assert.throws(()=>speciesProjectionFromTypedFields([...required,{key:"kind",value:kind},{key:"parent-species-ids",value:parents}]),/kind must be species or variant/i);
+  }
+  const statements:string[]=[];let call=0;
+  await new OptionReadService({async query(sql:string){statements.push(sql);return{rows:call++===0?[]:[{count:"0"}]};}}).list("species",{role:"user"},{kind:"species"});
+  for(const sql of statements){assert.match(sql,/attributes \? 'kind'/);assert.doesNotMatch(sql,/coalesce\(n\.attributes->>'kind',CASE/);}
 });
 
 test("hierarchy UI retains exact-version links, responsive print tables, and deep anchors",async()=>{

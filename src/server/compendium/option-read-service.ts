@@ -86,7 +86,7 @@ function optionFilters(params: unknown[], options: OptionListOptions): string {
 }
 function kindSql(type: OptionType, attributes: string): string {
   if (type === "class") return `coalesce(${attributes}->>'kind','class')`;
-  return `coalesce(${attributes}->>'kind',CASE WHEN jsonb_typeof(${attributes}->'parent-species-ids')='array' AND jsonb_array_length(${attributes}->'parent-species-ids')>0 THEN 'variant' ELSE 'species' END)`;
+  return `CASE WHEN ${attributes} ? 'kind' THEN ${attributes}->>'kind' WHEN jsonb_typeof(${attributes}->'parent-species-ids')='array' AND jsonb_array_length(${attributes}->'parent-species-ids')>0 THEN 'variant' ELSE 'species' END`;
 }
 function validate(type: OptionType, options: OptionListOptions): void {
   if (options.query !== undefined && (!options.query.trim() || options.query.length > 120)) throw new CompendiumReadInputError("Invalid option query.");

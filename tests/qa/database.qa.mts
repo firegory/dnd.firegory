@@ -22,6 +22,7 @@ import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 import { PostgresPublicationFenceManager } from "../../src/worker/publication/fence.ts";
 import { publishCanonicalRevision } from "../../src/worker/publication/publisher.ts";
 import { COMPLETE_CLASS, hierarchyDetailsFixture } from "../fixtures/character-options.mts";
+import { HierarchyValidationError } from "../../src/server/compendium/hierarchy-schema.ts";
 import { applyMigrationPrefix, IDS, isolatedDatabase, runProductionMigrations, seedAccessFixture, seedClassesFixture, seedSpeciesFixture } from "./postgres.mts";
 
 test("QA integration: concurrent isolated database cleanup closes owned pools before dropping", async () => {
@@ -187,6 +188,31 @@ test("QA integration: live role matrix is authorization-, source-, and corpus-sc
   assert.deepEqual(human.sourceVersions.map(({ sourceId }) => sourceId), [IDS.sources.open, IDS.sources.open, IDS.sources.premium]);
   const premiumHuman = await options.get("species", { role: "admin", userId: IDS.users.admin }, "species-human", { sourceId: IDS.sources.premium, revisionId: `rev-${"6".repeat(64)}` });
   assert.equal(premiumHuman.title, "QA Human Premium");
+  assert.deepEqual((await options.list("species", { role: "admin", userId: IDS.users.admin }, { category: "homebrew", kind: "species" })).options.map(({ id }) => id), ["species-private"]);
+  for (const id of ["species-kind-null-empty","species-kind-null-parent","species-kind-scalar","species-kind-object","species-kind-array"]) {
+    await assert.rejects(options.get("species", { role: "admin", userId: IDS.users.admin }, id), HierarchyValidationError);
+  }
+  const relationClient = await db.pool.connect();
+  try {
+    for (const [sourceEntry,sourceRevision,targetEntry,targetRevision,error] of [
+      ["species-private","7","species-kind-null-empty","8",/matching kind/],
+      ["species-kind-null-empty","8","species-private","7",/invalid explicit species kind/],
+    ] as const) {
+      await relationClient.query("BEGIN");
+      try {
+        await relationClient.query(`INSERT INTO nfs_index_option_relations
+          (repository_id,source_entry_id,source_revision_id,source_id,source_file_id,target_entry_id,target_revision_id,target_source_id,target_file_id,
+           edition,language,relation_kind,target_kind,target_lifecycle,source_anchor,anchor,position)
+          VALUES ('qa-species-private',$1,$2,$3,$4,$5,$6,$3,$4,'5.5e','en','cross_link','species','active','',NULL,0)`,
+        [sourceEntry,`rev-${sourceRevision.repeat(64)}`,IDS.sources.otherPersonal,"30000000-0000-4000-8000-000000000004",targetEntry,`rev-${targetRevision.repeat(64)}`]);
+        await assert.rejects(relationClient.query("SET CONSTRAINTS ALL IMMEDIATE"),error);
+      } finally {
+        await relationClient.query("ROLLBACK");
+      }
+    }
+  } finally {
+    relationClient.release();
+  }
 });
 
 test("QA integration: transactional import crash rolls back, stale lease retries, and replay conflicts fail closed", async (t) => {

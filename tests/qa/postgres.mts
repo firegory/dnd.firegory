@@ -367,6 +367,11 @@ export async function seedSpeciesFixture(database: Pool | PoolClient): Promise<v
     ] },
     { sourceId: IDS.sources.otherPersonal, suffix: "4", repositoryId: "qa-species-private", entries: [
       { id: "species-private", revision: "7", name: "QA Private Species", fields: speciesFields() },
+      { id: "species-kind-null-empty", revision: "8", name: "QA Null Kind Empty Parents", fields: speciesFields({ kind: null }) },
+      { id: "species-kind-null-parent", revision: "9", name: "QA Null Kind Parent", fields: speciesFields({ kind: null, parentSpeciesIds: ["species-private"] }) },
+      { id: "species-kind-scalar", revision: "a", name: "QA Scalar Kind", fields: speciesFields({ kind: 42 }) },
+      { id: "species-kind-object", revision: "b", name: "QA Object Kind", fields: speciesFields({ kind: {} }) },
+      { id: "species-kind-array", revision: "c", name: "QA Array Kind", fields: speciesFields({ kind: [], parentSpeciesIds: ["species-private"] }) },
     ] },
   ] as const;
   try {

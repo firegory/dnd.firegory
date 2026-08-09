@@ -53,6 +53,10 @@ test("0024 aligns historical omitted Species kinds with canonical parent project
   assert.match(historicalSpeciesSql,/CREATE OR REPLACE FUNCTION nfs_index_validate_option_relation/);
   assert.match(historicalSpeciesSql,/jsonb_typeof\(source_fields\.values->'parent-species-ids'\) = 'array'/);
   assert.match(historicalSpeciesSql,/jsonb_array_length\(source_fields\.values->'parent-species-ids'\) > 0 THEN 'variant'/);
+  assert.match(historicalSpeciesSql,/source_fields\.values \? 'kind'/);
+  assert.match(historicalSpeciesSql,/source_kind IS NULL OR source_kind NOT IN \('species','variant'\)/);
+  assert.match(historicalSpeciesSql,/actual_kind IS NULL OR actual_kind NOT IN \('species','variant'\)/);
+  assert.match(historicalSpeciesSql,/source has an invalid explicit species kind/);
   assert.match(historicalSpeciesSql,/source\.revision_id = NEW\.source_revision_id/);
   assert.match(historicalSpeciesSql,/source\.file_id = NEW\.source_file_id/);
   assert.match(historicalSpeciesSql,/source_meta\.edition = NEW\.edition/);
