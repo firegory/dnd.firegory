@@ -50,3 +50,10 @@ test("locale paths drive the server-rendered document language", async () => {
   assert.match(layout, /x-dnd-ui-language/);
   assert.match(layout, /<html lang=\{language\}>/);
 });
+
+test("favicon metadata paths bypass authentication middleware", async () => {
+  const middleware = await readFile(new URL("../../src/middleware.ts", import.meta.url), "utf8");
+  assert.match(middleware, /"\/favicon\.ico"/);
+  assert.match(middleware, /"\/icon\.svg"/);
+  assert.match(middleware, /favicon\\\\\.ico\|icon\\\\\.svg/);
+});

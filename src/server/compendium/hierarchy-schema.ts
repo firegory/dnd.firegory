@@ -94,7 +94,7 @@ export function hierarchyTypedValue(key: string, value: unknown): unknown {
     ? value.map((item) => JSON.stringify(item)) : value;
 }
 
-export function classProjectionFromTypedFields(fields: unknown): ClassProjection { return validateClassProjection(typedObject(fields)); }
+export function classProjectionFromTypedFields(fields: unknown): ClassProjection { return validateClassProjection(typedObject(fields), { requireCompleteBase: false }); }
 export function speciesProjectionFromTypedFields(fields: unknown): SpeciesProjection { return validateSpeciesProjection(typedObject(fields)); }
 
 function typedObject(fields: unknown): Record<string, unknown> {
@@ -103,7 +103,7 @@ function typedObject(fields: unknown): Record<string, unknown> {
   for (const field of fields) if (record(field) && typeof field.key === "string") {
     const key = field.key.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
     result[key] = ["progressionColumns", "progressionRows", "features", "traits"].includes(key) && Array.isArray(field.value)
-      ? field.value.map((item) => { try { return JSON.parse(String(item)); } catch { fail(`Canonical ${key} contains malformed JSON.`); } })
+      ? field.value.map((item) => { if (record(item)) return item; try { return JSON.parse(String(item)); } catch { fail(`Canonical ${key} contains malformed JSON.`); } })
       : field.value;
   }
   result.parentClassIds ??= []; result.parentSpeciesIds ??= []; result.progressionColumns ??= []; result.progressionRows ??= [];

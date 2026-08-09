@@ -10,6 +10,7 @@ const PUBLIC_PATHS = new Set([
   "/register",
   "/_next",
   "/favicon.ico",
+  "/icon.svg",
 ]);
 
 const WEBHOOK_PATHS = new Set([
@@ -72,8 +73,8 @@ export const config = {
      * Match all request paths except:
      * - _next/static (static files)
      * - _next/image (image optimization)
-     * - favicon.ico, robots.txt, sitemap.xml
+     * - favicon.ico, icon.svg, robots.txt, sitemap.xml
      */
-    "/((?!_next/static|_next/image|favicon\\.ico|robots\\.txt|sitemap\\.xml).*)",
+    "/((?!_next/static|_next/image|favicon\\.ico|icon\\.svg|robots\\.txt|sitemap\\.xml).*)",
   ],
 };
