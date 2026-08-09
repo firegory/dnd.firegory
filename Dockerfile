@@ -95,6 +95,12 @@ CMD ["node", "--experimental-strip-types", "scripts/migrate.mts"]
 FROM ${NODE_IMAGE} AS app-production
 
 WORKDIR /app
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends poppler-utils \
+  && command -v pdfinfo \
+  && command -v pdftoppm \
+  && command -v pdftocairo \
+  && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production \
     HOME=/tmp \
     HOSTNAME=0.0.0.0 \

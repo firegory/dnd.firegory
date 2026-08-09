@@ -5,11 +5,11 @@
  * never exposes the original PDF path or a public PDF URL to the client.
  */
 
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir, readFile, rename, unlink } from "node:fs/promises";
+import { access, mkdir, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
 
 import { buildSourceAccessSql } from "../access/access-sql.ts";
 import { buildRetrievalAuthorizationFilter, type RetrievalUser } from "../access/retrieval-filter.ts";
@@ -17,11 +17,16 @@ import { query } from "../db/client.ts";
 import { artifactsRootPath } from "../ingestion/paths.ts";
 import type { ChunkBbox } from "../../worker/ingestion/bbox.ts";
 
-const execFileAsync = promisify(execFile);
-
 export const MAX_PREVIEW_PAGE = 5000;
 export const PREVIEW_WIDTH_PX = 1400;
 export const RENDER_TIMEOUT_MS = 30_000;
+export const MAX_PREVIEW_BYTES = 16 * 1024 * 1024;
+
+const PDF_INFO_TIMEOUT_MS = 5_000;
+const MAX_CROP_DIMENSION_PX = 2000;
+const MAX_PREVIEW_DIMENSION_PX = MAX_CROP_DIMENSION_PX;
+const MAX_TOOL_OUTPUT_BYTES = 64 * 1024;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -140,27 +145,21 @@ export async function readOrRenderCitationPreviewPng(
   });
 
   try {
-    return await readFile(cachePath);
+    return await readCitationPreviewPng(cachePath);
   } catch {
     // Cache miss: render exactly one page below.
   }
 
   await renderPdfPageToPng({ pdfPath: file.storagePath, outputPath: cachePath, page });
-  return readFile(cachePath);
+  return readCitationPreviewPng(cachePath);
 }
 
-export async function renderPdfPageToPng(input: Readonly<{ pdfPath: string; outputPath: string; page: number }>): Promise<void> {
-  await access(input.pdfPath, fsConstants.R_OK);
-  await mkdir(dirname(input.outputPath), { recursive: true });
-
-  const outputPrefix = input.outputPath.endsWith(".png")
-    ? input.outputPath.slice(0, -".png".length)
-    : input.outputPath;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
+export async function renderPdfPageToPng(input: Readonly<{ pdfPath: string; outputPath: string; page: number; renderTimeoutMs?: number }>): Promise<void> {
+  await prepareRender(input.pdfPath, input.outputPath, input.page);
+  const temporaryPrefix = `${input.outputPath}.${randomUUID()}.tmp`;
+  const temporaryPng = `${temporaryPrefix}.png`;
   try {
-    await execFileAsync(
+    await runPdfTool(
       "pdftoppm",
       [
         "-f",
@@ -172,12 +171,14 @@ export async function renderPdfPageToPng(input: Readonly<{ pdfPath: string; outp
         String(PREVIEW_WIDTH_PX),
         "-png",
         input.pdfPath,
-        outputPrefix,
+        temporaryPrefix,
       ],
-      { signal: controller.signal, timeout: RENDER_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
+      input.renderTimeoutMs ?? RENDER_TIMEOUT_MS - PDF_INFO_TIMEOUT_MS,
     );
+    await validateRenderedPng(temporaryPng);
+    await rename(temporaryPng, input.outputPath);
   } finally {
-    clearTimeout(timeout);
+    await unlink(temporaryPng).catch(() => {});
   }
 }
 
@@ -228,13 +229,11 @@ export async function renderCroppedPdfRegionToPng(input: Readonly<{
   bbox: ChunkBbox;
   paddingPx?: number;
 }>): Promise<void> {
-  await access(input.pdfPath, fsConstants.R_OK);
-  await mkdir(dirname(input.outputPath), { recursive: true });
-
   const { bbox } = input;
-  if (bbox.x1 >= bbox.x2 || bbox.y1 >= bbox.y2) {
-    throw new Error(`Invalid bbox: x1=${bbox.x1} >= x2=${bbox.x2} or y1=${bbox.y1} >= y2=${bbox.y2}`);
+  if (![bbox.x1, bbox.y1, bbox.x2, bbox.y2].every(Number.isFinite) || bbox.x1 < 0 || bbox.y1 < 0 || bbox.x1 >= bbox.x2 || bbox.y1 >= bbox.y2) {
+    throw new CitationPreviewError("render_failed");
   }
+  await prepareRender(input.pdfPath, input.outputPath, input.page);
 
   const padding = input.paddingPx ?? 10;
   const scale = CROP_DPI / 72;
@@ -246,19 +245,12 @@ export async function renderCroppedPdfRegionToPng(input: Readonly<{
 
   const x = Math.max(0, Math.round(rawX));
   const y = Math.max(0, Math.round(rawY));
-  const w = Math.max(1, Math.round(rawW));
-  const h = Math.max(1, Math.round(rawH));
-
-  const outputPrefix = input.outputPath.endsWith(".png")
-    ? input.outputPath.slice(0, -".png".length)
-    : input.outputPath;
-  const tmpPrefix = outputPrefix + ".tmp";
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
+  const w = Math.min(MAX_CROP_DIMENSION_PX, Math.max(1, Math.round(rawW)));
+  const h = Math.min(MAX_CROP_DIMENSION_PX, Math.max(1, Math.round(rawH)));
+  const temporaryPrefix = `${input.outputPath}.${randomUUID()}.tmp`;
+  const temporaryPng = `${temporaryPrefix}.png`;
   try {
-    await unlink(tmpPrefix + ".png").catch(() => {});
-    await execFileAsync(
+    await runPdfTool(
       "pdftocairo",
       [
         "-f", String(input.page),
@@ -271,17 +263,110 @@ export async function renderCroppedPdfRegionToPng(input: Readonly<{
         "-H", String(h),
         "-png",
         input.pdfPath,
-        tmpPrefix,
+        temporaryPrefix,
       ],
-      { signal: controller.signal, timeout: RENDER_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
+      RENDER_TIMEOUT_MS - PDF_INFO_TIMEOUT_MS,
     );
-    await rename(tmpPrefix + ".png", input.outputPath);
-  } catch (err) {
-    await unlink(tmpPrefix + ".png").catch(() => {});
-    throw err;
+    await validateRenderedPng(temporaryPng);
+    await rename(temporaryPng, input.outputPath);
   } finally {
-    clearTimeout(timeout);
+    await unlink(temporaryPng).catch(() => {});
   }
+}
+
+async function prepareRender(pdfPath: string, outputPath: string, page: number): Promise<void> {
+  if (!Number.isInteger(page) || page < 1 || page > MAX_PREVIEW_PAGE) {
+    throw new CitationPreviewError("page_not_found");
+  }
+  try {
+    await access(pdfPath, fsConstants.R_OK);
+  } catch {
+    throw new CitationPreviewError("source_file_missing");
+  }
+  await mkdir(dirname(outputPath), { recursive: true }).catch(() => {
+    throw new CitationPreviewError("cache_unwritable");
+  });
+  const result = await runPdfTool("pdfinfo", [pdfPath], PDF_INFO_TIMEOUT_MS);
+  const pages = /^Pages:\s+(\d+)\s*$/m.exec(result.stdout)?.[1];
+  if (!pages) throw new CitationPreviewError("render_failed");
+  if (page > Number(pages)) throw new CitationPreviewError("page_not_found");
+}
+
+export async function readCitationPreviewPng(path: string): Promise<Buffer> {
+  const image = await readFile(path);
+  if (image.byteLength > MAX_PREVIEW_BYTES || !isBoundedPng(image)) {
+    await unlink(path).catch(() => {});
+    throw new CitationPreviewError("output_invalid");
+  }
+  return image;
+}
+
+async function validateRenderedPng(path: string): Promise<void> {
+  let size: number;
+  try {
+    size = (await stat(path)).size;
+  } catch {
+    throw new CitationPreviewError("render_failed");
+  }
+  if (size < 24 || size > MAX_PREVIEW_BYTES) {
+    throw new CitationPreviewError("output_invalid");
+  }
+  const image = await readFile(path);
+  if (!isBoundedPng(image)) {
+    throw new CitationPreviewError("output_invalid");
+  }
+}
+
+function isBoundedPng(image: Buffer): boolean {
+  if (image.byteLength < 24 || !image.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) return false;
+  if (image.subarray(12, 16).toString("ascii") !== "IHDR") return false;
+  const width = image.readUInt32BE(16);
+  const height = image.readUInt32BE(20);
+  return width > 0 && height > 0 && width <= MAX_PREVIEW_DIMENSION_PX && height <= MAX_PREVIEW_DIMENSION_PX;
+}
+
+async function runPdfTool(command: "pdfinfo" | "pdftoppm" | "pdftocairo", args: readonly string[], timeoutMs: number): Promise<{ stdout: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      env: { ...process.env, LC_ALL: "C" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const output: Buffer[] = [];
+    let outputBytes = 0;
+    let settled = false;
+    let timedOut = false;
+    let forcedError: CitationPreviewError | undefined;
+    const finish = (error?: CitationPreviewError) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve({ stdout: Buffer.concat(output).toString("utf8") });
+    };
+    const collect = (chunk: Buffer) => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes > MAX_TOOL_OUTPUT_BYTES) {
+        forcedError = new CitationPreviewError("render_failed");
+        child.kill("SIGKILL");
+        return;
+      }
+      output.push(chunk);
+    };
+    child.stdout.on("data", collect);
+    child.stderr.on("data", collect);
+    child.once("error", (error: NodeJS.ErrnoException) => {
+      finish(new CitationPreviewError(error.code === "ENOENT" ? "renderer_unavailable" : "render_failed"));
+    });
+    child.once("close", (code) => {
+      if (timedOut) finish(new CitationPreviewError("render_timeout"));
+      else if (forcedError) finish(forcedError);
+      else finish(code === 0 ? undefined : new CitationPreviewError("render_failed"));
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+  });
 }
 
 export function croppedPreviewCachePath(
@@ -290,6 +375,25 @@ export function croppedPreviewCachePath(
   const root = input.artifactsRoot ?? artifactsRootPath(input.sourceId, input.fileId);
   const bboxSlug = `${Math.round(input.bbox.x1)}-${Math.round(input.bbox.y1)}-${Math.round(input.bbox.x2)}-${Math.round(input.bbox.y2)}`;
   return join(root, "previews", `page-${input.page}-crop-${bboxSlug}.png`);
+}
+
+export type CitationPreviewErrorCode =
+  | "cache_unwritable"
+  | "output_invalid"
+  | "page_not_found"
+  | "renderer_unavailable"
+  | "render_failed"
+  | "render_timeout"
+  | "source_file_missing";
+
+export class CitationPreviewError extends Error {
+  readonly code: CitationPreviewErrorCode;
+
+  constructor(code: CitationPreviewErrorCode) {
+    super(code);
+    this.name = "CitationPreviewError";
+    this.code = code;
+  }
 }
 
 export class CitationPreviewInputError extends Error {}

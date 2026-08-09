@@ -8,11 +8,12 @@ import {
   parseCitationPreviewRequest,
   parseChunkPreviewRequest,
   readOrRenderCitationPreviewPng,
+  readCitationPreviewPng,
   lookupChunkBbox,
   renderCroppedPdfRegionToPng,
   croppedPreviewCachePath,
 } from "../../../../server/citations/preview";
-import { readFile } from "node:fs/promises";
+import { citationPreviewHttpError, logCitationPreviewError } from "../../../../server/citations/preview-http";
 
 export async function GET(request: Request): Promise<NextResponse> {
   const user = await getCurrentUser();
@@ -51,7 +52,7 @@ async function handleChunkPreview(
   if (!chunkData) {
     if (hasPageFallback(url)) return handlePagePreview(url, user);
     return NextResponse.json(
-      { error: "Chunk bbox not found. Re-ingest the source to enable precise previews." },
+      { error: "Citation preview not found." },
       { status: 404 },
     );
   }
@@ -74,14 +75,8 @@ async function handleChunkPreview(
     });
 
     try {
-      const cached = await readFile(cachePath);
-      return new NextResponse(new Uint8Array(cached), {
-        headers: {
-          "Content-Type": "image/png",
-          "Cache-Control": "private, max-age=86400",
-          "X-Content-Type-Options": "nosniff",
-        },
-      });
+      const cached = await readCitationPreviewPng(cachePath);
+      return imageResponse(cached);
     } catch {
       // Cache miss
     }
@@ -93,21 +88,11 @@ async function handleChunkPreview(
       bbox: chunkData.bbox,
     });
 
-    const image = await readFile(cachePath);
-    return new NextResponse(new Uint8Array(image), {
-      headers: {
-        "Content-Type": "image/png",
-        "Cache-Control": "private, max-age=86400",
-        "X-Content-Type-Options": "nosniff",
-      },
-    });
+    const image = await readCitationPreviewPng(cachePath);
+    return imageResponse(image);
   } catch (error) {
     if (hasPageFallback(url)) return handlePagePreview(url, user);
-    const message = error instanceof Error ? error.message : "Unknown render error";
-    return NextResponse.json(
-      { error: "Citation preview is unavailable.", detail: message.includes("ENOENT") ? "Original PDF is unavailable." : undefined },
-      { status: 503 },
-    );
+    return renderErrorResponse(error, { kind: "chunk", chunkId: parsed.chunkId });
   }
 }
 
@@ -139,18 +124,24 @@ async function handlePagePreview(
 
   try {
     const image = await readOrRenderCitationPreviewPng(file, input.page);
-    return new NextResponse(new Uint8Array(image), {
-      headers: {
-        "Content-Type": "image/png",
-        "Cache-Control": "private, max-age=86400",
-        "X-Content-Type-Options": "nosniff",
-      },
-    });
+    return imageResponse(image);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown render error";
-    return NextResponse.json(
-      { error: "Citation preview is unavailable.", detail: message.includes("ENOENT") ? "Original PDF is unavailable." : undefined },
-      { status: 503 },
-    );
+    return renderErrorResponse(error, { kind: "page", sourceId: input.sourceId, fileId: input.fileId, page: input.page });
   }
+}
+
+function imageResponse(image: Buffer): NextResponse {
+  return new NextResponse(new Uint8Array(image), {
+    headers: {
+      "Content-Type": "image/png",
+      "Cache-Control": "private, max-age=86400",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+export function renderErrorResponse(error: unknown, context: Record<string, string | number>): NextResponse {
+  logCitationPreviewError(error, context);
+  const response = citationPreviewHttpError(error);
+  return NextResponse.json(response.body, { status: response.status });
 }

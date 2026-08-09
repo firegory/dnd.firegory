@@ -60,6 +60,10 @@ jobs:
         run: npm run qa:performance
       - name: Typecheck, lint, and production build
         run: npm run qa:build
+      - name: Verify production PDF renderer
+        run: |
+          docker build --target app-production --tag dnd-firegory-app-qa .
+          docker run --rm --entrypoint /bin/sh dnd-firegory-app-qa -c 'pdfinfo -v && pdftoppm -v && pdftocairo -v'
       - name: Install pinned Chromium runtime
         run: |
           npm run qa:browser:install

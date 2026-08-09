@@ -99,8 +99,40 @@ test("@user actual spell filters, deep link, citation preview, and print layout 
   const [popup] = await Promise.all([page.waitForEvent("popup"), preview.click()]);
   await popup.waitForLoadState("load");
   await expect(popup).toHaveURL(/\/api\/citations\/preview\?.*page=1/);
-  await expect(popup.locator("img")).toBeVisible();
+  const previewImage = popup.locator("img");
+  await expect(previewImage).toBeVisible();
+  const renderedPixels = await previewImage.evaluate(async (image: HTMLImageElement) => {
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d")!;
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let darkPixels = 0;
+    for (let index = 0; index < pixels.length; index += 16) {
+      if (pixels[index] < 240 || pixels[index + 1] < 240 || pixels[index + 2] < 240) darkPixels += 1;
+    }
+    return { width: image.naturalWidth, height: image.naturalHeight, darkPixels };
+  });
+  expect(renderedPixels.width).toBeGreaterThan(100);
+  expect(renderedPixels.height).toBeGreaterThan(100);
+  expect(renderedPixels.darkPixels).toBeGreaterThan(0);
   await popup.close();
+
+  const pagePreviewUrl = `/api/citations/preview?sourceId=${IDS.sources.open}&fileId=${IDS.files.open}&page=1`;
+  const pagePreview = await request.get(pagePreviewUrl);
+  expect(pagePreview.status()).toBe(200);
+  expect(pagePreview.headers()["content-type"]).toBe("image/png");
+  expect(pagePreview.headers()["cache-control"]).toContain("private");
+  expect((await pagePreview.body()).subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+
+  const chunkPreview = await request.get(`/api/citations/preview?chunkId=${IDS.chunks.open}`);
+  expect(chunkPreview.status()).toBe(200);
+  expect(chunkPreview.headers()["content-type"]).toBe("image/png");
+  expect((await chunkPreview.body()).subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  expect((await request.get(`${pagePreviewUrl.slice(0, -1)}0`)).status()).toBe(400);
+  expect((await request.get(`${pagePreviewUrl.slice(0, -1)}2`)).status()).toBe(404);
 
   await page.emulateMedia({ media: "print" });
   const printLayout = await page.evaluate(() => ({
@@ -192,6 +224,10 @@ test("@no-access otherwise matching English homebrew corpus is authorization-emp
   await page.goto("/species?category=homebrew");
   await expect(page.getByRole("heading", { name: "Species and variants" })).toBeVisible();
   await expect(page.getByText("No accessible options found.")).toBeVisible();
+  const inaccessible = await request.get(`/api/citations/preview?sourceId=${IDS.sources.personal}&fileId=${IDS.files.personal}&page=1`);
+  const absent = await request.get("/api/citations/preview?sourceId=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa&fileId=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb&page=1");
+  expect(inaccessible.status()).toBe(404);
+  expect(await inaccessible.json()).toEqual(await absent.json());
 });
 
 test("@premium premium cannot read another user's personal source", async ({ request }) => {
