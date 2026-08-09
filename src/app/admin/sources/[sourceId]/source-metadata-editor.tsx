@@ -71,7 +71,7 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
           <p className="mt-1 text-sm text-text-muted">{t("sourceMetadataDescription")}</p>
         </div>
         {message && (
-          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${status === "error" ? "bg-danger/15 text-danger" : "bg-success/15 text-success"}`}>
+          <span className={`rounded-full px-3 py-1 text-xs font-semibold ${status === "error" ? "bg-danger/15 text-danger" : "bg-status-success/15 text-status-success"}`}>
             {message}
           </span>
         )}
@@ -83,7 +83,7 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
           <input
             value={form.title}
             onChange={(event) => setField("title", event.target.value)}
-            className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
+            className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none focus:border-focus focus:ring-2 focus:ring-focus/20"
           />
         </label>
         <AppSelect label={t("category")} value={form.category} options={categoryOptions} onChange={(value) => setField("category", value as SourceMetadataFormState["category"])} />
@@ -151,7 +151,7 @@ function TextField({
         value={value}
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
-        className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:opacity-50"
+        className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none focus:border-focus focus:ring-2 focus:ring-focus/20 disabled:opacity-50"
       />
     </label>
   );

@@ -220,7 +220,7 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
               }
             }}
             placeholder="Player's Handbook 2024 (ru)"
-            className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary placeholder-text-muted outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
+            className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary placeholder-text-muted outline-none focus:border-focus focus:ring-2 focus:ring-focus/20"
           />
         </label>
         <AppSelect label={t("category")} value={fields.category} options={categories} onChange={(value) => setField("category", value)} disabled={isUploading} />
@@ -250,7 +250,7 @@ export function UploadForm({ onSuccess }: { onSuccess?: () => void }) {
           {isUploading ? t("uploading") : t("uploadAndProcess")}
         </button>
         {formStatus === "success" && result && (
-          <span className="text-sm font-semibold text-success">
+          <span className="text-sm font-semibold text-status-success">
             {t("sourceReady", { source: result.sourceId.slice(0, 8), job: result.jobId.slice(0, 8) })}
           </span>
         )}
@@ -283,7 +283,7 @@ function UploadTextField({
         value={value}
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
-        className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:opacity-50"
+        className="rounded-lg border border-border bg-primary/60 px-4 py-2.5 text-sm text-text-primary outline-none focus:border-focus focus:ring-2 focus:ring-focus/20 disabled:opacity-50"
       />
     </label>
   );

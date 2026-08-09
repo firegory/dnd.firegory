@@ -14,7 +14,7 @@ export function AppSelect({ label, value, options, onChange, className = "", dis
   return (
     <div className={`relative flex flex-col gap-1.5 ${className}`} onBlur={scheduleClose} onFocus={cancelClose}>
       <span id={`${id}-label`} className="text-xs font-semibold tracking-wide text-text-muted uppercase">{label}</span>
-      <button type="button" disabled={disabled} aria-haspopup="listbox" aria-expanded={open} aria-labelledby={`${id}-label ${id}-value`} onClick={() => setOpen((current) => !current)} className="group flex min-w-40 items-center justify-between gap-3 rounded-lg border border-border bg-primary/60 px-3 py-2 text-left text-sm text-text-primary outline-none transition-colors hover:border-accent/50 focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:cursor-wait disabled:opacity-60">
+      <button type="button" disabled={disabled} aria-haspopup="listbox" aria-expanded={open} aria-labelledby={`${id}-label ${id}-value`} onClick={() => setOpen((current) => !current)} className="group flex min-w-40 items-center justify-between gap-3 rounded-lg border border-border bg-primary/60 px-3 py-2 text-left text-sm text-text-primary outline-none transition-colors hover:border-accent/50 focus:border-focus focus:ring-2 focus:ring-focus/20 disabled:cursor-wait disabled:opacity-60">
         <span id={`${id}-value`} className="truncate">{selected?.label ?? "—"}</span>
         <span aria-hidden="true" className={`h-2 w-2 shrink-0 rotate-45 border-r-2 border-b-2 border-text-muted transition-transform group-hover:border-accent ${open ? "-translate-y-0.5 rotate-[225deg]" : "translate-y-[-2px]"}`} />
       </button>

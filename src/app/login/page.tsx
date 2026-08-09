@@ -13,7 +13,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
   if (user) redirect(nextPath);
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-primary px-4">
+    <div className="app-parchment flex min-h-screen items-center justify-center bg-primary px-4">
       <div className="w-full max-w-md space-y-6">
         <div className="text-center">
           <p className="text-xs font-semibold uppercase tracking-widest text-accent"><T k="privateAccess" /></p>

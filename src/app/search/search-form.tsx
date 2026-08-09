@@ -136,7 +136,7 @@ export function SearchForm({ isAdmin = false }: Readonly<{ isAdmin?: boolean }>)
               required
               disabled={loading}
               autoFocus
-              className="flex-1 rounded-xl border border-border bg-primary/60 px-5 py-3 text-text-primary placeholder-text-muted outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:cursor-wait disabled:opacity-60"
+              className="flex-1 rounded-xl border border-border bg-primary/60 px-5 py-3 text-text-primary placeholder-text-muted outline-none transition-colors focus:border-focus focus:ring-2 focus:ring-focus/20 disabled:cursor-wait disabled:opacity-60"
             />
             <button
               type="submit"

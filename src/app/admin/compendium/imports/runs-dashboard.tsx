@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { useUiLanguage } from "../../../../components/ui/i18n";
+import { importRunStatusClass } from "../../../../components/ui/status-styles";
 
 type Run = { id: string; sourceTitle: string; status: string; createdAt: string; counts: Record<string, number> };
 
@@ -36,7 +37,7 @@ export function ImportRunsDashboard() {
     {error && <p role="alert" className="rounded-lg border border-danger/30 bg-danger/10 p-4 text-danger">{error}</p>}
     {!loading && !error && runs.length === 0 && <p className="text-text-muted">{t("noImportRuns")}</p>}
     <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{runs.map((run) => <Link key={run.id} href={`/admin/compendium/imports/${run.id}`} className="group rounded-xl border border-border bg-surface p-5 transition hover:-translate-y-0.5 hover:border-accent/60">
-      <div className="flex items-start justify-between gap-3"><h2 className="text-lg text-text-primary group-hover:text-accent">{run.sourceTitle}</h2><span className={`rounded-full px-2.5 py-1 text-xs font-bold ${run.status === "succeeded" ? "bg-success/15 text-success" : run.status === "failed" ? "bg-danger/15 text-danger" : "bg-warning/15 text-warning"}`}>{run.status}</span></div>
+      <div className="flex items-start justify-between gap-3"><h2 className="text-lg text-text-primary group-hover:text-accent">{run.sourceTitle}</h2><span className={`rounded-full px-2.5 py-1 text-xs font-bold ${importRunStatusClass(run.status)}`}>{run.status}</span></div>
       <p className="mt-1 font-mono text-[11px] text-text-muted">{run.id}</p>
       <div className="mt-5 grid grid-cols-3 gap-2 text-center"><Metric label={t("changedCandidates")} value={run.counts.changed} /><Metric label={t("missingCandidates")} value={run.counts.missing} /><Metric label={t("invalidCandidates")} value={run.counts.invalid} /></div>
       <div className="mt-4 flex justify-between border-t border-border-light pt-3 text-xs text-text-muted"><span>{new Date(run.createdAt).toLocaleString()}</span><span>{run.counts.pending} {t("pendingReview")}</span></div>
