@@ -19,12 +19,14 @@ function chunk(overrides: Partial<RetrievalCandidate> = {}): RetrievalCandidate 
 describe("claim grounding", () => {
   it("renders a coherent Lemure stat answer with authoritative linked citations", () => {
     const result = groundGeneratedAnswer({ claims: [
-      { text: "The Lemure is a Medium Fiend Devil with Armor Class 7 and Hit Points 13.", references: ["C1"] },
+      { text: "The Lemure is a Medium Fiend Devil.", references: ["C1"] },
+      { text: "Lemure AC is 7.", references: ["C1"] },
+      { text: "Lemure Hit Points are 13.", references: ["C1"] },
       { text: "Its Speed is 15 feet.", references: ["C1"] },
       { text: "Damage Immunities are Fire and Poison.", references: ["C1"] },
     ], rejected: false }, [chunk()], "en");
 
-    assert.equal(result.claims.length, 3);
+    assert.equal(result.claims.length, 5);
     assert.match(result.answer, /Medium Fiend Devil/);
     assert.match(result.answer, /Speed is 15 feet/);
     assert.equal(result.claims[0].citations[0].quote, chunk().quoteText);
@@ -52,6 +54,18 @@ describe("claim grounding", () => {
     assert.equal(result.confident, false);
   });
 
+  it("requires one referenced context to support the whole claim instead of combining contexts", () => {
+    const fire = chunk({ chunkId: "fire", quoteText: "Lemure is resistant to fire." });
+    const poison = chunk({ chunkId: "poison", sectionHeading: "Imp", quoteText: "Imp is not resistant to poison." });
+    const result = groundGeneratedAnswer({ claims: [
+      { text: "Lemure is not resistant to poison.", references: ["C1", "C2"] },
+      { text: "Lemure is resistant to fire.", references: ["C1", "C2"] },
+    ], rejected: false }, [fire, poison], "en");
+    assert.equal(result.answer, "Lemure is resistant to fire.");
+    assert.equal(result.claims[0].citations.length, 2);
+    assert.equal(result.confident, false);
+  });
+
   it("rejects quote-prefix laundering as an unknown claim field", () => {
     const parsed = parseLlmResponse(JSON.stringify({ claims: [{
       text: "The Lemure has Fire Immunity.", references: ["C1"], quote: "Lemure. Armor Class 7. Fire",
@@ -64,13 +78,15 @@ describe("claim grounding", () => {
 
   it("retains valid Russian synthesis and rejects invented Russian content", () => {
     const ruChunk = chunk({
-      quoteText: "Лемур. Класс Доспеха 7. Хиты 13.", language: "ru", sourceTitle: "Открытые правила",
+      quoteText: "Лемур. Класс Доспеха 7. Хиты 13.", sectionHeading: "Лемур",
+      language: "ru", sourceTitle: "Открытые правила",
     });
     const result = groundGeneratedAnswer({ claims: [
-      { text: "Класс Доспеха лемура 7. Хиты 13.", references: ["C1"] },
+      { text: "Лемур: Класс Доспеха 7.", references: ["C1"] },
+      { text: "Лемур: Хиты 13.", references: ["C1"] },
       { text: "Лемур имеет иммунитет к огню.", references: ["C1"] },
     ], rejected: false }, [ruChunk], "ru");
-    assert.equal(result.answer, "Класс Доспеха лемура 7. Хиты 13.");
+    assert.equal(result.answer, "Лемур: Класс Доспеха 7.\n\nЛемур: Хиты 13.");
     assert.equal(result.confident, false);
   });
 

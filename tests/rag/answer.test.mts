@@ -87,7 +87,7 @@ describe("deterministic claim support", () => {
   it("rejects fire-immunity laundering through an Armor Class citation", () => {
     const result = validateClaimSupport("The Lemure has Fire Immunity.", [chunk({ quoteText: "Lemure. Armor Class 7." })], "en");
     assert.equal(result.supported, false);
-    assert.deepEqual(result.unsupportedTokens.sort(), ["fire", "immunity"]);
+    assert.deepEqual(result.unsupportedTokens.sort(), ["fire", "has", "immunity"]);
   });
 
   it("rejects swapped Armor Class and Hit Points values even when every token exists", () => {
@@ -98,7 +98,9 @@ describe("deterministic claim support", () => {
 
   it("keeps signed, decimal, and fractional numbers indivisible", () => {
     const numbers = chunk({ quoteText: "Armor Class +3. Speed 1.5 ft. Challenge Rating 1/2." });
-    assert.equal(validateClaimSupport("Armor Class +3. Speed 1.5 feet. Challenge Rating 1/2.", [numbers], "en").supported, true);
+    assert.equal(validateClaimSupport("AC is +3.", [numbers], "en").supported, true);
+    assert.equal(validateClaimSupport("Speed is 1.5 feet.", [numbers], "en").supported, true);
+    assert.equal(validateClaimSupport("Challenge Rating is 1/2.", [numbers], "en").supported, true);
     assert.equal(validateClaimSupport("Armor Class +1. Speed 3.5 feet. Challenge Rating 2/1.", [numbers], "en").supported, false);
   });
 
@@ -118,12 +120,60 @@ describe("deterministic claim support", () => {
     assert.equal(validateClaimSupport("Its Speed is 13 feet.", [chunk()], "en").supported, false);
   });
 
-  it("handles Russian morphology conservatively and preserves stat associations", () => {
+  it("handles Russian claims conservatively and preserves stat associations", () => {
     const ru = chunk({
-      quoteText: "Лемур. Класс Доспеха 7. Хиты 13.", language: "ru", sourceTitle: "Открытые правила",
+      quoteText: "Лемур. Класс Доспеха 7. Хиты 13.", sectionHeading: "Лемур",
+      language: "ru", sourceTitle: "Открытые правила",
     });
-    assert.equal(validateClaimSupport("Класс Доспеха лемура 7. Хиты 13.", [ru], "ru").supported, true);
+    assert.equal(validateClaimSupport("Лемур: Класс Доспеха 7.", [ru], "ru").supported, true);
+    assert.equal(validateClaimSupport("Лемур: Хиты 13.", [ru], "ru").supported, true);
     assert.equal(validateClaimSupport("Класс Доспеха лемура 13. Хиты 7.", [ru], "ru").supported, false);
     assert.equal(validateClaimSupport("Лемур имеет иммунитет к огню.", [ru], "ru").supported, false);
+  });
+
+  it("rejects reversed Imp/Lemure comparisons", () => {
+    const comparison = chunk({ sectionHeading: null, quoteText: "Imp has higher Armor Class than Lemure." });
+    assert.equal(validateClaimSupport("Imp has higher AC than Lemure.", [comparison], "en").supported, true);
+    assert.equal(validateClaimSupport("Lemure has higher AC than Imp.", [comparison], "en").supported, false);
+  });
+
+  it("rejects distributed negation and cross-entity poison resistance", () => {
+    const evidence = chunk({
+      sectionHeading: null,
+      quoteText: "Lemure is resistant to fire. Imp is not resistant to poison.",
+    });
+    assert.equal(validateClaimSupport("Imp is not resistant to poison.", [evidence], "en").supported, true);
+    assert.equal(validateClaimSupport("Lemure is not resistant to fire.", [evidence], "en").supported, false);
+    assert.equal(validateClaimSupport("Lemure is resistant to poison.", [evidence], "en").supported, false);
+  });
+
+  it("rejects cross-entity AC values and Bite/Claw value swaps", () => {
+    const creatures = chunk({
+      sectionHeading: null,
+      quoteText: "Lemure Armor Class 7. Imp Armor Class 13. Bite deals 7 damage. Claw deals 5 damage.",
+    });
+    assert.equal(validateClaimSupport("Lemure AC is 7.", [creatures], "en").supported, true);
+    assert.equal(validateClaimSupport("Lemure AC is 13.", [creatures], "en").supported, false);
+    assert.equal(validateClaimSupport("Bite deals 7 damage.", [creatures], "en").supported, true);
+    assert.equal(validateClaimSupport("Claw deals 7 damage.", [creatures], "en").supported, false);
+
+    const denseRow = chunk({ sectionHeading: null, quoteText: "Lemure | AC 7 | Imp | AC 13" });
+    assert.equal(validateClaimSupport("Lemure AC is 13.", [denseRow], "en").supported, false);
+  });
+
+  it("does not take a value from a later stat label", () => {
+    const incomplete = chunk({ sectionHeading: null, quoteText: "Lemure | AC natural armor | HP 13" });
+    assert.equal(validateClaimSupport("Lemure AC is 13.", [incomplete], "en").supported, false);
+  });
+
+  it("rejects swapped Russian Speed and Armor Class values in one table row", () => {
+    const row = chunk({
+      sectionHeading: "Лемур", language: "ru", sourceTitle: "Открытые правила",
+      quoteText: "Лемур | КД 13 | Скорость 30 футов",
+    });
+    assert.equal(validateClaimSupport("Лемур: КД 13.", [row], "ru").supported, true);
+    assert.equal(validateClaimSupport("Лемур: Скорость 30 футов.", [row], "ru").supported, true);
+    assert.equal(validateClaimSupport("Лемур: КД 30.", [row], "ru").supported, false);
+    assert.equal(validateClaimSupport("Лемур: Скорость 13 футов.", [row], "ru").supported, false);
   });
 });
