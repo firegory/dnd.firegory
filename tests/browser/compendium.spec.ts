@@ -70,7 +70,7 @@ test("@user Classes navigation renders classes, subclasses, features, and source
   await page.getByRole("link", { name: /QA Fighter/ }).click();
   await expect(page.getByRole("heading", { name: "QA Fighter" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Second Wind" })).toBeVisible();
-  await expect(page.getByText("QA100", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: /QA100/ })).toBeVisible();
 });
 
 test("@no-access otherwise matching English homebrew corpus is authorization-empty", async ({ page, request }) => {
