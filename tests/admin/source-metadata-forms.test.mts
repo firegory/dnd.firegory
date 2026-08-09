@@ -24,25 +24,23 @@ test("existing-source editor initializes and resets from that source only", () =
   assert.equal(sourceMetadataPatchFromForm(initial).ownerUserId, ownerUserId);
 });
 
-test("upload success reset clears every source-specific field but keeps remembered defaults", () => {
+test("ordinary upload state contains only upload controls and keeps remembered defaults on reset", () => {
   const populated = {
     ...createUploadSourceFormState({ edition: "5e", language: "en" }),
     title: "Previous source",
     category: "homebrew",
     accessTier: "personal",
     canonicalSourceId: "previous-source",
-    publicationCode: "OLD",
-    publicationTitle: "Old publication",
-    publisher: "Old publisher",
-    releaseYear: "2014",
-    revision: "reprint",
-    originUrl: "https://example.com/old",
-    originId: "old",
-    attribution: "Old attribution",
-    sourcePriority: "900",
-    canonicalBookId: "old-book",
-    license: "Old license",
   };
+
+  assert.deepEqual(Object.keys(populated).sort(), [
+    "accessTier",
+    "canonicalSourceId",
+    "category",
+    "edition",
+    "language",
+    "title",
+  ]);
 
   assert.deepEqual(
     resetUploadSourceFormState(populated),

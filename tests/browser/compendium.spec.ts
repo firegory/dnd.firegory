@@ -216,6 +216,57 @@ test("@admin editor saves a real immutable revision", async ({ page }) => {
   await expect(page.getByLabel("Title")).toHaveValue("QA Spell 1 Revised");
 });
 
+const advancedUploadLabels = [
+  "Publication code",
+  "Publication title",
+  "Publisher",
+  "Release year",
+  "Revision / reprint",
+  "External origin URL",
+  "External origin ID",
+  "Attribution",
+  "Source priority",
+  "Canonical book ID",
+  "License",
+];
+
+test("@admin ordinary upload has a streamlined keyboard flow and minimal payload", async ({ page }) => {
+  let submittedFields: string[] = [];
+  await page.route("**/api/admin/ingestion/upload", async (route) => {
+    const body = route.request().postDataBuffer()?.toString("latin1") ?? "";
+    submittedFields = [...body.matchAll(/Content-Disposition: form-data; name="([^"]+)"/g)].map((match) => match[1]);
+    await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ sourceId: "source-1", jobId: "job-1" }) });
+  });
+
+  await page.goto("/admin/ingestion");
+  for (const label of advancedUploadLabels) await expect(page.getByText(label, { exact: true })).toHaveCount(0);
+  await page.locator("#pdf-file-input").setInputFiles({ name: "rules.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4") });
+  const title = page.getByLabel("Title *");
+  await title.fill("  QA Rules  ");
+  await title.focus();
+  for (let index = 0; index < 6; index += 1) await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: "Upload and process" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect.poll(() => submittedFields).toEqual([
+    "file",
+    "title",
+    "category",
+    "edition",
+    "language",
+    "accessTier",
+    "canonicalSourceId",
+  ]);
+});
+
+test("@admin ordinary upload omits advanced controls on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/admin/ingestion");
+  for (const label of advancedUploadLabels) await expect(page.getByText(label, { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Title *")).toBeVisible();
+  await expect(page.getByText("Canonical source ID", { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(1);
+});
+
 test("@admin review rejection persists a real state transition", async ({ page, request }) => {
   await page.goto(`/admin/compendium/imports/${IDS.browserImportRun}`);
   await expect(page.getByRole("heading", { name: "Open 2024 Rules" })).toBeVisible();
