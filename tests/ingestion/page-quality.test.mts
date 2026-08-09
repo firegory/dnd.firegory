@@ -45,6 +45,20 @@ Challenge 7 (2,900 XP)  Proficiency Bonus +3  Saving Throws Dex +5, Con +6
   assert.equal(assessPageTextQuality(5, code, "ru").status, "good");
 });
 
+test("rejects long punctuation and digit garbage even when it has fewer than eight tokens", () => {
+  const garbage = `${">=<=1234567890".repeat(30)} ${"!?=0987654321".repeat(30)}`;
+  const quality = assessPageTextQuality(6, garbage, "ru");
+  assert.equal(quality.status, "corrupt");
+  assert.ok(quality.reasons.includes("long-non-text-garbage"));
+  assert.ok(quality.reasons.includes("insufficient-letter-evidence"));
+});
+
+test("keeps short legitimate labels and numeric pages", () => {
+  assert.equal(assessPageTextQuality(6, "Класс брони: 18", "ru").status, "good");
+  assert.equal(assessPageTextQuality(7, "1 2 3 5 8 13 21 34", "ru").status, "good");
+  assert.equal(assessPageTextQuality(8, "12345678901234567890 22345678901234567890 32345678901234567890 42345678901234567890 52345678901234567890 62345678901234567890", "ru").status, "good");
+});
+
 test("fails closed when forced OCR is unavailable or remains corrupt", () => {
   const corrupt = assessPageTextQuality(7, corruptFixture, "ru");
   assert.match(findPageQualityFailures({
@@ -69,6 +83,16 @@ test("rejects OCR output too short to receive language quality scoring", () => {
     ocrAvailable: true,
     ocrReplacementPages: new Set(),
   })[0].reason, /no replacement text/);
+});
+
+test("rejects long OCR punctuation output with no proportional word evidence", () => {
+  const punctuation = assessPageTextQuality(7, ">=<=1234567890".repeat(40), "ru");
+  assert.match(findPageQualityFailures({
+    initiallyCorruptPages: new Set([7]),
+    finalQuality: [punctuation],
+    ocrAvailable: true,
+    ocrReplacementPages: new Set([7]),
+  })[0].reason, /insufficient letter or word evidence/);
 });
 
 test("accepts a forced OCR replacement only after it passes re-scoring", () => {

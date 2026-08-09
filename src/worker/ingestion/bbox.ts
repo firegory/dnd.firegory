@@ -22,6 +22,8 @@
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
+import { PDF_TOOL_TIMEOUT_MS, TOOL_STDIO_MAX_BYTES } from "../../server/ingestion/limits.ts";
+
 const execFile = promisify(execFileCb);
 
 const PDFTOTEXT_PATH = process.env.PDFTOTEXT_PATH ?? "pdftotext";
@@ -81,8 +83,9 @@ async function runBboxLayout(pdfPath: string, page: number): Promise<string> {
     pdfPath,
     "-",
   ], {
-    maxBuffer: 10 * 1024 * 1024,
-    timeout: 30_000,
+    maxBuffer: TOOL_STDIO_MAX_BYTES,
+    timeout: PDF_TOOL_TIMEOUT_MS,
+    killSignal: "SIGKILL",
   });
   return stdout;
 }

@@ -1,0 +1,8 @@
+export const MAX_PDF_INPUT_BYTES = 512 * 1024 * 1024;
+export const MAX_OCR_OUTPUT_BYTES = 768 * 1024 * 1024;
+export const MAX_EXTRACTED_PAGE_BYTES = 8 * 1024 * 1024;
+export const MAX_PDF_PAGES = 5_000;
+export const PDF_TOOL_TIMEOUT_MS = 30_000;
+export const NORMALIZE_TOOL_TIMEOUT_MS = 120_000;
+export const OCR_TOOL_TIMEOUT_MS = 300_000;
+export const TOOL_STDIO_MAX_BYTES = 1024 * 1024;

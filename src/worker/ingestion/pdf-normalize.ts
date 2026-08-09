@@ -6,12 +6,17 @@
  * are not installed.
  */
 
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { copyFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
 import { isCommandAvailable } from "./dependencies.ts";
+import {
+  NORMALIZE_TOOL_TIMEOUT_MS,
+  PDF_TOOL_TIMEOUT_MS,
+  TOOL_STDIO_MAX_BYTES,
+} from "../../server/ingestion/limits.ts";
 
 const execFile = promisify(execFileCb);
 
@@ -57,9 +62,10 @@ export async function normalizePdf(
         "--no-warn",
         inputPath,
         outputPath,
-      ]);
+      ], boundedNormalizeOptions);
       return { normalizedPath: outputPath, method: "qpdf", wasRepaired: false };
     } catch {
+      await rm(outputPath, { force: true });
       // qpdf failed — try more aggressive recovery options
       try {
         await execFile("qpdf", [
@@ -68,9 +74,10 @@ export async function normalizePdf(
           "--no-warn",
           inputPath,
           outputPath,
-        ]);
+        ], boundedNormalizeOptions);
         return { normalizedPath: outputPath, method: "qpdf", wasRepaired: true };
       } catch {
+        await rm(outputPath, { force: true });
         // qpdf can't handle it, fall through to ghostscript
       }
     }
@@ -89,26 +96,40 @@ export async function normalizePdf(
         "-dCompressPages=true",
         `-sOutputFile=${outputPath}`,
         inputPath,
-      ]);
+      ], boundedNormalizeOptions);
       return { normalizedPath: outputPath, method: "ghostscript", wasRepaired: true };
     } catch {
+      await rm(outputPath, { force: true });
       // Ghostscript also failed
     }
   }
 
   // No tools available or all failed — copy original as-is
-  const data = await readFile(inputPath);
-  await writeFile(outputPath, data);
+  await rm(outputPath, { force: true });
+  await copyFile(inputPath, outputPath);
   return { normalizedPath: outputPath, method: "none", wasRepaired: false };
 }
+
+const boundedNormalizeOptions = {
+  timeout: NORMALIZE_TOOL_TIMEOUT_MS,
+  maxBuffer: TOOL_STDIO_MAX_BYTES,
+  killSignal: "SIGKILL" as const,
+};
 
 /**
  * Returns the number of pages in a PDF using pdfinfo (poppler-utils).
  * Returns null if pdfinfo is not available or fails.
  */
-export async function getPdfPageCount(pdfPath: string): Promise<number | null> {
+export async function getPdfPageCount(
+  pdfPath: string,
+  run: typeof execFile = execFile,
+): Promise<number | null> {
   try {
-    const { stdout } = await execFile("pdfinfo", [pdfPath]);
+    const { stdout } = await run("pdfinfo", [pdfPath], {
+      timeout: PDF_TOOL_TIMEOUT_MS,
+      maxBuffer: TOOL_STDIO_MAX_BYTES,
+      killSignal: "SIGKILL",
+    });
     const match = stdout.match(/Pages:\s+(\d+)/);
     return match ? parseInt(match[1], 10) : null;
   } catch {

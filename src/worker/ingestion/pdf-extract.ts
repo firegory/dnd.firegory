@@ -5,15 +5,34 @@
  * Produces a per-page text map suitable for downstream chunking.
  */
 
-import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
 import { getPdfPageCount } from "./pdf-normalize.ts";
 import { isCommandAvailable } from "./dependencies.ts";
+import { readBoundedUtf8 } from "./file-safety.ts";
+import {
+  MAX_EXTRACTED_PAGE_BYTES,
+  MAX_PDF_PAGES,
+  PDF_TOOL_TIMEOUT_MS,
+  TOOL_STDIO_MAX_BYTES,
+} from "../../server/ingestion/limits.ts";
 
 const execFile = promisify(execFileCb);
+
+type PdfExec = (
+  command: string,
+  args: readonly string[],
+  options: typeof boundedPdfToolOptions,
+) => Promise<unknown>;
+
+type ExtractDependencies = Readonly<{
+  isCommandAvailable: typeof isCommandAvailable;
+  getPdfPageCount: typeof getPdfPageCount;
+  execFile: PdfExec;
+}>;
 
 export type ExtractedPage = Readonly<{
   pageNumber: number;
@@ -45,23 +64,30 @@ const MIN_TEXT_CHARS_FOR_QUALITY = 50;
 export async function extractTextFromPdf(
   pdfPath: string,
   outputDir: string,
+  overrides: Partial<ExtractDependencies> = {},
 ): Promise<ExtractionResult> {
+  const dependencies: ExtractDependencies = {
+    isCommandAvailable,
+    getPdfPageCount,
+    execFile: execFile as unknown as PdfExec,
+    ...overrides,
+  };
   await mkdir(outputDir, { recursive: true });
 
   const missingCommands: string[] = [];
-  if (!(await isCommandAvailable("pdfinfo"))) missingCommands.push("pdfinfo");
-  if (!(await isCommandAvailable("pdftotext"))) missingCommands.push("pdftotext");
+  if (!(await dependencies.isCommandAvailable("pdfinfo"))) missingCommands.push("pdfinfo");
+  if (!(await dependencies.isCommandAvailable("pdftotext"))) missingCommands.push("pdftotext");
   if (missingCommands.length > 0) {
     throw new Error(
       `Missing PDF text extraction dependency: ${missingCommands.join(", ")} (install poppler-utils).`,
     );
   }
 
-  const pages = await extractPagesIndividually(pdfPath, outputDir);
+  const pages = await extractPagesIndividually(pdfPath, outputDir, dependencies);
 
   if (pages.length === 0) {
     // Fallback: try extracting the entire file as one page
-    const wholeText = await extractWholeFile(pdfPath, outputDir);
+    const wholeText = await extractWholeFile(pdfPath, outputDir, dependencies);
     if (wholeText.trim().length > 0) {
       return {
         pages: [{
@@ -106,11 +132,15 @@ export async function extractTextFromPdf(
 async function extractPagesIndividually(
   pdfPath: string,
   outputDir: string,
+  dependencies: ExtractDependencies,
 ): Promise<ExtractedPage[]> {
   // First get page count
-  const pageCount = await getPdfPageCount(pdfPath);
+  const pageCount = await dependencies.getPdfPageCount(pdfPath);
   if (pageCount === null || pageCount === 0) {
     return [];
+  }
+  if (pageCount > MAX_PDF_PAGES) {
+    throw new Error(`PDF page count exceeds limit of ${MAX_PDF_PAGES}`);
   }
 
   const pages: ExtractedPage[] = [];
@@ -118,15 +148,16 @@ async function extractPagesIndividually(
   for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
     const pageOutputPath = join(outputDir, `page-${pageNum}.txt`);
     try {
-      await execFile("pdftotext", [
+      await dependencies.execFile("pdftotext", [
         "-enc", "UTF-8",
         "-layout",
         "-f", String(pageNum),
         "-l", String(pageNum),
         pdfPath,
         pageOutputPath,
-      ]);
+      ], boundedPdfToolOptions);
     } catch {
+      await rm(pageOutputPath, { force: true });
       // pdftotext failed for this page — mark as OCR candidate
       pages.push({
         pageNumber: pageNum,
@@ -137,7 +168,14 @@ async function extractPagesIndividually(
       continue;
     }
 
-    const text = await readFile(pageOutputPath, "utf-8").catch(() => "");
+    const text = await readBoundedUtf8(
+      pageOutputPath,
+      MAX_EXTRACTED_PAGE_BYTES,
+      `Extracted page ${pageNum}`,
+    ).catch(async () => {
+      await rm(pageOutputPath, { force: true });
+      return "";
+    });
     const charCount = text.length;
     const isOcrCandidate = text.trim().length < MIN_TEXT_CHARS_FOR_QUALITY;
 
@@ -153,20 +191,28 @@ async function extractPagesIndividually(
 async function extractWholeFile(
   pdfPath: string,
   outputDir: string,
+  dependencies: ExtractDependencies,
 ): Promise<string> {
   const outputPath = join(outputDir, "full-text.txt");
   try {
-    await execFile("pdftotext", [
+    await dependencies.execFile("pdftotext", [
       "-enc", "UTF-8",
       "-layout",
       pdfPath,
       outputPath,
-    ]);
-    return await readFile(outputPath, "utf-8");
+    ], boundedPdfToolOptions);
+    return await readBoundedUtf8(outputPath, MAX_EXTRACTED_PAGE_BYTES, "Extracted PDF text");
   } catch {
+    await rm(outputPath, { force: true });
     return "";
   }
 }
+
+export const boundedPdfToolOptions = {
+  timeout: PDF_TOOL_TIMEOUT_MS,
+  maxBuffer: TOOL_STDIO_MAX_BYTES,
+  killSignal: "SIGKILL" as const,
+};
 
 /**
  * Saves extracted text as JSONL (one JSON object per page).

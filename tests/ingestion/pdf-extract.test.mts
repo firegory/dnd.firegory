@@ -4,8 +4,14 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { access, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { isValidPdf } from "../../src/worker/ingestion/pdf-normalize.ts";
+import { MAX_EXTRACTED_PAGE_BYTES, MAX_PDF_INPUT_BYTES } from "../../src/server/ingestion/limits.ts";
+import { extractTextFromPdf } from "../../src/worker/ingestion/pdf-extract.ts";
+import { validateOriginalPdf } from "../../src/worker/ingestion/file-safety.ts";
+import { getPdfPageCount, isValidPdf } from "../../src/worker/ingestion/pdf-normalize.ts";
 
 describe("isValidPdf", () => {
   it("should return true for valid PDF magic bytes", () => {
@@ -36,4 +42,49 @@ describe("isValidPdf", () => {
     const data = Buffer.from("  %PDF-1.7");
     assert.equal(isValidPdf(data), false);
   });
+});
+
+it("stats and rejects an oversized original before allocating its contents", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pdf-input-limit-"));
+  const path = join(root, "large.pdf");
+  try {
+    await writeFile(path, "%PDF-");
+    await truncate(path, MAX_PDF_INPUT_BYTES + 1);
+    await assert.rejects(validateOriginalPdf(path), /Original PDF exceeds size limit/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("bounds pdfinfo stdout, runtime, and child termination", async () => {
+  let options: Record<string, unknown> | undefined;
+  const pages = await getPdfPageCount("input.pdf", (async (_command, _args, received) => {
+    options = received;
+    return { stdout: "Pages: 12\n", stderr: "" };
+  }) as never);
+  assert.equal(pages, 12);
+  assert.deepEqual(options, { timeout: 30_000, maxBuffer: 1024 * 1024, killSignal: "SIGKILL" });
+});
+
+it("bounds pdftotext output before reading and removes oversized page files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pdf-page-limit-"));
+  let options: Record<string, unknown> | undefined;
+  try {
+    const result = await extractTextFromPdf("input.pdf", root, {
+      isCommandAvailable: async () => true,
+      getPdfPageCount: async () => 1,
+      execFile: async (_command, args, received) => {
+        options = received;
+        const output = args.at(-1)!;
+        await writeFile(output, "text");
+        await truncate(output, MAX_EXTRACTED_PAGE_BYTES + 1);
+      },
+    });
+    assert.equal(result.pages[0].text, "");
+    assert.equal(result.pages[0].isOcrCandidate, true);
+    assert.deepEqual(options, { timeout: 30_000, maxBuffer: 1024 * 1024, killSignal: "SIGKILL" });
+    await assert.rejects(access(join(root, "page-1.txt")), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

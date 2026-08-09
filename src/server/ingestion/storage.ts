@@ -11,7 +11,8 @@ import type {
   SourceLanguage,
 } from "../access/retrieval-filter.ts";
 import { normalizeSourceInput, type PublicationMetadataInput } from "../content/metadata.ts";
-import { computeChecksum, originalFilePath, getStorageRoot } from "./paths.ts";
+import { computeFileChecksum, originalFilePath, getStorageRoot } from "./paths.ts";
+import { MAX_PDF_INPUT_BYTES } from "./limits.ts";
 
 export type IngestionJobRecord = Readonly<{
   id: string;
@@ -94,8 +95,10 @@ export async function storeOriginalPdf(input: {
   requestedByUserId?: string | null;
   client?: PoolClient;
 }): Promise<{ fileId: string; checksumSha256: string }> {
-  const checksum = computeChecksum(input.data);
   const byteSize = input.data.byteLength;
+  if (byteSize > MAX_PDF_INPUT_BYTES) {
+    throw new Error(`PDF exceeds maximum input size of ${MAX_PDF_INPUT_BYTES} bytes`);
+  }
 
   // Generate file ID before writing so the path is deterministic
   const fileId = randomUUID();
@@ -104,6 +107,7 @@ export async function storeOriginalPdf(input: {
   // Write file to disk first — if this fails, no DB record is created
   await mkdir(join(getStorageRoot(), "originals", input.sourceId), { recursive: true });
   await writeFile(storagePath, input.data);
+  const checksum = await computeFileChecksum(storagePath);
 
   const sql = `INSERT INTO files (id, source_id, original_filename, mime_type, checksum_sha256, byte_size, storage_path, uploaded_by_user_id)
      VALUES ($1, $2, $3, 'application/pdf', $4, $5, $6, $7)`;

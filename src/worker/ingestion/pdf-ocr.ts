@@ -6,17 +6,27 @@
  * re-extracts text from it.
  */
 
-import { mkdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
-import { isCommandAvailable } from "./dependencies.ts";
+import { checkTesseractLanguages, isCommandAvailable } from "./dependencies.ts";
+import { assertBoundedFile, readBoundedUtf8 } from "./file-safety.ts";
+import {
+  MAX_EXTRACTED_PAGE_BYTES,
+  MAX_OCR_OUTPUT_BYTES,
+  MAX_PDF_INPUT_BYTES,
+  OCR_TOOL_TIMEOUT_MS,
+  TOOL_STDIO_MAX_BYTES,
+} from "../../server/ingestion/limits.ts";
 
 const execFile = promisify(execFileCb);
-const OCR_TIMEOUT_MS = 300_000;
-const OCR_MAX_PDF_BYTES = 512 * 1024 * 1024;
-const OCR_MAX_OUTPUT_BYTES = 1024 * 1024;
+export const ocrExecOptions = {
+  timeout: OCR_TOOL_TIMEOUT_MS,
+  maxBuffer: TOOL_STDIO_MAX_BYTES,
+  killSignal: "SIGKILL" as const,
+};
 
 export type OcrResult = Readonly<{
   ocrPdfPath: string | null;
@@ -29,7 +39,18 @@ export type OcrResult = Readonly<{
  * Checks if ocrmypdf is available on the system.
  */
 export async function isOcrAvailable(): Promise<boolean> {
-  return isCommandAvailable("ocrmypdf");
+  return (await getOcrAvailability()).available;
+}
+
+export async function getOcrAvailability(): Promise<Readonly<{
+  available: boolean;
+  reason: string | null;
+}>> {
+  if (!(await isCommandAvailable("ocrmypdf"))) {
+    return { available: false, reason: "OCRmyPDF executable is unavailable" };
+  }
+  const languages = await checkTesseractLanguages();
+  return { available: languages.available, reason: languages.error };
 }
 
 /**
@@ -37,8 +58,8 @@ export async function isOcrAvailable(): Promise<boolean> {
  *
  * Uses ocrmypdf with:
  * - English + Russian language packs
- * - --skip-text to avoid re-OCRing pages that already have text
- * - --force-ocr for pages flagged as needing OCR
+ * - --pages to limit work to selected pages
+ * - --force-ocr to replace broken text layers on those pages
  *
  * @param inputPdfPath Path to the (possibly normalized) PDF
  * @param pagesNeedingOcr Page numbers that need OCR
@@ -60,12 +81,13 @@ export async function ocrPdf(
     };
   }
 
-  if (!(await isOcrAvailable())) {
+  const availability = await getOcrAvailability();
+  if (!availability.available) {
     return {
       ocrPdfPath: null,
       ocredPages: 0,
       totalRequested: pagesNeedingOcr.length,
-      errors: ["ocrmypdf is not installed or not on PATH"],
+      errors: [availability.reason ?? "OCR runtime is unavailable"],
     };
   }
 
@@ -74,10 +96,7 @@ export async function ocrPdf(
   const errors: string[] = [];
 
   try {
-    const inputSize = (await stat(inputPdfPath)).size;
-    if (inputSize > OCR_MAX_PDF_BYTES) {
-      throw new Error(`PDF exceeds OCR size limit of ${OCR_MAX_PDF_BYTES} bytes`);
-    }
+    await assertBoundedFile(inputPdfPath, MAX_PDF_INPUT_BYTES, "OCR input PDF");
     // Build pages-to-OCR argument
     // ocrmypdf --pages takes page ranges like "1,3,5" or "1-5"
     const pageRanges = pagesNeedingOcr.map(String).join(",");
@@ -87,12 +106,9 @@ export async function ocrPdf(
       ocrPdfPath,
       sidecarPath,
       pageRanges,
-    ), {
-      timeout: OCR_TIMEOUT_MS,
-      maxBuffer: OCR_MAX_OUTPUT_BYTES,
-      killSignal: "SIGKILL",
-    });
+    ), ocrExecOptions);
 
+    await assertBoundedFile(ocrPdfPath, MAX_OCR_OUTPUT_BYTES, "OCR output PDF");
     return {
       ocrPdfPath,
       ocredPages: pagesNeedingOcr.length,
@@ -100,8 +116,7 @@ export async function ocrPdf(
       errors,
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    errors.push(`ocrmypdf failed: ${message}`);
+    errors.push(sanitizeOcrError(err));
     await Promise.allSettled([
       rm(ocrPdfPath, { force: true }),
       rm(sidecarPath, { force: true }),
@@ -141,10 +156,22 @@ export function buildOcrArguments(
  */
 export async function readOcrSidecar(sidecarPath: string): Promise<string[]> {
   try {
-    const content = await readFile(sidecarPath, "utf-8");
+    const content = await readBoundedUtf8(sidecarPath, MAX_EXTRACTED_PAGE_BYTES, "OCR sidecar");
     // ocrmypdf sidecar uses \f (form feed) as page separator
     return content.split("\f").map((p) => p.trim());
   } catch {
     return [];
   }
+}
+
+export function sanitizeOcrError(error: unknown): string {
+  if (error instanceof Error && "killed" in error && error.killed) return "OCR command timed out";
+  if (error instanceof Error && "code" in error) {
+    const code = typeof error.code === "number" || typeof error.code === "string"
+      ? String(error.code).replace(/[^A-Za-z0-9_-]/g, "")
+      : "unknown";
+    return `OCR command failed with code ${code}`;
+  }
+  if (error instanceof Error && /size limit/i.test(error.message)) return error.message;
+  return "OCR command failed";
 }
