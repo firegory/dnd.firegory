@@ -165,6 +165,21 @@ test("@user Classes navigation renders classes, subclasses, features, and source
   await expect(page.getByRole("link", { name: /QA100/ })).toBeVisible();
 });
 
+test("@user Species navigation renders historical species and exact variant detail links", async ({ page }) => {
+  await page.goto("/en/compendium");
+  await page.getByRole("link", { name: "Species", exact: true }).click();
+  await expect(page).toHaveURL(/\/species$/);
+  await expect(page.getByRole("heading", { name: "Species and variants" })).toBeVisible();
+  await expect(page.locator(".option-list > li")).toHaveCount(3);
+  await page.getByRole("link", { name: /QA Fleet Human/ }).click();
+  await expect(page.getByRole("heading", { name: "QA Fleet Human" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fleet" })).toBeVisible();
+  const parent = page.getByRole("link", { name: "species-human" });
+  await expect(parent).toHaveAttribute("href", new RegExp(`^/species/species-human\\?sourceId=${IDS.sources.open}&revisionId=rev-${"1".repeat(64)}$`));
+  await parent.click();
+  await expect(page.getByRole("heading", { name: "QA Human" })).toBeVisible();
+});
+
 test("@no-access otherwise matching English homebrew corpus is authorization-empty", async ({ page, request }) => {
   const response = await request.get("/api/compendium/entries?edition=5.5e&language=en&category=homebrew");
   expect(response.ok()).toBeTruthy();
@@ -173,6 +188,9 @@ test("@no-access otherwise matching English homebrew corpus is authorization-emp
   await expect(page.getByRole("heading", { name: "This page could not be found." })).toBeVisible();
   await page.goto("/classes?category=homebrew");
   await expect(page.getByRole("heading", { name: "Classes and subclasses" })).toBeVisible();
+  await expect(page.getByText("No accessible options found.")).toBeVisible();
+  await page.goto("/species?category=homebrew");
+  await expect(page.getByRole("heading", { name: "Species and variants" })).toBeVisible();
   await expect(page.getByText("No accessible options found.")).toBeVisible();
 });
 

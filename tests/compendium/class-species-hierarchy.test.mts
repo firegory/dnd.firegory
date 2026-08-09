@@ -5,7 +5,7 @@ import test from "node:test";
 import { classifyCandidatePublication, projectSnapshotFeatureCandidate, projectSnapshotHierarchyCandidate } from "../../src/server/compendium/candidate-publication.ts";
 import { parseDeterministicChunk } from "../../src/server/compendium/candidate-parsers.ts";
 import { EXTRACTION_PARSER_VERSION, EXTRACTION_PROMPT_VERSION } from "../../src/server/compendium/candidate-schema.ts";
-import { classProjectionFromTypedFields, validateClassProjection, validateSpeciesProjection } from "../../src/server/compendium/hierarchy-schema.ts";
+import { classProjectionFromTypedFields, speciesProjectionFromTypedFields, validateClassProjection, validateSpeciesProjection } from "../../src/server/compendium/hierarchy-schema.ts";
 import { canonicalEntryId, collectorCandidateKey } from "../../src/server/compendium/identity.ts";
 import { nextDndImportBatch } from "../../src/server/compendium/next-dnd/import-adapter.ts";
 import { featureCandidates, hierarchyCandidate } from "../../src/server/compendium/next-dnd/hierarchy-import.ts";
@@ -70,6 +70,9 @@ test("NFS projection requires exact relation targets and validates graph and inh
   assert.equal(fighter.relations.every((relation)=>relation.sourceId===relation.targetSourceId&&relation.edition==="5.5e"&&relation.language==="en"&&relation.targetLifecycle==="active"),true);
   const override=projections.find((entry)=>entry.entryId==="species-2")!.relations.find((relation)=>relation.relationKind==="trait_override")!;
   assert.deepEqual({target:override.targetEntryId,sourceAnchor:override.sourceAnchor,anchor:override.anchor},{target:"species-1",sourceAnchor:"fleet",anchor:"resourceful"});
+  const {kind,...historicalVariant}=REPRESENTATIVE_VARIANT;void kind;
+  const historical=projectAll("historical-variant",source,replaceProjection(revisions,"species-2",historicalVariant));
+  assert.equal(historical.find((entry)=>entry.entryId==="species-2")?.relations.find((relation)=>relation.relationKind==="parent")?.targetEntryId,"species-1");
 
   assert.throws(()=>projectAll("missing-target",source,revisions.filter((revision)=>revision.entryId!=="species-1")),/exact (?:target|source snapshot)/);
   assert.throws(()=>projectAll("cycle",source,replaceProjection(revisions,"class-17",{...COMPLETE_CLASS,kind:"subclass",parentClassIds:["class-133"]})),/cycle/i);
@@ -114,7 +117,7 @@ test("classes reader SQL matches post-0017 index columns and parses nullable opt
     source:{id:sourceId,title:"Optional Source",code:null,revision:null},kind:"class",hitDie:8,primaryAbility:"Wisdom",spellcastingAbility:null,
     parentClassIds:[],progressionColumns:[],progressionRows:[],features:[],crossLinks:[],
   });
-  for(const sql of statements){assert.doesNotMatch(sql,/s\.edition,s\.language/);assert.doesNotMatch(sql,/JOIN LATERAL \(SELECT n\.attributes\)/);assert.match(sql,/SELECT n\.\* FROM accessible_entries n/);}
+  for(const sql of statements){assert.doesNotMatch(sql,/s\.edition,s\.language/);assert.doesNotMatch(sql,/JOIN LATERAL \(SELECT n\.attributes\)/);assert.match(sql,/SELECT n\.\*,.* FROM accessible_entries n/);}
 });
 
 test("hierarchy typed fields accept current JSON strings and historical JSON objects but reject malformed JSON",()=>{
@@ -122,6 +125,24 @@ test("hierarchy typed fields accept current JSON strings and historical JSON obj
     {key:"progression-columns",value:[{key:"slots",heading:"Slots"}]},{key:"progression-rows",value:[JSON.stringify({level:1,cells:{slots:"2"}})]}];
   assert.deepEqual(classProjectionFromTypedFields(fields).progressionRows,[{level:1,cells:{slots:"2"}}]);
   assert.throws(()=>classProjectionFromTypedFields([...fields,{key:"features",value:["not-json"]}]),/malformed JSON/);
+});
+
+test("historical species typed fields infer kind only when the property is absent",async()=>{
+  const required=[{key:"size",value:"medium"},{key:"speed",value:35}];
+  const fields=[...required,{key:"parent-species-ids",value:["species-1"]},
+    {key:"traits",value:[{key:"fleet",title:"Fleet",body:"Your Speed increases.",anchor:"fleet",overrides:null}]},
+    {key:"cross-links",value:null}];
+  assert.deepEqual(speciesProjectionFromTypedFields(fields),{
+    kind:"variant",size:"medium",speed:35,parentSpeciesIds:["species-1"],
+    traits:[{key:"fleet",title:"Fleet",body:"Your Speed increases.",anchor:"fleet",overrides:null}],crossLinks:[],
+  });
+  assert.equal(speciesProjectionFromTypedFields([...required,{key:"parent-species-ids",value:[]}]).kind,"species");
+  for(const parents of [[],["species-1"]]) for(const kind of [null,"legacy",42,{},[]]) {
+    assert.throws(()=>speciesProjectionFromTypedFields([...required,{key:"kind",value:kind},{key:"parent-species-ids",value:parents}]),/kind must be species or variant/i);
+  }
+  const statements:string[]=[];let call=0;
+  await new OptionReadService({async query(sql:string){statements.push(sql);return{rows:call++===0?[]:[{count:"0"}]};}}).list("species",{role:"user"},{kind:"species"});
+  for(const sql of statements){assert.match(sql,/attributes \? 'kind'/);assert.doesNotMatch(sql,/coalesce\(n\.attributes->>'kind',CASE/);}
 });
 
 test("hierarchy UI retains exact-version links, responsive print tables, and deep anchors",async()=>{

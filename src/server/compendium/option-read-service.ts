@@ -59,7 +59,7 @@ function boundarySql(type: OptionType, user: RetrievalUser, selection: OptionVer
     FROM nfs_index_entries n JOIN sources s ON s.id=n.source_id JOIN files f ON f.id=n.file_id AND f.source_id=s.id
     CROSS JOIN LATERAL (SELECT coalesce(jsonb_object_agg(field->>'key',field->'value'),'{}') AS attributes FROM jsonb_array_elements(n.typed_fields) field) fields
     WHERE ${access.sql} AND s.deleted_at IS NULL AND f.deleted_at IS NULL AND n.lifecycle='active'
-  ), option_versions AS MATERIALIZED (SELECT n.* FROM accessible_entries n WHERE ${typePredicate}),
+  ), option_versions AS MATERIALIZED (SELECT n.*,${kindSql(type, "n.attributes")} AS option_kind FROM accessible_entries n WHERE ${typePredicate}),
   selected_options AS MATERIALIZED (SELECT option_version.*,
     (SELECT jsonb_agg(jsonb_build_object('targetId',target.entry_id,'targetRevisionId',target.revision_id,
       'targetSourceId',target.source_id,'relationKind',relation.relation_kind,'targetKind',relation.target_kind,
@@ -80,9 +80,13 @@ function boundarySql(type: OptionType, user: RetrievalUser, selection: OptionVer
 
 function optionFilters(params: unknown[], options: OptionListOptions): string {
   const filters = ["1=1"];
-  if (options.kind) filters.push(`option.attributes->>'kind'=$${params.push(options.kind)}`);
+  if (options.kind) filters.push(`option.option_kind=$${params.push(options.kind)}`);
   if (options.query) filters.push(`(option.name ILIKE $${params.push(`%${options.query.trim().replace(/[\\%_]/g,"\\$&")}%`)} ESCAPE '\\' OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(option.aliases) alias WHERE alias ILIKE $${params.length} ESCAPE '\\'))`);
   return filters.join(" AND ");
+}
+function kindSql(type: OptionType, attributes: string): string {
+  if (type === "class") return `coalesce(${attributes}->>'kind','class')`;
+  return `CASE WHEN ${attributes} ? 'kind' THEN ${attributes}->>'kind' WHEN jsonb_typeof(${attributes}->'parent-species-ids')='array' AND jsonb_array_length(${attributes}->'parent-species-ids')>0 THEN 'variant' ELSE 'species' END`;
 }
 function validate(type: OptionType, options: OptionListOptions): void {
   if (options.query !== undefined && (!options.query.trim() || options.query.length > 120)) throw new CompendiumReadInputError("Invalid option query.");

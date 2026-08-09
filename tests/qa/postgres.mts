@@ -349,6 +349,76 @@ export async function seedClassesFixture(database: Pool | PoolClient): Promise<v
   }
 }
 
+export async function seedSpeciesFixture(database: Pool | PoolClient): Promise<void> {
+  const ownsClient = database instanceof Pool;
+  const client = ownsClient ? await database.connect() : database;
+  const sourceRows = [
+    { sourceId: IDS.sources.open, suffix: "1", repositoryId: "qa-species-open", entries: [
+      { id: "species-human", revision: "1", name: "QA Human", fields: speciesFields({ traits: [{ key: "resourceful", title: "Resourceful", body: "Gain Heroic Inspiration.", anchor: "resourceful", overrides: null }] }) },
+      { id: "species-fleet-human", revision: "2", name: "QA Fleet Human", fields: speciesFields({ kind: undefined, speed: 35, parentSpeciesIds: ["species-human"], traits: [{ key: "fleet", title: "Fleet", body: "Your Speed increases.", anchor: "fleet", overrides: "resourceful" }] }, true) },
+      { id: "species-historical", revision: "3", name: "QA Historical Species", fields: speciesFields({ kind: undefined, parentSpeciesIds: null, traits: null, crossLinks: null }) },
+    ] },
+    { sourceId: IDS.sources.open, suffix: "1", repositoryId: "qa-species-open-old", entries: [
+      { id: "species-human", revision: "4", name: "QA Human Legacy Revision", fields: speciesFields() },
+      { id: "other-stale-species-note", revision: "5", name: "QA Stale Species Note", fields: [] },
+    ] },
+    { sourceId: IDS.sources.premium, suffix: "2", repositoryId: "qa-species-premium", entries: [
+      { id: "species-human", revision: "6", name: "QA Human Premium", fields: speciesFields() },
+    ] },
+    { sourceId: IDS.sources.otherPersonal, suffix: "4", repositoryId: "qa-species-private", entries: [
+      { id: "species-private", revision: "7", name: "QA Private Species", fields: speciesFields() },
+      { id: "species-kind-null-empty", revision: "8", name: "QA Null Kind Empty Parents", fields: speciesFields({ kind: null }) },
+      { id: "species-kind-null-parent", revision: "9", name: "QA Null Kind Parent", fields: speciesFields({ kind: null, parentSpeciesIds: ["species-private"] }) },
+      { id: "species-kind-scalar", revision: "a", name: "QA Scalar Kind", fields: speciesFields({ kind: 42 }) },
+      { id: "species-kind-object", revision: "b", name: "QA Object Kind", fields: speciesFields({ kind: {} }) },
+      { id: "species-kind-array", revision: "c", name: "QA Array Kind", fields: speciesFields({ kind: [], parentSpeciesIds: ["species-private"] }) },
+    ] },
+  ] as const;
+  try {
+    await client.query("BEGIN");
+    await client.query("SET CONSTRAINTS ALL DEFERRED");
+    let sequence = 0;
+    for (const source of sourceRows) {
+      const fileId = `30000000-0000-4000-8000-00000000000${source.suffix}`;
+      const generationId = `40000000-0000-4000-8000-00000000000${source.suffix}`;
+      const documentId = `64000000-0000-4000-8000-00000000000${source.suffix}`;
+      for (const entry of source.entries) {
+        const entryType = entry.id.startsWith("species-") ? "other" : "glossary";
+        await client.query(
+          `INSERT INTO nfs_index_entries
+             (id,repository_id,entry_id,revision_id,content_hash,entry_type,name,aliases,typed_fields,plain_text,canonical_payload,
+              source_id,file_id,generation_id,document_id,lifecycle,edition,language,indexed_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'[]'::jsonb,$8::jsonb,$9,$10::jsonb,$11,$12,$13,$14,'active','5.5e','en',now()+($15*interval '1 second'))`,
+          [`9${String(sequence).padStart(7, "0")}-0000-4000-8000-000000000001`, source.repositoryId, entry.id,
+            `rev-${entry.revision.repeat(64)}`, `sha256:${entry.revision.repeat(64)}`, entryType, entry.name, JSON.stringify(entry.fields), `${entry.name} rules.`,
+            JSON.stringify({ citations: [] }), source.sourceId, fileId, generationId, documentId, source.repositoryId.endsWith("old") ? -10 + sequence : sequence],
+        );
+        sequence += 1;
+      }
+    }
+    const relationValues = (repositoryId: string, sourceEntryId: string, sourceRevision: string, targetEntryId: string, targetRevision: string, kind: string, targetKind: string, sourceAnchor: string, anchor: string | null) => [
+      repositoryId, sourceEntryId, `rev-${sourceRevision.repeat(64)}`, IDS.sources.open, "30000000-0000-4000-8000-000000000001",
+      targetEntryId, `rev-${targetRevision.repeat(64)}`, IDS.sources.open, "30000000-0000-4000-8000-000000000001", kind, targetKind, sourceAnchor, anchor,
+    ];
+    for (const values of [
+      relationValues("qa-species-open", "species-fleet-human", "2", "species-human", "1", "parent", "species", "", null),
+      relationValues("qa-species-open", "species-fleet-human", "2", "species-human", "1", "trait_override", "species", "fleet", "resourceful"),
+      relationValues("qa-species-open-old", "species-human", "4", "other-stale-species-note", "5", "cross_link", "other", "", null),
+    ]) await client.query(
+      `INSERT INTO nfs_index_option_relations
+         (repository_id,source_entry_id,source_revision_id,source_id,source_file_id,target_entry_id,target_revision_id,target_source_id,target_file_id,
+          edition,language,relation_kind,target_kind,target_lifecycle,source_anchor,anchor,position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'5.5e','en',$10,$11,'active',$12,$13,0)`, values,
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    if (ownsClient) client.release();
+  }
+}
+
 function classFields(overrides: Readonly<Record<string, unknown>> = {}): readonly Readonly<{ key: string; value: unknown }>[] {
   const projection: Record<string, unknown> = {
     kind: "class", hitDie: 10, primaryAbility: "Strength", spellcastingAbility: null, parentClassIds: [],
@@ -358,6 +428,16 @@ function classFields(overrides: Readonly<Record<string, unknown>> = {}): readonl
     key: key.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase(),
     value: ["progressionColumns", "progressionRows", "features"].includes(key) && Array.isArray(value)
       ? value.map((item) => JSON.stringify(item)) : value,
+  }));
+}
+
+function speciesFields(overrides: Readonly<Record<string, unknown>> = {}, historicalObjects = false): readonly Readonly<{ key: string; value: unknown }>[] {
+  const projection: Record<string, unknown> = {
+    kind: "species", size: "medium", speed: 30, parentSpeciesIds: [], traits: [], crossLinks: [], ...overrides,
+  };
+  return Object.entries(projection).filter(([, value]) => value !== undefined).map(([key, value]) => ({
+    key: key.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase(),
+    value: key === "traits" && Array.isArray(value) && !historicalObjects ? value.map((item) => JSON.stringify(item)) : value,
   }));
 }
 
