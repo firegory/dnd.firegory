@@ -5,7 +5,7 @@ import { buildUserMessage, parseLlmResponse } from "../../src/server/rag/format.
 import { groundGeneratedAnswer } from "../../src/server/rag/ground.ts";
 import type { RetrievalCandidate } from "../../src/server/retrieval/types.ts";
 
-it("runs context to strict JSON to linked grounded claims end to end", () => {
+it("runs authorized context through ID-only JSON to linked synthesis end to end", () => {
   const chunks: RetrievalCandidate[] = [{
     chunkId: "c1", sourceId: "s1", fileId: "f1", text: "A reaction happens in response to a trigger.",
     quoteText: "A reaction happens in response to a trigger.", sectionHeading: "Reactions", pageNumber: 73,
@@ -15,11 +15,10 @@ it("runs context to strict JSON to linked grounded claims end to end", () => {
   assert.match(buildUserMessage("What is a reaction?", chunks), /"contextId": "C1"/);
 
   const parsed = parseLlmResponse(JSON.stringify({ claims: [{
-    text: "A reaction responds to a trigger.",
-    citations: [{ contextId: "C1", quote: "reaction happens in response to a trigger", sourceTitle: "Basic Rules", edition: "5e", language: "en", page: 73, section: "Reactions" }],
+    text: "A reaction is a response to a trigger.", references: ["C1"],
   }] }));
   const result = groundGeneratedAnswer(parsed, chunks, "en");
-  assert.equal(result.answer, "A reaction responds to a trigger.");
+  assert.equal(result.answer, "A reaction is a response to a trigger.");
   assert.equal(result.claims[0].citations[0], result.citations[0]);
   assert.equal(result.confident, true);
 });

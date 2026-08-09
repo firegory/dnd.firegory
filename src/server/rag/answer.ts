@@ -32,10 +32,9 @@ export {
   buildUserMessage,
   formatRetrievalContext,
   parseLlmResponse,
-  mapCitations,
+  resolveContextReferences,
   type AnswerLanguage,
   type SourceCitation,
-  type RawLlmCitation,
   type RawLlmClaim,
   type RawLlmResponse,
 } from "./format";

@@ -1,4 +1,11 @@
-import { mapCitations, type AnswerLanguage, type RawLlmResponse, type SourceCitation } from "./format.ts";
+import {
+  resolveContextReferences,
+  sourceCitation,
+  type AnswerLanguage,
+  type RawLlmResponse,
+  type SourceCitation,
+} from "./format.ts";
+import { validateClaimSupport } from "./support.ts";
 import type { RetrievalCandidate } from "../retrieval/types.ts";
 
 export type GroundedClaim = Readonly<{
@@ -23,22 +30,12 @@ export function groundGeneratedAnswer(
   const claims: GroundedClaim[] = [];
 
   for (const claim of parsed.claims) {
-    const seen = new Set<string>();
-    const uniqueReferences = claim.citations.filter((citation) => {
-      if (seen.has(citation.contextId)) {
-        rejected = true;
-        return false;
-      }
-      seen.add(citation.contextId);
-      return true;
-    });
-    const citations = mapCitations(uniqueReferences, chunks);
-    if (citations.length !== uniqueReferences.length) rejected = true;
-    if (citations.length === 0) {
+    const supportingChunks = resolveContextReferences(claim.references, chunks);
+    if (!supportingChunks || !validateClaimSupport(claim.text, supportingChunks, language).supported) {
       rejected = true;
       continue;
     }
-    claims.push({ text: claim.text, citations });
+    claims.push({ text: claim.text, citations: supportingChunks.map((chunk) => sourceCitation(chunk)) });
   }
 
   if (claims.length === 0) return extractiveFallback(language, chunks);
@@ -71,33 +68,27 @@ export function extractiveFallback(
   return {
     answer: messages[language],
     claims: [],
-    citations: chunks.slice(0, 3).map(sourceCitation),
+    citations: fallbackCitations(chunks),
     confident: false,
     retrievedChunks: chunks.length,
   };
 }
 
-function sourceCitation(chunk: RetrievalCandidate): SourceCitation {
-  return {
-    quote: chunk.quoteText,
-    sourceTitle: chunk.sourceTitle,
-    edition: chunk.edition,
-    language: chunk.language,
-    page: chunk.pageNumber,
-    section: chunk.sectionHeading,
-    category: chunk.sourceCategory,
-    fileId: chunk.fileId,
-    sourceId: chunk.sourceId,
-    chunkId: chunk.chunkId,
-    ...(chunk.entityEvidence?.length
-      ? { entityEvidence: chunk.entityEvidence.map((evidence) => ({
-          entryId: evidence.entryId,
-          citationId: evidence.citationId,
-          citationKind: evidence.citationKind,
-          fieldPath: evidence.fieldPath,
-        })) }
-      : {}),
-  };
+function fallbackCitations(chunks: readonly RetrievalCandidate[]): SourceCitation[] {
+  const citations: SourceCitation[] = [];
+  for (const chunk of chunks) {
+    const quote = cleanExcerpt(chunk.quoteText);
+    if (quote) citations.push(sourceCitation(chunk, quote));
+    if (citations.length === 3) break;
+  }
+  return citations;
+}
+
+function cleanExcerpt(value: string): string {
+  const normalized = value.normalize("NFC").replaceAll(/\s+/g, " ").trim();
+  if (normalized.length <= 600) return normalized;
+  const boundary = normalized.lastIndexOf(" ", 600);
+  return normalized.slice(0, boundary >= 400 ? boundary : 600).trimEnd();
 }
 
 function uniqueCitations(citations: readonly SourceCitation[]): SourceCitation[] {
