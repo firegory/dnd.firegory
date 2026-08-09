@@ -8,17 +8,14 @@
 
 import { copyFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
-
 import { isCommandAvailable } from "./dependencies.ts";
+import { runMonitoredTool } from "./tool-runner.ts";
 import {
+  MAX_PDF_INPUT_BYTES,
   NORMALIZE_TOOL_TIMEOUT_MS,
   PDF_TOOL_TIMEOUT_MS,
   TOOL_STDIO_MAX_BYTES,
 } from "../../server/ingestion/limits.ts";
-
-const execFile = promisify(execFileCb);
 
 /** PDF magic bytes: %PDF- */
 const PDF_MAGIC = Buffer.from("%PDF-");
@@ -56,25 +53,25 @@ export async function normalizePdf(
   // Try qpdf first — fast, preserves structure
   if (await isCommandAvailable("qpdf")) {
     try {
-      await execFile("qpdf", [
+      await runNormalizeTool("qpdf", [
         "--linearize",       // optimize for web/random access
         "--qdf",             // normalize streams for downstream tools
         "--no-warn",
         inputPath,
         outputPath,
-      ], boundedNormalizeOptions);
+      ], outputPath);
       return { normalizedPath: outputPath, method: "qpdf", wasRepaired: false };
     } catch {
       await rm(outputPath, { force: true });
       // qpdf failed — try more aggressive recovery options
       try {
-        await execFile("qpdf", [
+        await runNormalizeTool("qpdf", [
           "--normalize",         // normalize content streams
           "--suppress-recovery", // bypass qpdf's own recovery to force output
           "--no-warn",
           inputPath,
           outputPath,
-        ], boundedNormalizeOptions);
+        ], outputPath);
         return { normalizedPath: outputPath, method: "qpdf", wasRepaired: true };
       } catch {
         await rm(outputPath, { force: true });
@@ -86,7 +83,7 @@ export async function normalizePdf(
   // Try Ghostscript — re-renders pages, strongest normalization
   if (await isCommandAvailable("gs")) {
     try {
-      await execFile("gs", [
+      await runNormalizeTool("gs", [
         "-dNOPAUSE",
         "-dBATCH",
         "-sDEVICE=pdfwrite",
@@ -96,7 +93,7 @@ export async function normalizePdf(
         "-dCompressPages=true",
         `-sOutputFile=${outputPath}`,
         inputPath,
-      ], boundedNormalizeOptions);
+      ], outputPath);
       return { normalizedPath: outputPath, method: "ghostscript", wasRepaired: true };
     } catch {
       await rm(outputPath, { force: true });
@@ -110,8 +107,23 @@ export async function normalizePdf(
   return { normalizedPath: outputPath, method: "none", wasRepaired: false };
 }
 
-const boundedNormalizeOptions = {
-  timeout: NORMALIZE_TOOL_TIMEOUT_MS,
+async function runNormalizeTool(command: string, args: readonly string[], outputPath: string): Promise<void> {
+  await runMonitoredTool(command, args, {
+    timeoutMs: NORMALIZE_TOOL_TIMEOUT_MS,
+    maxStdoutBytes: TOOL_STDIO_MAX_BYTES,
+    maxOutputBytes: MAX_PDF_INPUT_BYTES,
+    monitorPaths: [outputPath],
+  });
+}
+
+type PdfInfoRun = (
+  command: string,
+  args: readonly string[],
+  options: typeof boundedPdfInfoOptions,
+) => Promise<Readonly<{ stdout: string }>>;
+
+export const boundedPdfInfoOptions = {
+  timeout: PDF_TOOL_TIMEOUT_MS,
   maxBuffer: TOOL_STDIO_MAX_BYTES,
   killSignal: "SIGKILL" as const,
 };
@@ -122,14 +134,13 @@ const boundedNormalizeOptions = {
  */
 export async function getPdfPageCount(
   pdfPath: string,
-  run: typeof execFile = execFile,
+  run: PdfInfoRun = async (command, args) => runMonitoredTool(command, args, {
+    timeoutMs: PDF_TOOL_TIMEOUT_MS,
+    maxStdoutBytes: TOOL_STDIO_MAX_BYTES,
+  }),
 ): Promise<number | null> {
   try {
-    const { stdout } = await run("pdfinfo", [pdfPath], {
-      timeout: PDF_TOOL_TIMEOUT_MS,
-      maxBuffer: TOOL_STDIO_MAX_BYTES,
-      killSignal: "SIGKILL",
-    });
+    const { stdout } = await run("pdfinfo", [pdfPath], boundedPdfInfoOptions);
     const match = stdout.match(/Pages:\s+(\d+)/);
     return match ? parseInt(match[1], 10) : null;
   } catch {

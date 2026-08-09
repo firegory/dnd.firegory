@@ -59,6 +59,46 @@ test("keeps short legitimate labels and numeric pages", () => {
   assert.equal(assessPageTextQuality(8, "12345678901234567890 22345678901234567890 32345678901234567890 42345678901234567890 52345678901234567890 62345678901234567890", "ru").status, "good");
 });
 
+test("accepts coherent equation-heavy mathematical pages", () => {
+  const equations = `
+f(x) = x^2 + 2*x + 1
+g(x) = (x^3 - 4*x) / (x + 2)
+E = m*c^2
+P(A|B) = P(B|A) * P(A) / P(B)
+y = 3*x^4 - 2*x^2 + 7*x - 11
+`;
+  assert.equal(assessPageTextQuality(9, equations, "ru").status, "good");
+});
+
+test("accepts coherent matrices and numeric CSV tables", () => {
+  const matrix = `
+[ 1,  0, -2,  4 ]
+[ 3,  5,  6, -1 ]
+[ 0,  2,  1,  8 ]
+[ 7, -3,  4,  2 ]
+`;
+  const csv = `
+round,attack,damage,save
+1,18,12.5,15
+2,21,8.0,17
+3,16,14.5,13
+4,24,11.0,19
+`;
+  assert.equal(assessPageTextQuality(10, matrix, "ru").status, "good");
+  assert.equal(assessPageTextQuality(11, csv, "ru").status, "good");
+  assert.deepEqual(findPageQualityFailures({
+    initiallyCorruptPages: new Set([10]),
+    finalQuality: [assessPageTextQuality(10, matrix, "ru")],
+    ocrAvailable: true,
+    ocrReplacementPages: new Set([10]),
+  }), []);
+});
+
+test("does not mistake adversarial operator noise for structured math", () => {
+  const garbage = `${">=<=1234567890".repeat(25)}\n${"[[[=><=09876".repeat(25)}\n${"1,2,>=<=,[[[".repeat(25)}`;
+  assert.equal(assessPageTextQuality(12, garbage, "ru").status, "corrupt");
+});
+
 test("fails closed when forced OCR is unavailable or remains corrupt", () => {
   const corrupt = assessPageTextQuality(7, corruptFixture, "ru");
   assert.match(findPageQualityFailures({

@@ -6,22 +6,22 @@
  * re-extracts text from it.
  */
 
-import { mkdir, rm } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
 
 import { checkTesseractLanguages, isCommandAvailable } from "./dependencies.ts";
 import { assertBoundedFile, readBoundedUtf8 } from "./file-safety.ts";
+import { runMonitoredTool, ToolExecutionError } from "./tool-runner.ts";
 import {
   MAX_EXTRACTED_PAGE_BYTES,
   MAX_OCR_OUTPUT_BYTES,
+  MAX_OCR_WORKSPACE_BYTES,
   MAX_PDF_INPUT_BYTES,
   OCR_TOOL_TIMEOUT_MS,
   TOOL_STDIO_MAX_BYTES,
 } from "../../server/ingestion/limits.ts";
 
-const execFile = promisify(execFileCb);
 export const ocrExecOptions = {
   timeout: OCR_TOOL_TIMEOUT_MS,
   maxBuffer: TOOL_STDIO_MAX_BYTES,
@@ -33,6 +33,12 @@ export type OcrResult = Readonly<{
   ocredPages: number;
   totalRequested: number;
   errors: readonly string[];
+}>;
+
+type OcrDependencies = Readonly<{
+  getOcrAvailability: typeof getOcrAvailability;
+  runMonitoredTool: typeof runMonitoredTool;
+  createWorkspace: () => Promise<string>;
 }>;
 
 /**
@@ -69,7 +75,14 @@ export async function ocrPdf(
   inputPdfPath: string,
   pagesNeedingOcr: readonly number[],
   outputDir: string,
+  overrides: Partial<OcrDependencies> = {},
 ): Promise<OcrResult> {
+  const dependencies: OcrDependencies = {
+    getOcrAvailability,
+    runMonitoredTool,
+    createWorkspace: () => mkdtemp(join(tmpdir(), "dnd-ocr-")),
+    ...overrides,
+  };
   await mkdir(outputDir, { recursive: true });
 
   if (pagesNeedingOcr.length === 0) {
@@ -81,7 +94,7 @@ export async function ocrPdf(
     };
   }
 
-  const availability = await getOcrAvailability();
+  const availability = await dependencies.getOcrAvailability();
   if (!availability.available) {
     return {
       ocrPdfPath: null,
@@ -91,8 +104,11 @@ export async function ocrPdf(
     };
   }
 
+  const workspace = await dependencies.createWorkspace();
+  await chmod(workspace, 0o700);
+  const privateOcrPath = join(workspace, "ocr.pdf");
+  const privateSidecarPath = join(workspace, "ocr-sidecar.txt");
   const ocrPdfPath = join(outputDir, "ocr.pdf");
-  const sidecarPath = join(outputDir, "ocr-sidecar.txt");
   const errors: string[] = [];
 
   try {
@@ -101,14 +117,24 @@ export async function ocrPdf(
     // ocrmypdf --pages takes page ranges like "1,3,5" or "1-5"
     const pageRanges = pagesNeedingOcr.map(String).join(",");
 
-    await execFile("ocrmypdf", buildOcrArguments(
+    await dependencies.runMonitoredTool("ocrmypdf", buildOcrArguments(
       inputPdfPath,
-      ocrPdfPath,
-      sidecarPath,
+      privateOcrPath,
+      privateSidecarPath,
       pageRanges,
-    ), ocrExecOptions);
+    ), {
+      timeoutMs: OCR_TOOL_TIMEOUT_MS,
+      maxStdoutBytes: TOOL_STDIO_MAX_BYTES,
+      maxOutputBytes: MAX_OCR_WORKSPACE_BYTES,
+      monitorPaths: [workspace],
+      cwd: workspace,
+      env: { ...process.env, TMPDIR: workspace },
+    });
 
-    await assertBoundedFile(ocrPdfPath, MAX_OCR_OUTPUT_BYTES, "OCR output PDF");
+    await assertBoundedFile(privateOcrPath, MAX_OCR_OUTPUT_BYTES, "OCR output PDF");
+    await rm(ocrPdfPath, { force: true });
+    await copyFile(privateOcrPath, ocrPdfPath);
+    await chmod(ocrPdfPath, 0o600);
     return {
       ocrPdfPath,
       ocredPages: pagesNeedingOcr.length,
@@ -117,10 +143,7 @@ export async function ocrPdf(
     };
   } catch (err) {
     errors.push(sanitizeOcrError(err));
-    await Promise.allSettled([
-      rm(ocrPdfPath, { force: true }),
-      rm(sidecarPath, { force: true }),
-    ]);
+    await rm(ocrPdfPath, { force: true }).catch(() => undefined);
 
     return {
       ocrPdfPath: null,
@@ -128,6 +151,8 @@ export async function ocrPdf(
       totalRequested: pagesNeedingOcr.length,
       errors,
     };
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
   }
 }
 
@@ -165,6 +190,10 @@ export async function readOcrSidecar(sidecarPath: string): Promise<string[]> {
 }
 
 export function sanitizeOcrError(error: unknown): string {
+  if (error instanceof ToolExecutionError && error.reason === "timeout") return "OCR command timed out";
+  if (error instanceof ToolExecutionError && error.reason === "output-limit") return "OCR workspace exceeded size limit";
+  if (error instanceof ToolExecutionError && error.reason === "stdout-limit") return "OCR command output exceeded size limit";
+  if (error instanceof ToolExecutionError && error.reason === "exit") return `OCR command failed with code ${error.exitCode ?? "unknown"}`;
   if (error instanceof Error && "killed" in error && error.killed) return "OCR command timed out";
   if (error instanceof Error && "code" in error) {
     const code = typeof error.code === "number" || typeof error.code === "string"

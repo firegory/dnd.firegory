@@ -5,22 +5,20 @@
  * Produces a per-page text map suitable for downstream chunking.
  */
 
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
 
 import { getPdfPageCount } from "./pdf-normalize.ts";
 import { isCommandAvailable } from "./dependencies.ts";
-import { readBoundedUtf8 } from "./file-safety.ts";
+import { assertBoundedFile, readBoundedUtf8, writeJsonLinesBounded } from "./file-safety.ts";
+import { runMonitoredTool } from "./tool-runner.ts";
 import {
+  MAX_EXTRACTED_DOCUMENT_BYTES,
   MAX_EXTRACTED_PAGE_BYTES,
   MAX_PDF_PAGES,
   PDF_TOOL_TIMEOUT_MS,
   TOOL_STDIO_MAX_BYTES,
 } from "../../server/ingestion/limits.ts";
-
-const execFile = promisify(execFileCb);
 
 type PdfExec = (
   command: string,
@@ -69,7 +67,20 @@ export async function extractTextFromPdf(
   const dependencies: ExtractDependencies = {
     isCommandAvailable,
     getPdfPageCount,
-    execFile: execFile as unknown as PdfExec,
+    execFile: async (command, args) => {
+      const outputPath = args.at(-1);
+      await runMonitoredTool(command, args, {
+        timeoutMs: PDF_TOOL_TIMEOUT_MS,
+        maxStdoutBytes: TOOL_STDIO_MAX_BYTES,
+        monitorLimits: outputPath ? [
+          {
+            path: outputPath,
+            maxBytes: args.includes("-f") ? MAX_EXTRACTED_PAGE_BYTES : MAX_EXTRACTED_DOCUMENT_BYTES,
+          },
+          { path: outputDir, maxBytes: MAX_EXTRACTED_DOCUMENT_BYTES },
+        ] : [],
+      });
+    },
     ...overrides,
   };
   await mkdir(outputDir, { recursive: true });
@@ -144,6 +155,7 @@ async function extractPagesIndividually(
   }
 
   const pages: ExtractedPage[] = [];
+  let extractedBytes = 0;
 
   for (let pageNum = 1; pageNum <= pageCount; pageNum++) {
     const pageOutputPath = join(outputDir, `page-${pageNum}.txt`);
@@ -168,14 +180,19 @@ async function extractPagesIndividually(
       continue;
     }
 
-    const text = await readBoundedUtf8(
-      pageOutputPath,
-      MAX_EXTRACTED_PAGE_BYTES,
-      `Extracted page ${pageNum}`,
-    ).catch(async () => {
+    let pageBytes: number;
+    try {
+      pageBytes = await assertBoundedFile(pageOutputPath, MAX_EXTRACTED_PAGE_BYTES, `Extracted page ${pageNum}`);
+    } catch {
       await rm(pageOutputPath, { force: true });
-      return "";
-    });
+      pages.push({ pageNumber: pageNum, text: "", charCount: 0, isOcrCandidate: true });
+      continue;
+    }
+    extractedBytes += pageBytes;
+    if (extractedBytes > MAX_EXTRACTED_DOCUMENT_BYTES) {
+      throw new Error(`Extracted document exceeds size limit of ${MAX_EXTRACTED_DOCUMENT_BYTES} bytes`);
+    }
+    const text = await readBoundedUtf8(pageOutputPath, MAX_EXTRACTED_PAGE_BYTES, `Extracted page ${pageNum}`);
     const charCount = text.length;
     const isOcrCandidate = text.trim().length < MIN_TEXT_CHARS_FOR_QUALITY;
 
@@ -201,7 +218,7 @@ async function extractWholeFile(
       pdfPath,
       outputPath,
     ], boundedPdfToolOptions);
-    return await readBoundedUtf8(outputPath, MAX_EXTRACTED_PAGE_BYTES, "Extracted PDF text");
+    return await readBoundedUtf8(outputPath, MAX_EXTRACTED_DOCUMENT_BYTES, "Extracted PDF text");
   } catch {
     await rm(outputPath, { force: true });
     return "";
@@ -222,14 +239,17 @@ export async function saveExtractionResults(
   outputDir: string,
 ): Promise<string> {
   const outputPath = join(outputDir, "text.jsonl");
-  const lines = result.pages.map((page) =>
-    JSON.stringify({
-      page_number: page.pageNumber,
-      text: page.text,
-      char_count: page.charCount,
-      is_ocr_candidate: page.isOcrCandidate,
-    }),
-  );
-  await writeFile(outputPath, lines.join("\n") + "\n");
+  await rm(outputPath, { force: true });
+  function* records() {
+    for (const page of result.pages) {
+      yield {
+        page_number: page.pageNumber,
+        text: page.text,
+        char_count: page.charCount,
+        is_ocr_candidate: page.isOcrCandidate,
+      };
+    }
+  }
+  await writeJsonLinesBounded(outputPath, records(), MAX_EXTRACTED_DOCUMENT_BYTES * 2, "Extraction JSONL");
   return outputPath;
 }

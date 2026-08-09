@@ -13,6 +13,7 @@ export type PageTextQuality = Readonly<{
     wellShapedTokenRatio: number;
     russianWordShapeRatio: number;
     invalidGlyphs: number;
+    structuredContent: boolean;
   }>;
 }>;
 
@@ -60,6 +61,9 @@ export function assessPageTextQuality(
       && /^[\p{Script=Cyrillic}\p{M}]+(?:['’\-][\p{Script=Cyrillic}\p{M}]+)?$/u.test(core)
       && RUSSIAN_VOWEL.test(core);
   }).length;
+  const structuredNumericData = tokens.length >= 3
+    && tokens.every((token) => token.length <= 32 && /^[\p{N}.,:+()\-/%]+$/u.test(token));
+  const structuredSymbolContent = isStructuredSymbolContent(text, tokens);
 
   const metrics = {
     visibleCharacters: visible.length,
@@ -72,6 +76,7 @@ export function assessPageTextQuality(
     wellShapedTokenRatio: ratio(wellShapedTokens, letterTokens.length),
     russianWordShapeRatio: ratio(russianWordShapes, cyrillicTokens.length),
     invalidGlyphs,
+    structuredContent: structuredNumericData || structuredSymbolContent,
   };
 
   if (language !== "ru" || visible.length < MIN_LANGUAGE_QUALITY_CHARACTERS) {
@@ -85,9 +90,7 @@ export function assessPageTextQuality(
   const codeLike = cyrillicLetters < 5
     && latinLetters >= 15
     && /[{}[\];]|(?:=>|===|::|<\/?[a-z])/iu.test(text);
-  const structuredNumericData = tokens.length >= 3
-    && tokens.every((token) => token.length <= 32 && /^[\p{N}.,:+()\-/%]+$/u.test(token));
-  if (englishPassage || codeLike || structuredNumericData) {
+  if (englishPassage || codeLike || structuredNumericData || structuredSymbolContent) {
     return { pageNumber, status: "good", reasons: [], metrics };
   }
 
@@ -109,7 +112,59 @@ export function assessPageTextQuality(
   return { pageNumber, status: corrupt ? "corrupt" : "good", reasons: corrupt ? reasons : [], metrics };
 }
 
+function isStructuredSymbolContent(text: string, tokens: readonly string[]): boolean {
+  const lines = text.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) return false;
+
+  const csvWidths = lines.map((line) => line.split(",").length);
+  const csv = lines.length >= 2
+    && csvWidths[0] >= 3
+    && csvWidths.every((width) => width === csvWidths[0])
+    && lines.every((line) => line.split(",").every((cell) => /^[\p{L}\p{N}_.+\-/%() ]+$/u.test(cell.trim())));
+  if (csv) return true;
+
+  const matrixRows = lines.filter((line) => {
+    const numbers = line.match(/[+\-]?\d+(?:\.\d+)?/gu) ?? [];
+    return numbers.length >= 2 && /^[\[\](){}|+\-\d.,;\s]+$/u.test(line) && bracketsBalanced(line);
+  });
+  if (matrixRows.length >= 2 && matrixRows.length / lines.length >= 0.75) return true;
+
+  const equationLines = lines.filter((line) => {
+    const equalSigns = [...line.matchAll(/(?<![<>=])=(?![=<>])/gu)];
+    if (equalSigns.length !== 1 || !bracketsBalanced(line)) return false;
+    const equals = equalSigns[0].index;
+    if (equals <= 0 || equals >= line.length - 1) return false;
+    const left = line.slice(0, equals);
+    const right = line.slice(equals + 1);
+    return /[\p{L}\p{N}]/u.test(left)
+      && /[\p{L}\p{N}]/u.test(right)
+      && /^[\p{L}\p{N}\p{M}\s+\-*/^=<>≤≥.,:;()[\]{}|]+$/u.test(line);
+  });
+  if (equationLines.length >= 2 && equationLines.length / lines.length >= 0.6) return true;
+
+  const grammarTokens = tokens.filter((token) => token.length <= 64
+    && /^(?:[\p{L}\p{N}_.]+|[+\-*/^=<>≤≥]+|[()[\]{}|,;:]+)$/u.test(token));
+  const operators = tokens.filter((token) => /^[+\-*/^=<>≤≥]+$/u.test(token)).length;
+  const operands = tokens.filter((token) => /[\p{L}\p{N}]/u.test(token)).length;
+  return tokens.length >= 5
+    && grammarTokens.length / tokens.length >= 0.85
+    && operators >= 2
+    && operands >= 3
+    && bracketsBalanced(text);
+}
+
+function bracketsBalanced(text: string): boolean {
+  const pairs: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+  const stack: string[] = [];
+  for (const character of text) {
+    if (character === "(" || character === "[" || character === "{") stack.push(character);
+    else if (character in pairs && stack.pop() !== pairs[character]) return false;
+  }
+  return stack.length === 0;
+}
+
 export function hasMinimumTextEvidence(quality: PageTextQuality): boolean {
+  if (quality.metrics.structuredContent) return true;
   const requiredWords = Math.max(2, Math.ceil(quality.metrics.visibleCharacters / 500));
   return quality.metrics.letters >= Math.max(12, Math.ceil(quality.metrics.visibleCharacters * 0.12))
     && quality.metrics.wellShapedTokens >= requiredWords;

@@ -5,7 +5,7 @@
  * Integrates with the ingestion job lifecycle from issue #7.
  */
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { normalizePdf } from "./pdf-normalize.ts";
@@ -14,8 +14,13 @@ import {
   saveExtractionResults,
 } from "./pdf-extract.ts";
 import { chunkPages } from "./chunking.ts";
-import { assertBoundedFile, validateOriginalPdf } from "./file-safety.ts";
-import { MAX_PDF_INPUT_BYTES } from "../../server/ingestion/limits.ts";
+import {
+  assertBoundedFile,
+  createImmutablePdfSnapshot,
+  type ImmutablePdfSnapshot,
+  writeJsonLinesBounded,
+} from "./file-safety.ts";
+import { MAX_CHUNKS_JSONL_BYTES, MAX_PDF_INPUT_BYTES } from "../../server/ingestion/limits.ts";
 import { recoverPdfText } from "./text-recovery.ts";
 import { extractPageBboxes, computeChunkBboxes, type ChunkBbox } from "./bbox.ts";
 import {
@@ -66,7 +71,7 @@ const pipelineDefaults = {
   createStagedGeneration,
   resetStagedGeneration,
   updateJobProgress,
-  validateOriginalPdf,
+  createImmutablePdfSnapshot,
   normalizePdf,
   assertBoundedFile,
   extractTextFromPdf,
@@ -108,6 +113,8 @@ export async function runPipeline(input: {
   const { jobId, sourceId, fileId, originalPdfPath } = input;
   const artifactsRoot = dependencies.artifactsRootPath(sourceId, fileId);
   let generationId: string | null = null;
+  let originalSnapshot: ImmutablePdfSnapshot | null = null;
+  let toolSnapshot: ImmutablePdfSnapshot | null = null;
   const jobArtifactsDir = join(artifactsRoot, jobId);
 
   // Verify job exists and is in correct state
@@ -136,21 +143,22 @@ export async function runPipeline(input: {
     // === Stage 1: Validate PDF ===
     await dependencies.updateJobProgress(jobId, 5);
 
-    await dependencies.validateOriginalPdf(originalPdfPath);
+    originalSnapshot = await dependencies.createImmutablePdfSnapshot(originalPdfPath);
 
     // === Stage 2: Normalize PDF ===
     await dependencies.updateJobProgress(jobId, 10);
 
     const normalizeDir = join(jobArtifactsDir, "normalize");
-    const normalizeResult = await dependencies.normalizePdf(originalPdfPath, normalizeDir);
+    const normalizeResult = await dependencies.normalizePdf(originalSnapshot.path, normalizeDir);
     await dependencies.assertBoundedFile(normalizeResult.normalizedPath, MAX_PDF_INPUT_BYTES, "Normalized PDF");
+    toolSnapshot = await dependencies.createImmutablePdfSnapshot(normalizeResult.normalizedPath);
 
     // === Stage 3: Extract text ===
     await dependencies.updateJobProgress(jobId, 20);
 
     const extractDir = join(jobArtifactsDir, "extract");
     const initialExtraction = await dependencies.extractTextFromPdf(
-      normalizeResult.normalizedPath,
+      toolSnapshot.path,
       extractDir,
     );
     const sourceLanguage = await dependencies.getSourceLanguage(sourceId);
@@ -160,7 +168,7 @@ export async function runPipeline(input: {
 
     const ocrDir = join(jobArtifactsDir, "ocr");
     const recovery = await dependencies.recoverPdfText({
-      pdfPath: normalizeResult.normalizedPath,
+      pdfPath: toolSnapshot.path,
       ocrDir,
       extraction: initialExtraction,
       language: sourceLanguage,
@@ -201,7 +209,7 @@ export async function runPipeline(input: {
     const chunkBboxes = new Map<number, ChunkBbox>();
     try {
       const pageBboxes = await dependencies.extractPageBboxes(
-        normalizeResult.normalizedPath,
+        toolSnapshot.path,
         extractionResult.totalPages,
       );
 
@@ -227,21 +235,24 @@ export async function runPipeline(input: {
 
     // Save chunks as JSONL
     const chunksJsonlPath = join(jobArtifactsDir, "chunks.jsonl");
-    const chunksJsonl = chunks.map((c) =>
-      JSON.stringify({
-        chunk_index: c.chunkIndex,
-        page_number: c.pageNumber,
-        section_heading: c.sectionHeading,
-        text: c.text,
-        quote_text: c.quoteText,
-        text_span_start: c.textSpanStart,
-        text_span_end: c.textSpanEnd,
-        char_count: c.charCount,
-        bbox: chunkBboxes.get(c.chunkIndex) ?? null,
-      }),
-    ).join("\n");
     await mkdir(jobArtifactsDir, { recursive: true });
-    await writeFile(chunksJsonlPath, chunksJsonl + "\n");
+    await rm(chunksJsonlPath, { force: true });
+    function* chunkRecords() {
+      for (const chunk of chunks) {
+        yield {
+          chunk_index: chunk.chunkIndex,
+          page_number: chunk.pageNumber,
+          section_heading: chunk.sectionHeading,
+          text: chunk.text,
+          quote_text: chunk.quoteText,
+          text_span_start: chunk.textSpanStart,
+          text_span_end: chunk.textSpanEnd,
+          char_count: chunk.charCount,
+          bbox: chunkBboxes.get(chunk.chunkIndex) ?? null,
+        };
+      }
+    }
+    await writeJsonLinesBounded(chunksJsonlPath, chunkRecords(), MAX_CHUNKS_JSONL_BYTES, "Chunks JSONL");
 
     await dependencies.updateJobProgress(jobId, 60);
 
@@ -408,7 +419,10 @@ export async function runPipeline(input: {
       pagesPersisted,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    let message = error instanceof Error ? error.message : String(error);
+    for (const path of [originalPdfPath, originalSnapshot?.path, toolSnapshot?.path]) {
+      if (path) message = message.replaceAll(path, "<pdf>");
+    }
     if (generationId && !(error instanceof ActivationStateUnknownError)) {
       try {
         await dependencies.discardStagedGeneration(generationId);
@@ -421,5 +435,7 @@ export async function runPipeline(input: {
     }
     await dependencies.markJobFailed(jobId, message);
     throw error;
+  } finally {
+    await Promise.allSettled([toolSnapshot?.cleanup(), originalSnapshot?.cleanup()]);
   }
 }

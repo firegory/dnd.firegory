@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -145,3 +145,22 @@ for (const mode of ["timeout", "oversize", "language", "punctuation"] as const) 
     }
   });
 }
+
+test("behavioral pipeline rejects a symlinked source before tools or persistence and preserves active generation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pipeline-symlink-"));
+  try {
+    const fixture = await pipelineFixture(root, "success");
+    const target = join(root, "target.pdf");
+    await writeFile(target, "%PDF-1.7 target");
+    await rm(fixture.original);
+    await symlink(target, fixture.original);
+    await assert.rejects(runPipeline({
+      jobId: "job-1", sourceId: "source-1", fileId: "file-1", originalPdfPath: fixture.original,
+    }, fixture.dependencies), /ELOOP|symbolic link/);
+    assert.equal(fixture.state().persistCalls, 0);
+    assert.equal(fixture.state().activeGeneration, "generation-old");
+    assert.equal(fixture.state().discarded, "generation-new");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
