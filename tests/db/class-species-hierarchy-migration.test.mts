@@ -4,6 +4,7 @@ import test from "node:test";
 import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 
 const filename="0019_class_species_hierarchy.sql";const sql=await readFile(`migrations/${filename}`,"utf8");
+const historicalSpeciesSql=await readFile("migrations/0024_historical_species_kind.sql","utf8");
 
 test("0019 registers normalized many-to-many hierarchy and exact NFS relations",()=>{
   assert.equal(MIGRATION_FILENAMES[MIGRATION_FILENAMES.indexOf(filename)+1],"0020_active_revision_trigger_fix.sql");
@@ -45,4 +46,15 @@ test("NFS relations enforce direct base parents and identify exact trait overrid
   assert.match(sql,/source_anchor text NOT NULL/);assert.match(sql,/source_kind = 'subclass' AND actual_kind = 'class'/);
   assert.match(sql,/source_kind = 'variant' AND actual_kind = 'species'/);
   assert.match(sql,/target_trait\.value::jsonb\)->>'anchor' = NEW\.anchor/);
+});
+
+test("0024 aligns historical omitted Species kinds with canonical parent projections",()=>{
+  assert.equal(MIGRATION_FILENAMES.at(-1),"0024_historical_species_kind.sql");
+  assert.match(historicalSpeciesSql,/CREATE OR REPLACE FUNCTION nfs_index_validate_option_relation/);
+  assert.match(historicalSpeciesSql,/jsonb_typeof\(source_fields\.values->'parent-species-ids'\) = 'array'/);
+  assert.match(historicalSpeciesSql,/jsonb_array_length\(source_fields\.values->'parent-species-ids'\) > 0 THEN 'variant'/);
+  assert.match(historicalSpeciesSql,/source\.revision_id = NEW\.source_revision_id/);
+  assert.match(historicalSpeciesSql,/source\.file_id = NEW\.source_file_id/);
+  assert.match(historicalSpeciesSql,/source_meta\.edition = NEW\.edition/);
+  assert.match(historicalSpeciesSql,/source_meta\.language = NEW\.language/);
 });

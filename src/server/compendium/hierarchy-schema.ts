@@ -95,7 +95,11 @@ export function hierarchyTypedValue(key: string, value: unknown): unknown {
 }
 
 export function classProjectionFromTypedFields(fields: unknown): ClassProjection { return validateClassProjection(typedObject(fields), { requireCompleteBase: false }); }
-export function speciesProjectionFromTypedFields(fields: unknown): SpeciesProjection { return validateSpeciesProjection(typedObject(fields)); }
+export function speciesProjectionFromTypedFields(fields: unknown): SpeciesProjection {
+  const projection = typedObject(fields);
+  if (projection.kind == null && Array.isArray(projection.parentSpeciesIds) && projection.parentSpeciesIds.length > 0) projection.kind = "variant";
+  return validateSpeciesProjection(projection);
+}
 
 function typedObject(fields: unknown): Record<string, unknown> {
   if (!Array.isArray(fields)) fail("Canonical hierarchy typedFields must be an array.");

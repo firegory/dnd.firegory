@@ -22,6 +22,7 @@ export const MIGRATION_FILENAMES = [
   "0021_nfs_exact_lookup_indexes.sql",
   "0022_import_review_canonical_revision.sql",
   "0023_import_run_review_scope.sql",
+  "0024_historical_species_kind.sql",
 ] as const;
 
 export type MigrationFilename = (typeof MIGRATION_FILENAMES)[number];

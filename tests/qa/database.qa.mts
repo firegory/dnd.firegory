@@ -22,7 +22,7 @@ import { MIGRATION_FILENAMES } from "../../src/server/db/migrations.ts";
 import { PostgresPublicationFenceManager } from "../../src/worker/publication/fence.ts";
 import { publishCanonicalRevision } from "../../src/worker/publication/publisher.ts";
 import { COMPLETE_CLASS, hierarchyDetailsFixture } from "../fixtures/character-options.mts";
-import { applyMigrationPrefix, IDS, isolatedDatabase, runProductionMigrations, seedAccessFixture, seedClassesFixture } from "./postgres.mts";
+import { applyMigrationPrefix, IDS, isolatedDatabase, runProductionMigrations, seedAccessFixture, seedClassesFixture, seedSpeciesFixture } from "./postgres.mts";
 
 test("QA integration: concurrent isolated database cleanup closes owned pools before dropping", async () => {
   const databases = await Promise.all([isolatedDatabase("cleanup_a"), isolatedDatabase("cleanup_b")]);
@@ -122,6 +122,7 @@ test("QA integration: live role matrix is authorization-, source-, and corpus-sc
   await runProductionMigrations(db.url);
   await seedAccessFixture(db.pool);
   await seedClassesFixture(db.pool);
+  await seedSpeciesFixture(db.pool);
   const service = new CompendiumReadService(db.pool);
 
   const cases = [
@@ -172,6 +173,20 @@ test("QA integration: live role matrix is authorization-, source-, and corpus-sc
   assert.deepEqual(fighter.sourceVersions.map(({ sourceId }) => sourceId), [IDS.sources.open, IDS.sources.premium]);
   const premiumFighter = await options.get("class", { role: "admin", userId: IDS.users.admin }, "class-fighter", { sourceId: IDS.sources.premium, revisionId: `rev-${"e".repeat(64)}` });
   assert.equal(premiumFighter.title, "QA Fighter Premium");
+
+  const species = await options.list("species", { role: "user", userId: IDS.users.regular }, { edition: "5.5e", language: "en" });
+  assert.deepEqual(species.options.map(({ id }) => id), ["species-fleet-human", "species-historical", "species-human"]);
+  assert.equal(species.options.find(({ id }) => id === "species-fleet-human")?.kind, "variant");
+  assert.deepEqual((await options.list("species", { role: "user", userId: IDS.users.regular }, { kind: "variant" })).options.map(({ id }) => id), ["species-fleet-human"]);
+  assert.deepEqual(await options.list("species", { role: "user", userId: IDS.users.empty }, { category: "homebrew" }), { options: [], count: 0 });
+  const fleetHuman = await options.get("species", { role: "user", userId: IDS.users.regular }, "species-fleet-human");
+  assert.deepEqual(fleetHuman.parentSpeciesIds, ["species-human"]);
+  assert.equal(fleetHuman.relations.every((relation) => relation.targetSourceId === IDS.sources.open), true);
+  const human = await options.get("species", { role: "admin", userId: IDS.users.admin }, "species-human");
+  assert.deepEqual(human.crossLinks, [], "a stale relation from an older source revision must not leak into the selected revision");
+  assert.deepEqual(human.sourceVersions.map(({ sourceId }) => sourceId), [IDS.sources.open, IDS.sources.open, IDS.sources.premium]);
+  const premiumHuman = await options.get("species", { role: "admin", userId: IDS.users.admin }, "species-human", { sourceId: IDS.sources.premium, revisionId: `rev-${"6".repeat(64)}` });
+  assert.equal(premiumHuman.title, "QA Human Premium");
 });
 
 test("QA integration: transactional import crash rolls back, stale lease retries, and replay conflicts fail closed", async (t) => {
