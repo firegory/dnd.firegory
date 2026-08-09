@@ -26,6 +26,7 @@ type Citation = Readonly<{
 
 type SearchResult = Readonly<{
   answer: string;
+  claims: readonly Readonly<{ text: string; citations: readonly Citation[] }>[];
   citations: readonly Citation[];
   confident: boolean;
   retrievedChunks: number;
@@ -228,9 +229,25 @@ function SearchResultView({ result, isAdmin }: { result: SearchResult; isAdmin: 
             </span>
           )}
         </div>
-        <p className="whitespace-pre-wrap leading-relaxed text-text-primary">
-          {result.answer}
-        </p>
+        {result.claims.length ? (
+          <div className="space-y-3 leading-relaxed text-text-primary">
+            {result.claims.map((claim, claimIndex) => (
+              <p key={`${claim.text}-${claimIndex}`}>
+                {claim.text}{" "}
+                {claim.citations.map((citation) => {
+                  const citationIndex = result.citations.findIndex((candidate) =>
+                    candidate.chunkId === citation.chunkId && candidate.quote === citation.quote,
+                  );
+                  return citationIndex >= 0
+                    ? <sup key={`${citation.chunkId}-${citationIndex}`}><a href={`#answer-citation-${citationIndex + 1}`}>[{citationIndex + 1}]</a></sup>
+                    : null;
+                })}
+              </p>
+            ))}
+          </div>
+        ) : (
+          <p className="whitespace-pre-wrap leading-relaxed text-text-primary">{result.answer}</p>
+        )}
       </section>
 
       <section>
@@ -250,6 +267,7 @@ function SearchResultView({ result, isAdmin }: { result: SearchResult; isAdmin: 
               <CitationCard
                 key={`${citation.sourceId}-${citation.fileId}-${citation.page}-${i}`}
                 citation={citation}
+                citationIndex={i + 1}
                 isAdmin={isAdmin}
                 onPreview={setPreviewCitation}
               />
@@ -265,12 +283,12 @@ function SearchResultView({ result, isAdmin }: { result: SearchResult; isAdmin: 
   );
 }
 
-function CitationCard({ citation, isAdmin, onPreview }: { citation: Citation; isAdmin: boolean; onPreview: (citation: Citation) => void }) {
+function CitationCard({ citation, citationIndex, isAdmin, onPreview }: { citation: Citation; citationIndex: number; isAdmin: boolean; onPreview: (citation: Citation) => void }) {
   const { language: uiLanguage, t } = useUiLanguage();
   const canPreview = Boolean(citation.sourceId && citation.fileId && citation.page !== null);
 
   return (
-    <article className="rounded-xl border border-border bg-surface p-5 transition-colors hover:border-accent/30">
+    <article id={`answer-citation-${citationIndex}`} className="rounded-xl border border-border bg-surface p-5 transition-colors hover:border-accent/30">
       <button
         type="button"
         disabled={!canPreview}

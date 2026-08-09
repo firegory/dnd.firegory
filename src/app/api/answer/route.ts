@@ -111,19 +111,11 @@ export async function POST(request: Request): Promise<NextResponse> {
 
     return NextResponse.json({
       answer: result.answer.answer,
-      citations: result.answer.citations.map((c) => ({
-        quote: c.quote,
-        sourceTitle: c.sourceTitle,
-        edition: c.edition,
-        language: c.language,
-        page: c.page,
-        section: c.section,
-        category: c.category,
-        fileId: c.fileId,
-        sourceId: c.sourceId,
-        chunkId: c.chunkId,
-        ...(c.entityEvidence ? { entityEvidence: c.entityEvidence } : {}),
+      claims: result.answer.claims.map((claim) => ({
+        text: claim.text,
+        citations: claim.citations.map(publicCitation),
       })),
+      citations: result.answer.citations.map(publicCitation),
       confident: result.answer.confident,
       retrievedChunks: result.answer.retrievedChunks,
       meta: {
@@ -151,4 +143,20 @@ export async function POST(request: Request): Promise<NextResponse> {
       { status: 500 },
     );
   }
+}
+
+function publicCitation(citation: (Awaited<ReturnType<typeof generateAnswer>>)["answer"]["citations"][number]) {
+  return {
+    quote: citation.quote,
+    sourceTitle: citation.sourceTitle,
+    edition: citation.edition,
+    language: citation.language,
+    page: citation.page,
+    section: citation.section,
+    category: citation.category,
+    fileId: citation.fileId,
+    sourceId: citation.sourceId,
+    chunkId: citation.chunkId,
+    ...(citation.entityEvidence ? { entityEvidence: citation.entityEvidence } : {}),
+  };
 }

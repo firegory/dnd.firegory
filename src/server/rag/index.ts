@@ -13,5 +13,6 @@ export {
   type AnswerLanguage,
   type SourceCitation,
   type RawLlmCitation,
+  type RawLlmClaim,
   type RawLlmResponse,
 } from "./format";

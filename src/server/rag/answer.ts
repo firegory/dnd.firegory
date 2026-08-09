@@ -21,11 +21,10 @@ import {
   buildSystemPrompt,
   buildUserMessage,
   parseLlmResponse,
-  citationEntityEvidence,
   type AnswerLanguage,
   type SourceCitation,
 } from "./format";
-import { groundGeneratedAnswer, unsupportedAnswer } from "./ground.ts";
+import { extractiveFallback, groundGeneratedAnswer, unsupportedAnswer, type GroundedClaim } from "./ground.ts";
 
 // Re-export format utilities for direct testing
 export {
@@ -37,6 +36,7 @@ export {
   type AnswerLanguage,
   type SourceCitation,
   type RawLlmCitation,
+  type RawLlmClaim,
   type RawLlmResponse,
 } from "./format";
 
@@ -64,6 +64,8 @@ export type RagAnswer = Readonly<{
   answer: string;
   /** Structured citations backing the answer. */
   citations: readonly SourceCitation[];
+  /** Independently grounded synthesis claims and their supporting citations. */
+  claims: readonly GroundedClaim[];
   /** Whether the answer was generated from confident retrieval results. */
   confident: boolean;
   /** The retrieval candidates used as context (for diagnostics). */
@@ -151,12 +153,12 @@ export async function generateAnswer(
   // retrieval result useful instead of returning a generic 500/no-chunks UI.
   let result: Awaited<ReturnType<typeof chatCompletion>>;
   try {
-    result = await chatCompletion(messages, llmConfig);
+    result = await chatCompletion(messages, { ...llmConfig, responseFormat: "json" });
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error("[rag] LLM generation failed:", msg);
     return {
-      answer: buildAnswerGenerationUnavailableAnswer(answerLanguage, chunks),
+      answer: extractiveFallback(answerLanguage, chunks),
       retrieval,
       llmModel: "none",
       usage: {
@@ -176,39 +178,5 @@ export async function generateAnswer(
     retrieval,
     llmModel: result.model,
     usage: result.usage,
-  };
-}
-
-/**
- * Builds a "no support found" answer without calling the LLM.
- */
-function buildAnswerGenerationUnavailableAnswer(
-  language: AnswerLanguage,
-  chunks: HybridSearchResult["chunks"],
-): RagAnswer {
-  const messages: Record<AnswerLanguage, string> = {
-    en: "I found relevant source excerpts, but answer generation is not available right now. Please review the citations below.",
-    ru: "Я нашёл релевантные фрагменты источников, но генерация ответа сейчас недоступна. Посмотрите цитаты ниже.",
-  };
-
-  return {
-    answer: messages[language],
-    citations: chunks.map((chunk): SourceCitation => ({
-      quote: chunk.quoteText,
-      sourceTitle: chunk.sourceTitle,
-      edition: chunk.edition,
-      language: chunk.language,
-      page: chunk.pageNumber,
-      section: chunk.sectionHeading,
-      category: chunk.sourceCategory,
-      fileId: chunk.fileId,
-      sourceId: chunk.sourceId,
-      chunkId: chunk.chunkId,
-      ...(chunk.entityEvidence?.length
-        ? { entityEvidence: chunk.entityEvidence.map(citationEntityEvidence) }
-        : {}),
-    })),
-    confident: false,
-    retrievedChunks: chunks.length,
   };
 }

@@ -1,456 +1,149 @@
-/**
- * Tests for RAG answer pipeline: prompt construction, citation mapping,
- * and LLM response parsing.
- *
- * generateAnswer itself depends on the full retrieval pipeline (DB + vector),
- * so it's tested through integration/e2e rather than unit tests. Here we
- * test all the pure sub-components.
- */
-
-import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { describe, it } from "node:test";
 
 import {
   buildSystemPrompt,
   buildUserMessage,
   formatRetrievalContext,
-  parseLlmResponse,
   mapCitations,
+  parseLlmResponse,
   type RawLlmCitation,
 } from "../../src/server/rag/format.ts";
 import type { RetrievalCandidate } from "../../src/server/retrieval/types.ts";
 
-// ---------- Helpers ----------
-
-function makeChunk(overrides: Partial<RetrievalCandidate> = {}): RetrievalCandidate {
+function chunk(overrides: Partial<RetrievalCandidate> = {}): RetrievalCandidate {
   return {
-    chunkId: "chunk-1",
-    sourceId: "src-1",
-    fileId: "file-1",
-    text: "A creature can take a reaction on another creature's turn.",
-    quoteText: "A creature can take a reaction on another creature's turn.",
-    sectionHeading: "Reactions",
-    pageNumber: 73,
+    chunkId: "chunk-secret",
+    sourceId: "source-secret",
+    fileId: "file-secret",
+    text: "Armor Class 18. Speed 30 ft. Hit Points 45.",
+    quoteText: "Armor Class 18. Speed 30 ft. Hit Points 45.",
+    sectionHeading: "Guardian stat block",
+    pageNumber: 42,
     edition: "5e",
     language: "en",
-    sourceTitle: "Basic Rules",
+    sourceTitle: "Open Rules",
     sourceCategory: "core_rules",
-    accessTier: "open",
-    score: 0.95,
-    strategy: "keyword",
+    accessTier: "premium",
+    score: 1,
+    strategy: "entity",
+    entityEvidence: [{
+      entryId: "entry-secret",
+      entryType: "monster",
+      canonicalKey: "guardian",
+      title: "Guardian",
+      citationId: "citation-secret",
+      citationKind: "block",
+      fieldPath: null,
+      quote: "Armor Class 18",
+    }],
     ...overrides,
   };
 }
 
-// ---------- buildSystemPrompt ----------
+function reference(overrides: Partial<RawLlmCitation> = {}): RawLlmCitation {
+  return {
+    contextId: "C1",
+    quote: "Armor Class 18",
+    sourceTitle: "Open Rules",
+    edition: "5e",
+    language: "en",
+    page: 42,
+    section: "Guardian stat block",
+    ...overrides,
+  };
+}
 
-describe("buildSystemPrompt", () => {
-  it("includes English instruction for en language", () => {
-    const prompt = buildSystemPrompt("en");
-    assert.ok(prompt.includes("Respond in English"));
+describe("RAG prompt contract", () => {
+  it("requests direct RU/EN claim synthesis and readable stat blocks", () => {
+    const en = buildSystemPrompt("en");
+    const ru = buildSystemPrompt("ru");
+    assert.match(en, /Write every claim in English/);
+    assert.match(ru, /русском языке/);
+    assert.match(en, /Answer the user's question directly/);
+    assert.match(en, /tables and stat blocks in natural, readable sentences/);
+    assert.match(en, /Unknown fields are forbidden/);
   });
 
-  it("includes Russian instruction for ru language", () => {
-    const prompt = buildSystemPrompt("ru");
-    assert.ok(prompt.includes("русском"));
+  it("supplies stable public context IDs without RBAC or entity internals", () => {
+    const context = formatRetrievalContext([chunk()]);
+    assert.match(context, /"contextId": "C1"/);
+    assert.match(context, /"sourceTitle": "Open Rules"/);
+    assert.doesNotMatch(context, /premium|source-secret|file-secret|entry-secret|citation-secret|accessTier|entityEvidence/);
   });
 
-  it("includes JSON structure requirement", () => {
-    const prompt = buildSystemPrompt("en");
-    assert.ok(prompt.includes('"answer"'));
-    assert.ok(prompt.includes('"citations"'));
-    assert.ok(prompt.includes('"confident"'));
-  });
-
-  it("includes 'no outside knowledge' rule", () => {
-    const prompt = buildSystemPrompt("en");
-    assert.ok(
-      prompt.includes("ONLY from the provided source") ||
-        prompt.includes("only from the provided source"),
-    );
-  });
-
-  it("includes 'no support' fallback instruction", () => {
-    const prompt = buildSystemPrompt("en");
-    assert.ok(
-      prompt.includes("cannot answer") ||
-        prompt.includes("not find") ||
-        prompt.includes("could not find"),
-    );
-  });
-});
-
-// ---------- formatRetrievalContext ----------
-
-describe("formatRetrievalContext", () => {
-  it("returns no-sources message for empty chunks", () => {
-    const result = formatRetrievalContext([]);
-    assert.equal(result, "No relevant sources found.");
-  });
-
-  it("formats a single chunk with all fields", () => {
-    const chunk = makeChunk();
-    const result = formatRetrievalContext([chunk]);
-    assert.ok(result.includes("[Source 1]"));
-    assert.ok(result.includes("Title: Basic Rules"));
-    assert.ok(result.includes("Edition: 5e"));
-    assert.ok(result.includes("Page: 73"));
-    assert.ok(result.includes("Section: Reactions"));
-    assert.ok(result.includes("Category: core_rules"));
-    assert.ok(result.includes("Quote:"));
-  });
-
-  it("omits page when null", () => {
-    const chunk = makeChunk({ pageNumber: null });
-    const result = formatRetrievalContext([chunk]);
-    assert.ok(!result.includes("Page:"));
-  });
-
-  it("omits section when null", () => {
-    const chunk = makeChunk({ sectionHeading: null });
-    const result = formatRetrievalContext([chunk]);
-    assert.ok(!result.includes("Section:"));
-  });
-
-  it("formats multiple chunks with sequential numbering", () => {
-    const chunks = [
-      makeChunk({ sourceTitle: "Source A" }),
-      makeChunk({ sourceTitle: "Source B" }),
-    ];
-    const result = formatRetrievalContext(chunks);
-    assert.ok(result.includes("[Source 1]"));
-    assert.ok(result.includes("[Source 2]"));
-    assert.ok(result.includes("Source A"));
-    assert.ok(result.includes("Source B"));
+  it("keeps filters outside prompt construction by accepting only retrieved chunks", () => {
+    const message = buildUserMessage("What are its defenses?", [chunk({ edition: "5.5e", language: "ru" })]);
+    assert.match(message, /What are its defenses/);
+    assert.match(message, /"edition": "5.5e"/);
+    assert.match(message, /"language": "ru"/);
+    assert.doesNotMatch(message, /role|owner|generationId/);
   });
 });
 
-// ---------- buildUserMessage ----------
-
-describe("buildUserMessage", () => {
-  it("includes the query", () => {
-    const msg = buildUserMessage("What is a reaction?", [makeChunk()]);
-    assert.ok(msg.includes("What is a reaction?"));
-  });
-
-  it("includes formatted context", () => {
-    const msg = buildUserMessage("test", [makeChunk()]);
-    assert.ok(msg.includes("[Source 1]"));
-    assert.ok(msg.includes("Basic Rules"));
-  });
-
-  it("includes Available sources header", () => {
-    const msg = buildUserMessage("test", [makeChunk()]);
-    assert.ok(msg.includes("Available sources:"));
-  });
-});
-
-// ---------- parseLlmResponse ----------
-
-describe("parseLlmResponse", () => {
-  it("parses valid JSON response", () => {
-    const input = JSON.stringify({
-      answer: "A reaction is a special action.",
-      confident: true,
-      citations: [{ quote: "A reaction...", sourceTitle: "Basic Rules" }],
-    });
-    const result = parseLlmResponse(input);
-    assert.equal(result.answer, "A reaction is a special action.");
-    assert.equal(result.confident, true);
-    assert.equal(result.citations?.length, 1);
-  });
-
-  it("strips markdown code block wrapping with language tag", () => {
-    const json = JSON.stringify({
-      answer: "Test answer",
-      confident: false,
-      citations: [],
-    });
-    const wrapped = "```json\n" + json + "\n```";
-    const result = parseLlmResponse(wrapped);
-    assert.equal(result.answer, "Test answer");
-    assert.equal(result.confident, false);
-  });
-
-  it("handles plain code block without language tag", () => {
-    const json = JSON.stringify({ answer: "X", confident: true, citations: [] });
-    const wrapped = "```\n" + json + "\n```";
-    const result = parseLlmResponse(wrapped);
-    assert.equal(result.answer, "X");
-  });
-
-  it("returns raw text as answer on invalid JSON", () => {
-    const result = parseLlmResponse("This is not JSON");
-    assert.equal(result.answer, "This is not JSON");
-    assert.equal(result.confident, false);
-    assert.deepEqual(result.citations, []);
-  });
-
-  it("handles empty citations array", () => {
-    const input = JSON.stringify({ answer: "No info", confident: false, citations: [] });
-    const result = parseLlmResponse(input);
-    assert.deepEqual(result.citations, []);
-  });
-
-  it("handles missing optional fields", () => {
-    const input = JSON.stringify({ answer: "Partial answer" });
-    const result = parseLlmResponse(input);
-    assert.equal(result.answer, "Partial answer");
-    assert.equal(result.confident, undefined);
-    assert.equal(result.citations, undefined);
-  });
-
-  it("handles JSON with leading/trailing whitespace", () => {
-    const input = "  \n  " + JSON.stringify({ answer: "Trimmed", confident: true, citations: [] }) + "  \n  ";
-    const result = parseLlmResponse(input);
-    assert.equal(result.answer, "Trimmed");
-    assert.equal(result.confident, true);
-  });
-
-  it("drops model-provided structured claims and invalid field types", () => {
-    const result = parseLlmResponse(JSON.stringify({
-      answer: { range: "Self" },
-      confident: "yes",
-      entity: { range: "Self" },
-      citations: [{ quote: "Range: Self", page: "12", structuredClaim: { range: "Self" } }],
+describe("closed provider JSON parser", () => {
+  it("accepts the exact claim shape", () => {
+    const parsed = parseLlmResponse(JSON.stringify({
+      claims: [{ text: "The guardian has AC 18.", citations: [reference()] }],
     }));
+    assert.equal(parsed.rejected, false);
+    assert.equal(parsed.claims[0].text, "The guardian has AC 18.");
+  });
 
-    assert.deepEqual(result, { citations: [{ quote: "Range: Self" }] });
+  it("rejects malformed JSON instead of exposing raw provider text", () => {
+    const parsed = parseLlmResponse("The guardian has AC 18 {not json");
+    assert.deepEqual(parsed, { claims: [], rejected: true });
+  });
+
+  it("rejects unknown fields, empty claims, oversized claims, and uncited claims", () => {
+    const parsed = parseLlmResponse(JSON.stringify({
+      claims: [
+        { text: "Invented", citations: [], hidden: true },
+        { text: " ", citations: [reference()] },
+        { text: "x".repeat(601), citations: [reference()] },
+        { text: "Uncited", citations: [] },
+      ],
+    }));
+    assert.equal(parsed.rejected, true);
+    assert.deepEqual(parsed.claims, []);
+  });
+
+  it("drops an invalid reference while retaining another reference for confidence degradation", () => {
+    const parsed = parseLlmResponse(JSON.stringify({
+      claims: [{
+        text: "The guardian has AC 18.",
+        citations: [reference(), { ...reference({ contextId: "C2" }), extra: "forbidden" }],
+      }],
+    }));
+    assert.equal(parsed.rejected, true);
+    assert.equal(parsed.claims[0].citations.length, 1);
   });
 });
 
-// ---------- mapCitations ----------
-
-describe("mapCitations", () => {
-  it("maps citation by exact source title match", () => {
-    const chunks = [makeChunk({ sourceTitle: "Basic Rules", sourceId: "src-1", fileId: "file-1" })];
-    const raw = [{ quote: "A creature can take a reaction", sourceTitle: "Basic Rules" }];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result.length, 1);
-    assert.equal(result[0].sourceTitle, "Basic Rules");
-    assert.equal(result[0].sourceId, "src-1");
-    assert.equal(result[0].fileId, "file-1");
+describe("authoritative citation mapping", () => {
+  it("accepts only a normalized contiguous quote on the referenced chunk", () => {
+    const mapped = mapCitations([reference({ quote: "armor   class 18" })], [chunk()]);
+    assert.equal(mapped.length, 1);
+    assert.equal(mapped[0].quote, "Armor Class 18");
+    assert.equal(mapped[0].page, 42);
   });
 
-  it("maps citation by case-insensitive source title", () => {
-    const chunks = [makeChunk({ sourceTitle: "Basic Rules" })];
-    const raw = [{ quote: "A creature can take a reaction", sourceTitle: "basic rules" }];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result.length, 1);
-    assert.equal(result[0].sourceTitle, "Basic Rules");
+  it("rejects a fabricated quote sharing a source prefix", () => {
+    assert.deepEqual(mapCitations([reference({ quote: "Armor Class 18 and immunity to fire" })], [chunk()]), []);
   });
 
-  it("maps a normalized contiguous quote substring and derives the source quote", () => {
-    const chunks = [
-      makeChunk({
-        sourceTitle: "Player's Handbook",
-        quoteText: "A creature can take a reaction on another creature's turn.",
-      }),
-    ];
-    const raw = [{ quote: "A creature can take a reaction on another" }];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result.length, 1);
-    assert.equal(result[0].sourceTitle, "Player's Handbook");
-    assert.equal(result[0].quote, "A creature can take a reaction on another creature's turn.");
+  it("rejects invented context IDs and inaccessible chunks", () => {
+    assert.deepEqual(mapCitations([reference({ contextId: "C2" })], [chunk()]), []);
+    assert.deepEqual(mapCitations([reference()], []), []);
   });
 
-  it("omits unmatched citations without source support", () => {
-    const chunks = [makeChunk({ sourceTitle: "Basic Rules" })];
-    const raw = [{ quote: "Something unrelated", sourceTitle: "Unknown Source" }];
-    const result = mapCitations(raw, chunks);
-    assert.deepEqual(result, []);
-  });
-
-  it("does not accept an unsupported short quote by incidental overlap", () => {
-    assert.deepEqual(
-      mapCitations([{ quote: "A", sourceTitle: "Basic Rules" }], [makeChunk()]),
-      [],
-    );
-  });
-
-  it("rejects a divergent quote that only shares a long prefix", () => {
-    const chunk = makeChunk({ quoteText: "A creature can take a reaction on another creature's turn." });
-    assert.deepEqual(
-      mapCitations([{ quote: "A creature can take a reaction that deals damage" }], [chunk]),
-      [],
-    );
-  });
-
-  it("propagates only field evidence supporting the final quote", () => {
-    const chunks = [makeChunk({
-      strategy: "entity",
-      entityEvidence: [
-        {
-          entryId: "entry-1",
-          entryType: "spell",
-          canonicalKey: "shield",
-          title: "Shield",
-          citationId: "citation-1",
-          citationKind: "field",
-          fieldPath: "$.range",
-          quote: "Range: Self",
-        },
-        {
-          entryId: "entry-1",
-          entryType: "spell",
-          canonicalKey: "shield",
-          title: "Shield",
-          citationId: "citation-2",
-          citationKind: "field",
-          fieldPath: "$.duration",
-          quote: "Duration: 1 round",
-        },
-      ],
-    })];
-
-    const result = mapCitations(
-      [{ quote: "Range: Self", sourceTitle: "Basic Rules" }],
-      chunks,
-    );
-
-    assert.equal(result.length, 1);
-    assert.deepEqual(result[0].entityEvidence?.map((evidence) => evidence.fieldPath), ["$.range"]);
-  });
-
-  it("propagates field evidence contained by a full authoritative chunk quote", () => {
-    const chunks = [makeChunk({
-      quoteText: "Range: Self. Duration: 1 round.",
-      strategy: "entity",
-      entityEvidence: [
-        {
-          entryId: "entry-1",
-          entryType: "spell",
-          canonicalKey: "shield",
-          title: "Shield",
-          citationId: "citation-range",
-          citationKind: "field",
-          fieldPath: "$.range",
-          quote: "Range: Self",
-        },
-        {
-          entryId: "entry-1",
-          entryType: "spell",
-          canonicalKey: "shield",
-          title: "Shield",
-          citationId: "citation-damage",
-          citationKind: "field",
-          fieldPath: "$.damage",
-          quote: "Damage: 4d6",
-        },
-      ],
-    })];
-
-    const result = mapCitations(
-      [{ quote: "Range: Self. Duration: 1 round." }],
-      chunks,
-    );
-
-    assert.deepEqual(result[0].entityEvidence?.map((evidence) => evidence.fieldPath), ["$.range"]);
-  });
-
-  it("derives a narrow citation inside field evidence without attaching outside evidence", () => {
-    const chunks = [makeChunk({
-      strategy: "entity",
-      entityEvidence: [
-        {
-          entryId: "entry-1",
-          entryType: "spell",
-          canonicalKey: "shield",
-          title: "Shield",
-          citationId: "citation-range",
-          citationKind: "field",
-          fieldPath: "$.range",
-          quote: "Range: Self",
-        },
-        {
-          entryId: "entry-1",
-          entryType: "spell",
-          canonicalKey: "shield",
-          title: "Shield",
-          citationId: "citation-duration",
-          citationKind: "field",
-          fieldPath: "$.duration",
-          quote: "Duration: 1 round",
-        },
-      ],
-    })];
-
-    const result = mapCitations([{ quote: "Range: Se" }], chunks);
-
-    assert.equal(result[0].quote, "Range: Self");
-    assert.deepEqual(result[0].entityEvidence?.map((evidence) => evidence.fieldPath), ["$.range"]);
-  });
-
-  it("omits an entity field claim without a supporting carried citation", () => {
-    const chunks = [makeChunk({
-      strategy: "entity",
-      entityEvidence: [{
-        entryId: "entry-1",
-        entryType: "spell",
-        canonicalKey: "shield",
-        title: "Shield",
-        citationId: "citation-1",
-        citationKind: "field",
-        fieldPath: "$.range",
-        quote: "Range: Self",
-      }],
-    })];
-
-    assert.deepEqual(
-      mapCitations([{ quote: "Damage: 4d6", sourceTitle: "Basic Rules" }], chunks),
-      [],
-    );
-  });
-
-  it("skips citations without a quote", () => {
-    const chunks = [makeChunk()];
-    const raw = [{ sourceTitle: "Basic Rules" }];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result.length, 0);
-  });
-
-  it("uses chunk metadata for page/section when LLM omits them", () => {
-    const chunks = [makeChunk({ pageNumber: 73, sectionHeading: "Reactions" })];
-    const raw = [{ quote: "A creature can take a reaction", sourceTitle: "Basic Rules" }];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result[0].page, 73);
-    assert.equal(result[0].section, "Reactions");
-  });
-
-  it("ignores LLM-provided page/section in favor of chunk metadata", () => {
-    const chunks = [makeChunk({ pageNumber: 73, sectionHeading: "Reactions" })];
-    const raw = [{ quote: "A creature can take a reaction", sourceTitle: "Basic Rules", page: 99, section: "Combat" }];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result[0].page, 73);
-    assert.equal(result[0].section, "Reactions");
-  });
-
-  it("maps multiple citations to different chunks", () => {
-    const chunks = [
-      makeChunk({ sourceId: "src-1", sourceTitle: "Basic Rules" }),
-      makeChunk({
-        sourceId: "src-2",
-        sourceTitle: "Player's Handbook",
-        quoteText: "Different text for testing overlap matching here",
-      }),
-    ];
-    const raw = [
-      { quote: "A creature can take a reaction", sourceTitle: "Basic Rules" },
-      { quote: "Different text for testing overlap" },
-    ];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result.length, 2);
-    assert.equal(result[0].sourceId, "src-1");
-    assert.equal(result[1].sourceId, "src-2");
-  });
-
-  it("returns empty array for empty raw citations", () => {
-    const result = mapCitations([], [makeChunk()]);
-    assert.equal(result.length, 0);
-  });
-
-  it("returns empty array for null citations", () => {
-    const result = mapCitations(null as unknown as readonly RawLlmCitation[], [makeChunk()]);
-    assert.equal(result.length, 0);
+  it("rejects invented page, section, title, edition, or language metadata", () => {
+    for (const invalid of [
+      reference({ page: 99 }),
+      reference({ section: "Combat" }),
+      reference({ sourceTitle: "Private Rules" }),
+      reference({ edition: "5.5e" }),
+      reference({ language: "ru" }),
+    ]) assert.deepEqual(mapCitations([invalid], [chunk()]), []);
   });
 });
