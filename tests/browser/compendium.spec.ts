@@ -8,6 +8,7 @@ test("@anonymous landing redirects and APIs reject without a session", async ({ 
   const email = page.getByLabel("Email");
   await page.keyboard.press("Tab");
   await expect(email).toBeFocused();
+  await expect(email).toHaveCSS("border-color", "rgb(138, 49, 45)");
   const authPalette = await page.evaluate(() => {
     const pageRoot = document.querySelector(".app-parchment")!;
     const button = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
@@ -33,10 +34,11 @@ test("@anonymous landing redirects and APIs reject without a session", async ({ 
 test("@anonymous register uses the parchment action and focus palette", async ({ page }) => {
   await page.goto("/en/compendium");
   await page.goto("/register?next=%2Fen%2Fcompendium");
-  const displayName = page.getByLabel("Display name");
+  const displayName = page.locator("#reg-display-name");
   await page.keyboard.press("Tab");
   await page.keyboard.press("Tab");
   await expect(displayName).toBeFocused();
+  await expect(displayName).toHaveCSS("border-color", "rgb(138, 49, 45)");
   const registerPalette = await page.evaluate(() => {
     const pageRoot = document.querySelector(".app-parchment")!;
     const button = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
