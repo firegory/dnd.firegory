@@ -63,7 +63,15 @@ jobs:
       - name: Verify production PDF renderer
         run: |
           docker build --target app-production --tag dnd-firegory-app-qa .
-          docker run --rm --entrypoint /bin/sh dnd-firegory-app-qa -c 'pdfinfo -v && pdftoppm -v && pdftocairo -v'
+          mkdir -p qa-artifacts/production-preview-storage
+          chmod 0777 qa-artifacts/production-preview-storage
+          docker run --rm \
+            --user 10001:10001 \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777 \
+            --mount type=bind,source="$PWD/qa-artifacts/production-preview-storage",target=/app/storage \
+            --entrypoint node \
+            dnd-firegory-app-qa scripts/production-preview-smoke.mjs
       - name: Install pinned Chromium runtime
         run: |
           npm run qa:browser:install

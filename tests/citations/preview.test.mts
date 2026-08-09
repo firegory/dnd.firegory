@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -11,12 +11,16 @@ import {
   CitationPreviewInputError,
   citationPreviewCachePath,
   citationPreviewHref,
+  isValidCitationPreviewPng,
   parseCitationPreviewRequest,
+  readCitationPreviewPng,
+  readOrRenderCitationPreviewPng,
   renderPdfPageToPng,
 } from "../../src/server/citations/preview.ts";
 
 const sourceId = "11111111-1111-4111-8111-111111111111";
 const fileId = "22222222-2222-4222-8222-222222222222";
+const validPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
 test("parseCitationPreviewRequest accepts source, file, and page", () => {
   const input = parseCitationPreviewRequest(
@@ -63,7 +67,9 @@ test("citationPreviewCachePath uses processed artifacts and page-level cache nam
 test("page renderer uses argument-safe tools and atomically returns PNG bytes", async () => {
   const fixture = await rendererFixture();
   const originalPath = process.env.PATH;
+  const originalStorageRoot = process.env.STORAGE_ROOT;
   process.env.PATH = `${fixture.bin}:${originalPath ?? ""}`;
+  process.env.STORAGE_ROOT = fixture.root;
   try {
     const pdfPath = join(fixture.root, "rules;touch injected.pdf");
     const outputPath = join(fixture.root, "cache", "page.png");
@@ -78,7 +84,8 @@ test("page renderer uses argument-safe tools and atomically returns PNG bytes", 
       error instanceof CitationPreviewError && error.code === "page_not_found"
     ));
   } finally {
-    process.env.PATH = originalPath;
+    restoreEnvironment("PATH", originalPath);
+    restoreEnvironment("STORAGE_ROOT", originalStorageRoot);
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
@@ -88,7 +95,9 @@ test("page renderer reports a missing production tool without leaking its PDF pa
   const pdfPath = join(root, "secret.pdf");
   await writeFile(pdfPath, "%PDF-1.4\n");
   const originalPath = process.env.PATH;
+  const originalStorageRoot = process.env.STORAGE_ROOT;
   process.env.PATH = root;
+  process.env.STORAGE_ROOT = root;
   try {
     await assert.rejects(
       () => renderPdfPageToPng({ pdfPath, outputPath: join(root, "preview.png"), page: 1 }),
@@ -100,7 +109,8 @@ test("page renderer reports a missing production tool without leaking its PDF pa
       },
     );
   } finally {
-    process.env.PATH = originalPath;
+    restoreEnvironment("PATH", originalPath);
+    restoreEnvironment("STORAGE_ROOT", originalStorageRoot);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -108,7 +118,9 @@ test("page renderer reports a missing production tool without leaking its PDF pa
 test("page renderer kills timed-out tools and removes temporary output", async () => {
   const fixture = await rendererFixture("while :; do :; done");
   const originalPath = process.env.PATH;
+  const originalStorageRoot = process.env.STORAGE_ROOT;
   process.env.PATH = `${fixture.bin}:${originalPath ?? ""}`;
+  process.env.STORAGE_ROOT = fixture.root;
   try {
     const pdfPath = join(fixture.root, "rules.pdf");
     const outputPath = join(fixture.root, "cache", "page.png");
@@ -119,12 +131,134 @@ test("page renderer kills timed-out tools and removes temporary output", async (
     );
     assert.deepEqual(await readdir(join(fixture.root, "cache")), []);
   } finally {
-    process.env.PATH = originalPath;
+    restoreEnvironment("PATH", originalPath);
+    restoreEnvironment("STORAGE_ROOT", originalStorageRoot);
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
 
-async function rendererFixture(rendererBody = 'for last do :; done\nprintf "\\211PNG\\r\\n\\032\\n\\000\\000\\000\\rIHDR\\000\\000\\000\\001\\000\\000\\000\\001" > "$last.png"'): Promise<{ root: string; bin: string }> {
+test("cache reads require a complete CRC-valid PNG and remove corrupt entries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "citation-preview-cache-"));
+  const originalStorageRoot = process.env.STORAGE_ROOT;
+  process.env.STORAGE_ROOT = root;
+  try {
+    const path = join(root, "processed", "preview.png");
+    await mkdir(join(root, "processed"));
+    await writeFile(path, validPng);
+    assert.equal(isValidCitationPreviewPng(validPng), true);
+    assert.deepEqual(await readCitationPreviewPng(path), validPng);
+
+    for (const invalid of [
+      validPng.subarray(0, validPng.length - 1),
+      Buffer.from(validPng).fill(0, 45, 46),
+      validPng.subarray(0, 33),
+    ]) {
+      await writeFile(path, invalid);
+      await assert.rejects(() => readCitationPreviewPng(path), previewError("output_invalid"));
+      await assert.rejects(() => readFile(path), { code: "ENOENT" });
+    }
+  } finally {
+    restoreEnvironment("STORAGE_ROOT", originalStorageRoot);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("corrupt canonical cache entries are truncated and rerendered from the canonical source PDF", async () => {
+  const fixture = await rendererFixture();
+  const originalPath = process.env.PATH;
+  const originalStorageRoot = process.env.STORAGE_ROOT;
+  process.env.PATH = `${fixture.bin}:${originalPath ?? ""}`;
+  process.env.STORAGE_ROOT = fixture.root;
+  try {
+    const sourceDirectory = join(fixture.root, "originals", sourceId);
+    const cachePath = join(fixture.root, "processed", sourceId, fileId, "previews", `page-1-w${PREVIEW_WIDTH_PX}.png`);
+    await mkdir(sourceDirectory, { recursive: true });
+    await mkdir(dirname(cachePath), { recursive: true });
+    await writeFile(join(sourceDirectory, `${fileId}.pdf`), "%PDF-1.4\n");
+    await writeFile(cachePath, validPng.subarray(0, validPng.length - 1));
+
+    const image = await readOrRenderCitationPreviewPng({
+      sourceId,
+      fileId,
+      storagePath: join(sourceDirectory, `${fileId}.pdf`),
+      artifactsRoot: null,
+    }, 1);
+    assert.deepEqual(image, validPng);
+    assert.deepEqual(await readFile(cachePath), validPng);
+  } finally {
+    restoreEnvironment("PATH", originalPath);
+    restoreEnvironment("STORAGE_ROOT", originalStorageRoot);
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("preview files reject escapes, symlinks, nonregular files, option-like paths, and oversized cache entries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "citation-preview-paths-"));
+  const outside = await mkdtemp(join(tmpdir(), "citation-preview-outside-"));
+  const originalStorageRoot = process.env.STORAGE_ROOT;
+  process.env.STORAGE_ROOT = root;
+  try {
+    const cache = join(root, "cache");
+    await mkdir(cache);
+    const validPath = join(cache, "valid.png");
+    await writeFile(validPath, validPng);
+    await symlink(validPath, join(cache, "linked.png"));
+    await symlink(outside, join(root, "linked-component"));
+    await mkdir(join(cache, "directory.png"));
+    await writeFile(join(cache, "-option.png"), validPng);
+    const oversized = join(cache, "oversized.png");
+    await writeFile(oversized, validPng);
+    await truncate(oversized, 16 * 1024 * 1024 + 1);
+
+    for (const path of [
+      join(outside, "outside.png"),
+      join(cache, "linked.png"),
+      join(root, "linked-component", "preview.png"),
+      join(cache, "directory.png"),
+      join(cache, "-option.png"),
+      oversized,
+    ]) {
+      await assert.rejects(() => readCitationPreviewPng(path), previewError("output_invalid"));
+    }
+  } finally {
+    restoreEnvironment("STORAGE_ROOT", originalStorageRoot);
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("renderer rejects DB source and cache paths outside the canonical storage root", async () => {
+  const fixture = await rendererFixture();
+  const outside = await mkdtemp(join(tmpdir(), "citation-preview-render-outside-"));
+  const originalPath = process.env.PATH;
+  const originalStorageRoot = process.env.STORAGE_ROOT;
+  process.env.PATH = `${fixture.bin}:${originalPath ?? ""}`;
+  process.env.STORAGE_ROOT = fixture.root;
+  try {
+    const source = join(fixture.root, "source.pdf");
+    await writeFile(source, "%PDF-1.4\n");
+    await symlink(source, join(fixture.root, "source-link.pdf"));
+    await assert.rejects(
+      () => renderPdfPageToPng({ pdfPath: join(outside, "source.pdf"), outputPath: join(fixture.root, "preview.png"), page: 1 }),
+      previewError("source_file_missing"),
+    );
+    await assert.rejects(
+      () => renderPdfPageToPng({ pdfPath: join(fixture.root, "source-link.pdf"), outputPath: join(fixture.root, "preview.png"), page: 1 }),
+      previewError("source_file_missing"),
+    );
+    await assert.rejects(
+      () => renderPdfPageToPng({ pdfPath: source, outputPath: join(outside, "preview.png"), page: 1 }),
+      previewError("cache_unwritable"),
+    );
+  } finally {
+    restoreEnvironment("PATH", originalPath);
+    restoreEnvironment("STORAGE_ROOT", originalStorageRoot);
+    await rm(fixture.root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+async function rendererFixture(rendererBody = `for last do :; done\nprintf '%s' '${validPng.toString("base64")}' | base64 -d > "$last.png"`): Promise<{ root: string; bin: string }> {
   const root = await mkdtemp(join(tmpdir(), "citation-preview-tools-"));
   const bin = join(root, "bin");
   await mkdir(bin);
@@ -137,4 +271,13 @@ async function rendererFixture(rendererBody = 'for last do :; done\nprintf "\\21
 async function writeTool(path: string, body: string): Promise<void> {
   await writeFile(path, `#!/bin/sh\n${body}\n`);
   await chmod(path, 0o755);
+}
+
+function previewError(code: string): (error: unknown) => boolean {
+  return (error) => error instanceof CitationPreviewError && error.code === code;
+}
+
+function restoreEnvironment(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
 }

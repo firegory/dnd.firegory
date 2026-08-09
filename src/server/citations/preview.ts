@@ -8,13 +8,13 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir, readFile, rename, stat, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { lstat, mkdir, open, realpath, rename, unlink, type FileHandle } from "node:fs/promises";
+import { join, relative, resolve, sep } from "node:path";
 
 import { buildSourceAccessSql } from "../access/access-sql.ts";
 import { buildRetrievalAuthorizationFilter, type RetrievalUser } from "../access/retrieval-filter.ts";
 import { query } from "../db/client.ts";
-import { artifactsRootPath } from "../ingestion/paths.ts";
+import { artifactsRootPath, getStorageRoot, originalFilePath } from "../ingestion/paths.ts";
 import type { ChunkBbox } from "../../worker/ingestion/bbox.ts";
 
 export const MAX_PREVIEW_PAGE = 5000;
@@ -116,6 +116,7 @@ export async function getAuthorizedCitationPreviewFile(
      WHERE ${accessFilter.sql}
        AND s.deleted_at IS NULL
        AND f.deleted_at IS NULL
+       AND f.mime_type = 'application/pdf'
        AND s.id = $${sourceParam}
        AND f.id = $${fileParam}
      LIMIT 1`,
@@ -137,6 +138,7 @@ export async function readOrRenderCitationPreviewPng(
   file: CitationPreviewFile,
   page: number,
 ): Promise<Buffer> {
+  assertCanonicalCitationPreviewPaths(file);
   const cachePath = citationPreviewCachePath({
     sourceId: file.sourceId,
     fileId: file.fileId,
@@ -154,10 +156,26 @@ export async function readOrRenderCitationPreviewPng(
   return readCitationPreviewPng(cachePath);
 }
 
+export function assertCanonicalCitationPreviewPaths(file: CitationPreviewFile): void {
+  if (resolve(file.storagePath) !== resolve(originalFilePath(file.sourceId, file.fileId))) {
+    throw new CitationPreviewError("source_file_missing");
+  }
+  if (file.artifactsRoot) {
+    const expectedRoot = resolve(artifactsRootPath(file.sourceId, file.fileId));
+    const actualRoot = resolve(file.artifactsRoot);
+    const fromExpected = relative(expectedRoot, actualRoot);
+    if (fromExpected === ".." || fromExpected.startsWith(`..${sep}`) || resolve(expectedRoot, fromExpected) !== actualRoot) {
+      throw new CitationPreviewError("cache_unwritable");
+    }
+  }
+}
+
 export async function renderPdfPageToPng(input: Readonly<{ pdfPath: string; outputPath: string; page: number; renderTimeoutMs?: number }>): Promise<void> {
-  await prepareRender(input.pdfPath, input.outputPath, input.page);
-  const temporaryPrefix = `${input.outputPath}.${randomUUID()}.tmp`;
-  const temporaryPng = `${temporaryPrefix}.png`;
+  const prepared = await prepareRender(input.pdfPath, input.outputPath, input.page);
+  const temporaryName = `.${prepared.outputName}.${randomUUID()}.tmp.png`;
+  const temporaryPrefix = `/proc/self/fd/4/${temporaryName.slice(0, -4)}`;
+  const temporaryPng = `/proc/self/fd/${prepared.outputDirectory.fd}/${temporaryName}`;
+  const finalPng = `/proc/self/fd/${prepared.outputDirectory.fd}/${prepared.outputName}`;
   try {
     await runPdfTool(
       "pdftoppm",
@@ -170,15 +188,18 @@ export async function renderPdfPageToPng(input: Readonly<{ pdfPath: string; outp
         "-scale-to",
         String(PREVIEW_WIDTH_PX),
         "-png",
-        input.pdfPath,
+        "/proc/self/fd/3",
         temporaryPrefix,
       ],
       input.renderTimeoutMs ?? RENDER_TIMEOUT_MS - PDF_INFO_TIMEOUT_MS,
+      [prepared.pdf, prepared.outputDirectory],
     );
-    await validateRenderedPng(temporaryPng);
-    await rename(temporaryPng, input.outputPath);
+    await readPngFromDirectory(prepared.outputDirectory, temporaryName);
+    await rename(temporaryPng, finalPng);
   } finally {
     await unlink(temporaryPng).catch(() => {});
+    await prepared.pdf.close();
+    await prepared.outputDirectory.close();
   }
 }
 
@@ -233,7 +254,7 @@ export async function renderCroppedPdfRegionToPng(input: Readonly<{
   if (![bbox.x1, bbox.y1, bbox.x2, bbox.y2].every(Number.isFinite) || bbox.x1 < 0 || bbox.y1 < 0 || bbox.x1 >= bbox.x2 || bbox.y1 >= bbox.y2) {
     throw new CitationPreviewError("render_failed");
   }
-  await prepareRender(input.pdfPath, input.outputPath, input.page);
+  const prepared = await prepareRender(input.pdfPath, input.outputPath, input.page);
 
   const padding = input.paddingPx ?? 10;
   const scale = CROP_DPI / 72;
@@ -247,8 +268,10 @@ export async function renderCroppedPdfRegionToPng(input: Readonly<{
   const y = Math.max(0, Math.round(rawY));
   const w = Math.min(MAX_CROP_DIMENSION_PX, Math.max(1, Math.round(rawW)));
   const h = Math.min(MAX_CROP_DIMENSION_PX, Math.max(1, Math.round(rawH)));
-  const temporaryPrefix = `${input.outputPath}.${randomUUID()}.tmp`;
-  const temporaryPng = `${temporaryPrefix}.png`;
+  const temporaryName = `.${prepared.outputName}.${randomUUID()}.tmp.png`;
+  const temporaryPrefix = `/proc/self/fd/4/${temporaryName.slice(0, -4)}`;
+  const temporaryPng = `/proc/self/fd/${prepared.outputDirectory.fd}/${temporaryName}`;
+  const finalPng = `/proc/self/fd/${prepared.outputDirectory.fd}/${prepared.outputName}`;
   try {
     await runPdfTool(
       "pdftocairo",
@@ -262,74 +285,147 @@ export async function renderCroppedPdfRegionToPng(input: Readonly<{
         "-W", String(w),
         "-H", String(h),
         "-png",
-        input.pdfPath,
+        "/proc/self/fd/3",
         temporaryPrefix,
       ],
       RENDER_TIMEOUT_MS - PDF_INFO_TIMEOUT_MS,
+      [prepared.pdf, prepared.outputDirectory],
     );
-    await validateRenderedPng(temporaryPng);
-    await rename(temporaryPng, input.outputPath);
+    await readPngFromDirectory(prepared.outputDirectory, temporaryName);
+    await rename(temporaryPng, finalPng);
   } finally {
     await unlink(temporaryPng).catch(() => {});
+    await prepared.pdf.close();
+    await prepared.outputDirectory.close();
   }
 }
 
-async function prepareRender(pdfPath: string, outputPath: string, page: number): Promise<void> {
+async function prepareRender(pdfPath: string, outputPath: string, page: number): Promise<{ pdf: FileHandle; outputDirectory: FileHandle; outputName: string }> {
   if (!Number.isInteger(page) || page < 1 || page > MAX_PREVIEW_PAGE) {
     throw new CitationPreviewError("page_not_found");
   }
+  const pdf = await openConfinedRegularFile(pdfPath, "source_file_missing");
+  let output: ConfinedParent | undefined;
   try {
-    await access(pdfPath, fsConstants.R_OK);
-  } catch {
-    throw new CitationPreviewError("source_file_missing");
+    output = await openConfinedParent(outputPath, "cache_unwritable", true);
+    const result = await runPdfTool("pdfinfo", ["/proc/self/fd/3"], PDF_INFO_TIMEOUT_MS, [pdf]);
+    const pages = /^Pages:\s+(\d+)\s*$/m.exec(result.stdout)?.[1];
+    if (!pages) throw new CitationPreviewError("render_failed");
+    if (page > Number(pages)) throw new CitationPreviewError("page_not_found");
+    return { pdf, outputDirectory: output.directory, outputName: output.name };
+  } catch (error) {
+    await pdf.close();
+    await output?.directory.close();
+    throw error;
   }
-  await mkdir(dirname(outputPath), { recursive: true }).catch(() => {
-    throw new CitationPreviewError("cache_unwritable");
-  });
-  const result = await runPdfTool("pdfinfo", [pdfPath], PDF_INFO_TIMEOUT_MS);
-  const pages = /^Pages:\s+(\d+)\s*$/m.exec(result.stdout)?.[1];
-  if (!pages) throw new CitationPreviewError("render_failed");
-  if (page > Number(pages)) throw new CitationPreviewError("page_not_found");
 }
 
 export async function readCitationPreviewPng(path: string): Promise<Buffer> {
-  const image = await readFile(path);
-  if (image.byteLength > MAX_PREVIEW_BYTES || !isBoundedPng(image)) {
-    await unlink(path).catch(() => {});
-    throw new CitationPreviewError("output_invalid");
-  }
-  return image;
-}
-
-async function validateRenderedPng(path: string): Promise<void> {
-  let size: number;
+  const parent = await openConfinedParent(path, "output_invalid", false);
   try {
-    size = (await stat(path)).size;
-  } catch {
-    throw new CitationPreviewError("render_failed");
-  }
-  if (size < 24 || size > MAX_PREVIEW_BYTES) {
-    throw new CitationPreviewError("output_invalid");
-  }
-  const image = await readFile(path);
-  if (!isBoundedPng(image)) {
-    throw new CitationPreviewError("output_invalid");
+    return await readPngFromDirectory(parent.directory, parent.name);
+  } finally {
+    await parent.directory.close();
   }
 }
 
-function isBoundedPng(image: Buffer): boolean {
-  if (image.byteLength < 24 || !image.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) return false;
-  if (image.subarray(12, 16).toString("ascii") !== "IHDR") return false;
-  const width = image.readUInt32BE(16);
-  const height = image.readUInt32BE(20);
-  return width > 0 && height > 0 && width <= MAX_PREVIEW_DIMENSION_PX && height <= MAX_PREVIEW_DIMENSION_PX;
+async function readPngFromDirectory(directory: FileHandle, name: string): Promise<Buffer> {
+  const descriptorPath = `/proc/self/fd/${directory.fd}/${name}`;
+  let handle: FileHandle | undefined;
+  let identity: { dev: bigint; ino: bigint } | undefined;
+  try {
+    const before = await lstat(descriptorPath, { bigint: true });
+    if (!before.isFile() || before.isSymbolicLink()) throw new CitationPreviewError("output_invalid");
+    handle = await open(descriptorPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const descriptor = await handle.stat({ bigint: true });
+    identity = { dev: descriptor.dev, ino: descriptor.ino };
+    if (!descriptor.isFile() || descriptor.dev !== before.dev || descriptor.ino !== before.ino) {
+      throw new CitationPreviewError("output_invalid");
+    }
+    const size = Number(descriptor.size);
+    if (!Number.isSafeInteger(size) || size < 20 || size > MAX_PREVIEW_BYTES) {
+      throw new CitationPreviewError("output_invalid");
+    }
+    const image = Buffer.allocUnsafe(size);
+    let offset = 0;
+    while (offset < size) {
+      const { bytesRead } = await handle.read(image, offset, size - offset, offset);
+      if (bytesRead === 0) throw new CitationPreviewError("output_invalid");
+      offset += bytesRead;
+    }
+    const extra = Buffer.allocUnsafe(1);
+    const extraRead = await handle.read(extra, 0, 1, size);
+    const after = await handle.stat({ bigint: true });
+    if (extraRead.bytesRead !== 0 || after.dev !== descriptor.dev || after.ino !== descriptor.ino || after.size !== descriptor.size) {
+      throw new CitationPreviewError("output_invalid");
+    }
+    if (!isValidPng(image)) throw new CitationPreviewError("output_invalid");
+    return image;
+  } catch (error) {
+    if (error instanceof CitationPreviewError && identity) await unlinkIfIdentity(descriptorPath, identity);
+    throw error;
+  } finally {
+    await handle?.close();
+  }
 }
 
-async function runPdfTool(command: "pdfinfo" | "pdftoppm" | "pdftocairo", args: readonly string[], timeoutMs: number): Promise<{ stdout: string }> {
+export function isValidCitationPreviewPng(image: Buffer): boolean {
+  return isValidPng(image);
+}
+
+function isValidPng(image: Buffer): boolean {
+  if (image.byteLength < 57 || image.byteLength > MAX_PREVIEW_BYTES || !image.subarray(0, 8).equals(PNG_SIGNATURE)) return false;
+  let offset = 8;
+  let chunks = 0;
+  let ihdr = 0;
+  let idatBytes = 0;
+  let iend = 0;
+  while (offset < image.byteLength) {
+    if (offset + 12 > image.byteLength) return false;
+    const length = image.readUInt32BE(offset);
+    const typeOffset = offset + 4;
+    const dataOffset = typeOffset + 4;
+    const crcOffset = dataOffset + length;
+    const nextOffset = crcOffset + 4;
+    if (length > MAX_PREVIEW_BYTES || nextOffset > image.byteLength) return false;
+    const type = image.subarray(typeOffset, dataOffset).toString("ascii");
+    if (!/^[A-Za-z]{4}$/.test(type) || pngCrc32(image, typeOffset, crcOffset) !== image.readUInt32BE(crcOffset)) return false;
+    chunks += 1;
+    if (type === "IHDR") {
+      ihdr += 1;
+      if (chunks !== 1 || ihdr !== 1 || length !== 13) return false;
+      const width = image.readUInt32BE(dataOffset);
+      const height = image.readUInt32BE(dataOffset + 4);
+      if (width < 1 || height < 1 || width > MAX_PREVIEW_DIMENSION_PX || height > MAX_PREVIEW_DIMENSION_PX) return false;
+    } else if (type === "IDAT") {
+      if (ihdr !== 1 || iend !== 0) return false;
+      idatBytes += length;
+    } else if (type === "IEND") {
+      iend += 1;
+      if (length !== 0 || iend !== 1 || ihdr !== 1 || idatBytes === 0 || nextOffset !== image.byteLength) return false;
+    }
+    offset = nextOffset;
+  }
+  return ihdr === 1 && idatBytes > 0 && iend === 1;
+}
+
+const PNG_CRC_TABLE = Array.from({ length: 256 }, (_, value) => {
+  let crc = value;
+  for (let bit = 0; bit < 8; bit += 1) crc = (crc & 1) === 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  return crc >>> 0;
+});
+
+function pngCrc32(buffer: Buffer, start: number, end: number): number {
+  let crc = 0xffffffff;
+  for (let index = start; index < end; index += 1) crc = PNG_CRC_TABLE[(crc ^ buffer[index]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+async function runPdfTool(command: "pdfinfo" | "pdftoppm" | "pdftocairo", args: readonly string[], timeoutMs: number, inherited: readonly FileHandle[] = []): Promise<{ stdout: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       env: { ...process.env, LC_ALL: "C" },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe", ...inherited.map((handle) => handle.fd)],
     });
     const output: Buffer[] = [];
     let outputBytes = 0;
@@ -352,8 +448,8 @@ async function runPdfTool(command: "pdfinfo" | "pdftoppm" | "pdftocairo", args: 
       }
       output.push(chunk);
     };
-    child.stdout.on("data", collect);
-    child.stderr.on("data", collect);
+    child.stdout!.on("data", collect);
+    child.stderr!.on("data", collect);
     child.once("error", (error: NodeJS.ErrnoException) => {
       finish(new CitationPreviewError(error.code === "ENOENT" ? "renderer_unavailable" : "render_failed"));
     });
@@ -367,6 +463,100 @@ async function runPdfTool(command: "pdfinfo" | "pdftoppm" | "pdftocairo", args: 
       child.kill("SIGKILL");
     }, timeoutMs);
   });
+}
+
+async function openConfinedRegularFile(path: string, code: CitationPreviewErrorCode): Promise<FileHandle> {
+  const parent = await openConfinedParent(path, code, false);
+  const descriptorPath = `/proc/self/fd/${parent.directory.fd}/${parent.name}`;
+  let handle: FileHandle | undefined;
+  try {
+    const before = await lstat(descriptorPath, { bigint: true });
+    if (!before.isFile() || before.isSymbolicLink()) throw new CitationPreviewError(code);
+    handle = await open(descriptorPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const descriptor = await handle.stat({ bigint: true });
+    if (!descriptor.isFile() || descriptor.dev !== before.dev || descriptor.ino !== before.ino) throw new CitationPreviewError(code);
+    return handle;
+  } catch (error) {
+    await handle?.close();
+    if (error instanceof CitationPreviewError) throw error;
+    throw new CitationPreviewError(code);
+  } finally {
+    await parent.directory.close();
+  }
+}
+
+type ConfinedParent = Readonly<{ directory: FileHandle; name: string }>;
+
+async function openConfinedParent(path: string, code: CitationPreviewErrorCode, create: boolean): Promise<ConfinedParent> {
+  if (!path || path !== path.trim() || path.includes("\0")) throw new CitationPreviewError(code);
+  const rawSegments = path.split(/[\\/]/).filter(Boolean);
+  if (rawSegments.some((segment) => segment === "." || segment === ".." || segment.startsWith("-"))) throw new CitationPreviewError(code);
+  const root = await canonicalStorageRoot(code);
+  const absolute = resolve(path);
+  const fromRoot = relative(root, absolute);
+  if (!fromRoot || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || resolve(root, fromRoot) !== absolute) throw new CitationPreviewError(code);
+  const components = fromRoot.split(sep);
+  const name = components.pop();
+  if (!name) throw new CitationPreviewError(code);
+  let directory = await openDirectory(root, code);
+  try {
+    for (const component of components) {
+      const childPath = `/proc/self/fd/${directory.fd}/${component}`;
+      if (create) {
+        try {
+          await mkdir(childPath, { mode: 0o700 });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw new CitationPreviewError(code);
+        }
+      }
+      const child = await openDirectory(childPath, code);
+      await directory.close();
+      directory = child;
+    }
+    if (!create) {
+      const resolved = await realpath(absolute).catch(() => { throw new CitationPreviewError(code); });
+      if (resolved !== absolute) throw new CitationPreviewError(code);
+    }
+    return { directory, name };
+  } catch (error) {
+    await directory.close();
+    throw error instanceof CitationPreviewError ? error : new CitationPreviewError(code);
+  }
+}
+
+async function openDirectory(path: string, code: CitationPreviewErrorCode): Promise<FileHandle> {
+  let directory: FileHandle | undefined;
+  try {
+    const before = await lstat(path, { bigint: true });
+    if (!before.isDirectory() || before.isSymbolicLink()) throw new CitationPreviewError(code);
+    directory = await open(path, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    const descriptor = await directory.stat({ bigint: true });
+    if (!descriptor.isDirectory() || descriptor.dev !== before.dev || descriptor.ino !== before.ino) throw new CitationPreviewError(code);
+    return directory;
+  } catch (error) {
+    await directory?.close();
+    throw error instanceof CitationPreviewError ? error : new CitationPreviewError(code);
+  }
+}
+
+async function canonicalStorageRoot(code: CitationPreviewErrorCode): Promise<string> {
+  const configured = resolve(getStorageRoot());
+  try {
+    const resolved = await realpath(configured);
+    if (resolved !== configured) throw new CitationPreviewError(code);
+    return configured;
+  } catch (error) {
+    throw error instanceof CitationPreviewError ? error : new CitationPreviewError(code);
+  }
+}
+
+async function unlinkIfIdentity(path: string, identity: { dev: bigint; ino: bigint }): Promise<void> {
+  try {
+    const current = await lstat(path, { bigint: true });
+    if (current.dev === identity.dev && current.ino === identity.ino) await unlink(path);
+  } catch {
+    // The invalid cache entry is already absent or was replaced concurrently.
+  }
 }
 
 export function croppedPreviewCachePath(

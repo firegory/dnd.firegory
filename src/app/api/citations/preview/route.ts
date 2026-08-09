@@ -4,6 +4,7 @@ import { getCurrentUser } from "../../../../server/auth/session";
 import type { RetrievalUser } from "../../../../server/access/retrieval-filter";
 import {
   CitationPreviewInputError,
+  assertCanonicalCitationPreviewPaths,
   getAuthorizedCitationPreviewFile,
   parseCitationPreviewRequest,
   parseChunkPreviewRequest,
@@ -18,7 +19,7 @@ import { citationPreviewHttpError, logCitationPreviewError } from "../../../../s
 export async function GET(request: Request): Promise<NextResponse> {
   const user = await getCurrentUser();
   if (!user) {
-    return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+    return jsonResponse({ error: "Authentication required." }, 401);
   }
 
   const retrievalUser: RetrievalUser = { role: user.role, userId: user.id };
@@ -43,7 +44,7 @@ async function handleChunkPreview(
     parsed = parseChunkPreviewRequest(url);
   } catch (error) {
     if (error instanceof CitationPreviewInputError) {
-      return NextResponse.json({ error: error.message }, { status: 400 });
+      return jsonResponse({ error: error.message }, 400);
     }
     throw error;
   }
@@ -51,10 +52,7 @@ async function handleChunkPreview(
   const chunkData = await lookupChunkBbox(user, parsed.chunkId);
   if (!chunkData) {
     if (hasPageFallback(url)) return handlePagePreview(url, user);
-    return NextResponse.json(
-      { error: "Citation preview not found." },
-      { status: 404 },
-    );
+    return jsonResponse({ error: "Citation preview not found." }, 404);
   }
 
   const file = await getAuthorizedCitationPreviewFile(
@@ -62,10 +60,11 @@ async function handleChunkPreview(
     { sourceId: chunkData.sourceId, fileId: chunkData.fileId },
   );
   if (!file) {
-    return NextResponse.json({ error: "Citation preview not found." }, { status: 404 });
+    return jsonResponse({ error: "Citation preview not found." }, 404);
   }
 
   try {
+    assertCanonicalCitationPreviewPaths(file);
     const cachePath = croppedPreviewCachePath({
       sourceId: chunkData.sourceId,
       fileId: chunkData.fileId,
@@ -109,7 +108,7 @@ async function handlePagePreview(
     input = parseCitationPreviewRequest(url);
   } catch (error) {
     if (error instanceof CitationPreviewInputError) {
-      return NextResponse.json({ error: error.message }, { status: 400 });
+      return jsonResponse({ error: error.message }, 400);
     }
     throw error;
   }
@@ -119,7 +118,7 @@ async function handlePagePreview(
     { sourceId: input.sourceId, fileId: input.fileId },
   );
   if (!file) {
-    return NextResponse.json({ error: "Citation preview not found." }, { status: 404 });
+    return jsonResponse({ error: "Citation preview not found." }, 404);
   }
 
   try {
@@ -134,7 +133,7 @@ function imageResponse(image: Buffer): NextResponse {
   return new NextResponse(new Uint8Array(image), {
     headers: {
       "Content-Type": "image/png",
-      "Cache-Control": "private, max-age=86400",
+      ...privateNoStoreHeaders(),
       "X-Content-Type-Options": "nosniff",
     },
   });
@@ -143,5 +142,13 @@ function imageResponse(image: Buffer): NextResponse {
 export function renderErrorResponse(error: unknown, context: Record<string, string | number>): NextResponse {
   logCitationPreviewError(error, context);
   const response = citationPreviewHttpError(error);
-  return NextResponse.json(response.body, { status: response.status });
+  return jsonResponse(response.body, response.status);
+}
+
+function jsonResponse(body: object, status: number): NextResponse {
+  return NextResponse.json(body, { status, headers: privateNoStoreHeaders() });
+}
+
+function privateNoStoreHeaders(): Record<string, string> {
+  return { "Cache-Control": "private, no-store" };
 }

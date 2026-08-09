@@ -124,12 +124,13 @@ test("@user actual spell filters, deep link, citation preview, and print layout 
   const pagePreview = await request.get(pagePreviewUrl);
   expect(pagePreview.status()).toBe(200);
   expect(pagePreview.headers()["content-type"]).toBe("image/png");
-  expect(pagePreview.headers()["cache-control"]).toContain("private");
+  expect(pagePreview.headers()["cache-control"]).toBe("private, no-store");
   expect((await pagePreview.body()).subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
 
   const chunkPreview = await request.get(`/api/citations/preview?chunkId=${IDS.chunks.open}`);
   expect(chunkPreview.status()).toBe(200);
   expect(chunkPreview.headers()["content-type"]).toBe("image/png");
+  expect(chunkPreview.headers()["cache-control"]).toBe("private, no-store");
   expect((await chunkPreview.body()).subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   expect((await request.get(`${pagePreviewUrl.slice(0, -1)}0`)).status()).toBe(400);
   expect((await request.get(`${pagePreviewUrl.slice(0, -1)}2`)).status()).toBe(404);
