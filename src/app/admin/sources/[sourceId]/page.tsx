@@ -13,7 +13,7 @@ import { SourceMetadataEditor } from "./source-metadata-editor";
 const STATUS_STYLES: Record<string, string> = {
   queued: "text-text-muted",
   processing: "text-warning",
-  succeeded: "text-success",
+  succeeded: "text-status-success",
   failed: "text-danger",
   cancelled: "text-text-muted",
 };

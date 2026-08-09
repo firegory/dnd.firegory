@@ -57,7 +57,7 @@ export default async function AdminUsersPage() {
                           name="role"
                           defaultValue={user.role}
                           aria-label={`Role for ${user.email}`}
-                          className="rounded-lg border border-border bg-primary/60 px-3 py-2 text-sm text-text-primary outline-none focus:border-accent focus:ring-2 focus:ring-accent/20"
+                          className="rounded-lg border border-border bg-primary/60 px-3 py-2 text-sm text-text-primary outline-none focus:border-focus focus:ring-2 focus:ring-focus/20"
                         >
                           {USER_ROLES.map((role) => (
                             <option key={role} value={role}>{role}</option>

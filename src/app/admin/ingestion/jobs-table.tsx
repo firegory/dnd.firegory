@@ -21,7 +21,7 @@ type JobRecord = {
 const STATUS_STYLES: Record<string, string> = {
   queued: "bg-surface-light text-text-muted",
   processing: "bg-warning/15 text-warning",
-  succeeded: "bg-success/15 text-success",
+  succeeded: "bg-status-success/15 text-status-success",
   failed: "bg-danger/15 text-danger",
   cancelled: "bg-surface-light text-text-muted",
 };
@@ -234,9 +234,9 @@ function Actions({
     return <span className="text-xs text-text-muted">{formatActionStatus(status, t)}…</span>;
   }
 
-  if (status === "retry-ok") return <span className="text-xs font-semibold text-success">{t("retried")}</span>;
-  if (status === "reprocess-ok") return <span className="text-xs font-semibold text-success">{t("reprocessingDone")}</span>;
-  if (status === "delete-ok") return <span className="text-xs font-semibold text-success">{t("deleted")}</span>;
+  if (status === "retry-ok") return <span className="text-xs font-semibold text-status-success">{t("retried")}</span>;
+  if (status === "reprocess-ok") return <span className="text-xs font-semibold text-status-success">{t("reprocessingDone")}</span>;
+  if (status === "delete-ok") return <span className="text-xs font-semibold text-status-success">{t("deleted")}</span>;
 
   const canRetry = (job.status === "failed" || job.status === "cancelled") && job.sourceId && job.fileId;
   const canReprocess = (job.status === "succeeded" || job.status === "failed") && job.sourceId;

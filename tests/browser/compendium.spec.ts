@@ -5,6 +5,25 @@ import { IDS } from "../qa/postgres.mts";
 test("@anonymous landing redirects and APIs reject without a session", async ({ page, request }) => {
   await page.goto("/en/compendium");
   await expect(page).toHaveURL(/\/login\?next=%2Fen%2Fcompendium/);
+  const email = page.getByLabel("Email");
+  await email.focus();
+  const authPalette = await page.evaluate(() => {
+    const pageRoot = document.querySelector(".app-parchment")!;
+    const button = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    const input = document.querySelector<HTMLInputElement>('#login-email')!;
+    return {
+      page: getComputedStyle(pageRoot).backgroundColor,
+      action: getComputedStyle(button).backgroundColor,
+      actionText: getComputedStyle(button).color,
+      focus: getComputedStyle(input).borderColor,
+    };
+  });
+  expect(authPalette).toEqual({
+    page: "rgb(229, 211, 173)",
+    action: "rgb(138, 49, 45)",
+    actionText: "rgb(255, 247, 223)",
+    focus: "rgb(138, 49, 45)",
+  });
   const response = await request.get("/api/compendium/entries");
   expect(response.status()).toBe(401);
   expect(await response.json()).toEqual({ error: "Authentication required." });
@@ -55,6 +74,21 @@ test("@user mobile drawer performs a real navigation and restores main focus", a
   await page.getByRole("button", { name: "Open navigation" }).click();
   const drawer = page.getByRole("dialog", { name: "Primary navigation" });
   await expect(drawer).toBeVisible();
+  await page.keyboard.press("Tab");
+  await expect(drawer.getByRole("button", { name: "Close navigation" })).toBeFocused();
+  const drawerPalette = await drawer.evaluate((element) => {
+    const close = element.querySelector<HTMLButtonElement>(".close-button")!;
+    return {
+      surface: getComputedStyle(element.querySelector(".mobile-drawer")!).backgroundColor,
+      accent: getComputedStyle(element.querySelector(".brand-lockup strong span")!).color,
+      focus: getComputedStyle(close).outlineColor,
+    };
+  });
+  expect(drawerPalette).toEqual({
+    surface: "rgb(48, 35, 24)",
+    accent: "rgb(217, 138, 128)",
+    focus: "rgb(240, 202, 120)",
+  });
   await drawer.getByRole("link", { name: "Settings" }).click();
   await expect(page).toHaveURL(/\/settings$/);
   await expect(page.locator("#main-content")).toBeFocused();
