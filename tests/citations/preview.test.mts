@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, truncate, writeF
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { deflateSync } from "node:zlib";
 
 import {
   MAX_PREVIEW_PAGE,
@@ -163,6 +164,33 @@ test("cache reads require a complete CRC-valid PNG and remove corrupt entries", 
   }
 });
 
+test("PNG decode validation rejects CRC-valid malformed compressed data and scanlines", () => {
+  const malformed = [
+    syntheticPng({ idat: Buffer.from("not-a-zlib-stream") }),
+    syntheticPng({ scanlines: Buffer.alloc(1024 * 1024) }),
+    syntheticPng({ bitDepth: 16 }),
+    syntheticPng({ colorType: 3 }),
+    syntheticPng({ compression: 1 }),
+    syntheticPng({ filterMethod: 1 }),
+    syntheticPng({ interlace: 1 }),
+    syntheticPng({ scanlines: Buffer.from([0, 0]) }),
+    syntheticPng({ scanlines: Buffer.from([5, 0, 0]) }),
+    syntheticPng({ scanlines: Buffer.from([0, 0, 0, 0]) }),
+    Buffer.concat([syntheticPng(), pngChunk("tEXt", Buffer.from("trailing"))]),
+    pngWithSeparatedIdatChunks(),
+  ];
+  for (const image of malformed) assert.equal(isValidCitationPreviewPng(image), false);
+});
+
+test("PNG decode validation accepts Poppler-compatible non-interlaced 8-bit color formats", () => {
+  for (const [colorType, channels] of [[0, 1], [2, 3], [4, 2], [6, 4]] as const) {
+    assert.equal(isValidCitationPreviewPng(syntheticPng({
+      colorType,
+      scanlines: Buffer.alloc(1 + channels),
+    })), true);
+  }
+});
+
 test("corrupt canonical cache entries are truncated and rerendered from the canonical source PDF", async () => {
   const fixture = await rendererFixture();
   const originalPath = process.env.PATH;
@@ -175,7 +203,7 @@ test("corrupt canonical cache entries are truncated and rerendered from the cano
     await mkdir(sourceDirectory, { recursive: true });
     await mkdir(dirname(cachePath), { recursive: true });
     await writeFile(join(sourceDirectory, `${fileId}.pdf`), "%PDF-1.4\n");
-    await writeFile(cachePath, validPng.subarray(0, validPng.length - 1));
+    await writeFile(cachePath, syntheticPng({ idat: Buffer.from("crc-valid-but-not-zlib") }));
 
     const image = await readOrRenderCitationPreviewPng({
       sourceId,
@@ -280,4 +308,63 @@ function previewError(code: string): (error: unknown) => boolean {
 function restoreEnvironment(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
+}
+
+function syntheticPng(options: Readonly<{
+  width?: number;
+  height?: number;
+  bitDepth?: number;
+  colorType?: number;
+  compression?: number;
+  filterMethod?: number;
+  interlace?: number;
+  scanlines?: Buffer;
+  idat?: Buffer;
+}> = {}): Buffer {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(options.width ?? 1, 0);
+  ihdr.writeUInt32BE(options.height ?? 1, 4);
+  ihdr[8] = options.bitDepth ?? 8;
+  ihdr[9] = options.colorType ?? 4;
+  ihdr[10] = options.compression ?? 0;
+  ihdr[11] = options.filterMethod ?? 0;
+  ihdr[12] = options.interlace ?? 0;
+  const idat = options.idat ?? deflateSync(options.scanlines ?? Buffer.from([0, 0, 0]));
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", idat),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function pngWithSeparatedIdatChunks(): Buffer {
+  const base = syntheticPng();
+  const ihdrEnd = 8 + 25;
+  const idatLength = base.readUInt32BE(ihdrEnd);
+  const idatEnd = ihdrEnd + idatLength + 12;
+  return Buffer.concat([
+    base.subarray(0, idatEnd),
+    pngChunk("tEXt", Buffer.from("separator")),
+    pngChunk("IDAT", deflateSync(Buffer.from([0, 0, 0]))),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const chunk = Buffer.alloc(data.byteLength + 12);
+  chunk.writeUInt32BE(data.byteLength, 0);
+  chunk.write(type, 4, 4, "ascii");
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(testCrc32(chunk, 4, 8 + data.byteLength), 8 + data.byteLength);
+  return chunk;
+}
+
+function testCrc32(buffer: Buffer, start: number, end: number): number {
+  let crc = 0xffffffff;
+  for (let index = start; index < end; index += 1) {
+    crc ^= buffer[index];
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc & 1) === 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+  }
+  return (crc ^ 0xffffffff) >>> 0;
 }

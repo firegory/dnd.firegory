@@ -94,7 +94,7 @@ function decodePng(image) {
     }
     previous = row;
   }
-  return { width, height, darkPixels };
+  return { width, height, bitDepth, colorType, darkPixels };
 }
 
 function predictor(filter, left, up, upperLeft) {

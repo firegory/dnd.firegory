@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { lstat, mkdir, open, realpath, rename, unlink, type FileHandle } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
+import { inflateSync } from "node:zlib";
 
 import { buildSourceAccessSql } from "../access/access-sql.ts";
 import { buildRetrievalAuthorizationFilter, type RetrievalUser } from "../access/retrieval-filter.ts";
@@ -21,6 +22,7 @@ export const MAX_PREVIEW_PAGE = 5000;
 export const PREVIEW_WIDTH_PX = 1400;
 export const RENDER_TIMEOUT_MS = 30_000;
 export const MAX_PREVIEW_BYTES = 16 * 1024 * 1024;
+export const MAX_PREVIEW_DECOMPRESSED_BYTES = 16 * 1024 * 1024;
 
 const PDF_INFO_TIMEOUT_MS = 5_000;
 const MAX_CROP_DIMENSION_PX = 2000;
@@ -380,6 +382,11 @@ function isValidPng(image: Buffer): boolean {
   let ihdr = 0;
   let idatBytes = 0;
   let iend = 0;
+  let expectedScanlineBytes = 0;
+  let rowBytes = 0;
+  let height = 0;
+  let idatEnded = false;
+  const idatChunks: Buffer[] = [];
   while (offset < image.byteLength) {
     if (offset + 12 > image.byteLength) return false;
     const length = image.readUInt32BE(offset);
@@ -395,18 +402,44 @@ function isValidPng(image: Buffer): boolean {
       ihdr += 1;
       if (chunks !== 1 || ihdr !== 1 || length !== 13) return false;
       const width = image.readUInt32BE(dataOffset);
-      const height = image.readUInt32BE(dataOffset + 4);
+      height = image.readUInt32BE(dataOffset + 4);
       if (width < 1 || height < 1 || width > MAX_PREVIEW_DIMENSION_PX || height > MAX_PREVIEW_DIMENSION_PX) return false;
+      const bitDepth = image[dataOffset + 8];
+      const colorType = image[dataOffset + 9];
+      const compression = image[dataOffset + 10];
+      const filter = image[dataOffset + 11];
+      const interlace = image[dataOffset + 12];
+      const channels = colorType === 0 ? 1 : colorType === 2 ? 3 : colorType === 4 ? 2 : colorType === 6 ? 4 : 0;
+      if (bitDepth !== 8 || channels === 0 || compression !== 0 || filter !== 0 || interlace !== 0) return false;
+      const rowBits = width * channels * bitDepth;
+      if (!Number.isSafeInteger(rowBits)) return false;
+      rowBytes = Math.ceil(rowBits / 8);
+      expectedScanlineBytes = (rowBytes + 1) * height;
+      if (!Number.isSafeInteger(expectedScanlineBytes) || expectedScanlineBytes > MAX_PREVIEW_DECOMPRESSED_BYTES) return false;
     } else if (type === "IDAT") {
-      if (ihdr !== 1 || iend !== 0) return false;
+      if (ihdr !== 1 || iend !== 0 || idatEnded) return false;
       idatBytes += length;
+      if (idatBytes > MAX_PREVIEW_BYTES) return false;
+      idatChunks.push(image.subarray(dataOffset, crcOffset));
     } else if (type === "IEND") {
       iend += 1;
       if (length !== 0 || iend !== 1 || ihdr !== 1 || idatBytes === 0 || nextOffset !== image.byteLength) return false;
+    } else if (idatBytes > 0) {
+      idatEnded = true;
     }
     offset = nextOffset;
   }
-  return ihdr === 1 && idatBytes > 0 && iend === 1;
+  if (ihdr !== 1 || idatBytes === 0 || iend !== 1 || expectedScanlineBytes === 0) return false;
+  try {
+    const scanlines = inflateSync(Buffer.concat(idatChunks, idatBytes), { maxOutputLength: expectedScanlineBytes });
+    if (scanlines.byteLength !== expectedScanlineBytes) return false;
+    for (let row = 0; row < height; row += 1) {
+      if (scanlines[row * (rowBytes + 1)] > 4) return false;
+    }
+  } catch {
+    return false;
+  }
+  return true;
 }
 
 const PNG_CRC_TABLE = Array.from({ length: 256 }, (_, value) => {
