@@ -5,17 +5,6 @@ export type UploadSourceFormState = Readonly<{
   language: string;
   accessTier: string;
   canonicalSourceId: string;
-  publicationCode: string;
-  publicationTitle: string;
-  publisher: string;
-  releaseYear: string;
-  revision: string;
-  originUrl: string;
-  originId: string;
-  attribution: string;
-  sourcePriority: string;
-  canonicalBookId: string;
-  license: string;
 }>;
 
 export function createUploadSourceFormState(
@@ -28,17 +17,6 @@ export function createUploadSourceFormState(
     language: defaults.language ?? "ru",
     accessTier: "open",
     canonicalSourceId: "",
-    publicationCode: "",
-    publicationTitle: "",
-    publisher: "",
-    releaseYear: "",
-    revision: "",
-    originUrl: "",
-    originId: "",
-    attribution: "",
-    sourcePriority: "0",
-    canonicalBookId: "",
-    license: "",
   };
 }
 
