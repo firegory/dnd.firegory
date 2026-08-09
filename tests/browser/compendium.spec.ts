@@ -29,13 +29,49 @@ test("@anonymous landing redirects and APIs reject without a session", async ({ 
   expect(await response.json()).toEqual({ error: "Authentication required." });
 });
 
+test("@anonymous register uses the parchment action and focus palette", async ({ page }) => {
+  await page.goto("/en/compendium");
+  await page.getByRole("link", { name: "Register" }).click();
+  await expect(page).toHaveURL(/\/register\?/);
+  await page.getByLabel("Display name").focus();
+  const registerPalette = await page.evaluate(() => {
+    const pageRoot = document.querySelector(".app-parchment")!;
+    const button = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    const input = document.querySelector<HTMLInputElement>("#reg-display-name")!;
+    return {
+      page: getComputedStyle(pageRoot).backgroundColor,
+      action: getComputedStyle(button).backgroundColor,
+      actionText: getComputedStyle(button).color,
+      focus: getComputedStyle(input).borderColor,
+    };
+  });
+  expect(registerPalette).toEqual({
+    page: "rgb(229, 211, 173)",
+    action: "rgb(138, 49, 45)",
+    actionText: "rgb(255, 247, 223)",
+    focus: "rgb(138, 49, 45)",
+  });
+});
+
 test("@user actual spell filters, deep link, citation preview, and print layout work", async ({ page, request }) => {
   await page.goto("/en/compendium");
   await expect(page.getByRole("heading", { name: "Adventurer's compendium" })).toBeVisible();
+  const desktopPalette = await page.evaluate(() => ({
+    surface: getComputedStyle(document.querySelector(".sidebar-panel")!).backgroundColor,
+    accent: getComputedStyle(document.querySelector(".desktop-sidebar .brand-lockup strong span")!).color,
+  }));
+  expect(desktopPalette).toEqual({ surface: "rgb(48, 35, 24)", accent: "rgb(217, 138, 128)" });
   await page.locator('.category-tile[href="/en/compendium/categories/spell"]').click();
   await expect(page).toHaveURL(/\/en\/compendium\/categories\/spell/);
   await page.getByRole("link", { name: "QA Spell 1" }).click();
   await expect(page.getByRole("heading", { name: "QA Spell 1" })).toBeVisible();
+
+  await page.goto("/search");
+  const searchPalette = await page.getByRole("button", { name: "Search" }).evaluate((button) => ({
+    action: getComputedStyle(button).backgroundColor,
+    actionText: getComputedStyle(button).color,
+  }));
+  expect(searchPalette).toEqual({ action: "rgb(138, 49, 45)", actionText: "rgb(229, 211, 173)" });
 
   await page.goto("/spells");
   await page.getByLabel("Name or alias").fill("QA Spell 1");
@@ -61,8 +97,18 @@ test("@user actual spell filters, deep link, citation preview, and print layout 
     padding: getComputedStyle(document.querySelector(".app-content")!).padding,
     breakInside: getComputedStyle(document.querySelector(".spell-citations blockquote")!).breakInside,
     overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    pageBackground: getComputedStyle(document.querySelector(".app-content")!).backgroundColor,
+    pageText: getComputedStyle(document.querySelector(".app-content")!).color,
   }));
-  expect(printLayout).toEqual({ sidebar: "none", back: "none", padding: "0px", breakInside: "avoid", overflow: 0 });
+  expect(printLayout).toEqual({
+    sidebar: "none",
+    back: "none",
+    padding: "0px",
+    breakInside: "avoid",
+    overflow: 0,
+    pageBackground: "rgb(255, 255, 255)",
+    pageText: "rgb(17, 17, 17)",
+  });
 
   expect((await request.get("/api/admin/compendium/entries")).status()).toBe(403);
   expect((await request.get(`/api/admin/compendium/import-runs/${IDS.browserImportRun}`)).status()).toBe(403);
@@ -128,6 +174,20 @@ test("@admin editor saves a real immutable revision", async ({ page }) => {
 test("@admin review rejection persists a real state transition", async ({ page, request }) => {
   await page.goto(`/admin/compendium/imports/${IDS.browserImportRun}`);
   await expect(page.getByRole("heading", { name: "Open 2024 Rules" })).toBeVisible();
+  const runStatus = page.locator("header").getByText("succeeded", { exact: true });
+  const approve = page.locator(".sticky").getByRole("button", { name: "Approve" });
+  const adminPalette = {
+    status: await runStatus.evaluate((element) => getComputedStyle(element).color),
+    ...await approve.evaluate((element) => ({
+      action: getComputedStyle(element).backgroundColor,
+      actionText: getComputedStyle(element).color,
+    })),
+  };
+  expect(adminPalette).toEqual({
+    status: "rgb(45, 89, 56)",
+    action: "rgb(138, 49, 45)",
+    actionText: "rgb(255, 247, 223)",
+  });
   const card = page.locator("article").filter({ has: page.getByRole("heading", { name: "qa-review-spell" }) });
   await expect(card).toBeVisible();
   page.on("dialog", (dialog) => dialog.accept());
