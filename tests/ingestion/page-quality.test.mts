@@ -68,6 +68,10 @@ P(A|B) = P(B|A) * P(A) / P(B)
 y = 3*x^4 - 2*x^2 + 7*x - 11
 `;
   assert.equal(assessPageTextQuality(9, equations, "ru").status, "good");
+  for (const equation of ["1+2=3", "2 * 3 = 6", "x^2 + 2*x + 1 = 0", "2^3^2 = 512", "2 ** 3 = 8", "f(x)=(x+1)^2"]) {
+    const quality = assessPageTextQuality(9, equation, "ru");
+    assert.equal(quality.metrics.structuredContent, true, equation);
+  }
 });
 
 test("accepts coherent matrices and numeric CSV tables", () => {
@@ -86,6 +90,17 @@ round,attack,damage,save
 `;
   assert.equal(assessPageTextQuality(10, matrix, "ru").status, "good");
   assert.equal(assessPageTextQuality(11, csv, "ru").status, "good");
+  for (const structured of [
+    "[[1,2],[3,4]]",
+    "[[1 2],[3 4]]",
+    "[1,2;3,4]",
+    "[1 2;3 4]",
+    "1,2,3,4",
+    "1 2 3 4",
+    "round,damage,save\n1,12.5,15\n2,8,17",
+  ]) {
+    assert.equal(assessPageTextQuality(11, structured, "ru").metrics.structuredContent, true, structured);
+  }
   assert.deepEqual(findPageQualityFailures({
     initiallyCorruptPages: new Set([10]),
     finalQuality: [assessPageTextQuality(10, matrix, "ru")],
@@ -97,6 +112,18 @@ round,attack,damage,save
 test("does not mistake adversarial operator noise for structured math", () => {
   const garbage = `${">=<=1234567890".repeat(25)}\n${"[[[=><=09876".repeat(25)}\n${"1,2,>=<=,[[[".repeat(25)}`;
   assert.equal(assessPageTextQuality(12, garbage, "ru").status, "corrupt");
+  for (const invalid of [
+    "123 >= <= 456",
+    "1 + * 2 = 3",
+    "1 < 2 < 3",
+    "1 + 2 = = 3",
+    "[[1,2],[3,4]",
+    "1,2,>=<=,4",
+  ]) {
+    assert.equal(assessPageTextQuality(12, invalid, "ru").metrics.structuredContent, false, invalid);
+    assert.equal(assessPageTextQuality(12, `${invalid} `.repeat(30), "ru").status, "corrupt", invalid);
+  }
+  assert.equal(assessPageTextQuality(12, corruptFixture, "ru").metrics.structuredContent, false);
 });
 
 test("fails closed when forced OCR is unavailable or remains corrupt", () => {

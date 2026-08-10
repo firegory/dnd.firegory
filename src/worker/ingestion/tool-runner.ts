@@ -98,7 +98,7 @@ export async function runMonitoredTool(
             || limitSizes.some((monitor) => monitor.size > monitor.maxBytes)) {
             fail(new ToolExecutionError("output-limit"));
           }
-        } catch (error) {
+        } catch {
           fail(new ToolExecutionError("output-limit"));
         } finally {
           polling = false;
