@@ -85,6 +85,31 @@ test("accepts complete compact equation sequences separated by whitespace", () =
   }
 });
 
+test("accepts independently parsed compact groups with unary relation sides", () => {
+  for (const equations of [
+    "1+2=3 -2*3=-6 -4+1=-3",
+    "f(-2)=(-2)^2 g(+3)=(+3)^2 h(-(2+1))=-3",
+    "(-2)^3=-8 +(2+3)=+5 -(4-1)=-3",
+    "1+2=3 -2*3=-6 -4+1=-3 ".repeat(10).trim(),
+  ]) {
+    assert.equal(assessPageTextQuality(9, equations, "ru").metrics.structuredContent, true, equations);
+  }
+});
+
+test("rejects ambiguous subtraction and malformed unary compact groups", () => {
+  for (const invalid of [
+    "1+2=3 - 2*3=-6",
+    "1+2=3 -2*3 = -6",
+    "1+2=3 --2*3=-6",
+    "1+2=3 -2*3=-6-4+1=-3",
+    "1+2=3 -2*3>=<=-6",
+    "f(-2)=4 g(+)=3",
+  ]) {
+    assert.equal(assessPageTextQuality(9, invalid, "ru").metrics.structuredContent, false, invalid);
+    assert.equal(assessPageTextQuality(9, `${invalid} `.repeat(20), "ru").status, "corrupt", invalid);
+  }
+});
+
 test("rejects near-valid compact equation chains without independent relations", () => {
   for (const invalid of [
     "1+2=3 2*3=6 3^2 >= <= 9",

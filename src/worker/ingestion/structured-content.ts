@@ -26,8 +26,23 @@ function isEquationDocument(lines: readonly string[]): boolean {
 function isEquation(line: string): boolean {
   const tokens = tokenize(line);
   if (!tokens) return false;
+  if (isCompactRelationGroupSequence(line, tokens.length)) return true;
   const parser = new ExpressionParser(tokens);
   return parser.parseRelationSequence();
+}
+
+function isCompactRelationGroupSequence(line: string, totalTokens: number): boolean {
+  const groups = line.split(/\s+/u).filter(Boolean);
+  if (groups.length < 2) return false;
+  let consumedTokens = 0;
+  for (const group of groups) {
+    const tokens = tokenize(group);
+    if (!tokens || tokens.length === 0) return false;
+    consumedTokens += tokens.length;
+    if (consumedTokens > MAX_EXPRESSION_TOKENS) return false;
+    if (!new ExpressionParser(tokens).parseSingleRelation()) return false;
+  }
+  return consumedTokens === totalTokens;
 }
 
 function isMatrix(text: string, lines: readonly string[]): boolean {
@@ -151,6 +166,12 @@ class ExpressionParser {
       if (next.start <= previous.end) return false;
     }
     return false;
+  }
+
+  parseSingleRelation(): boolean {
+    if (!this.parseExpression()) return false;
+    if (!this.takeOperator(["=", "<", ">", "<=", ">="])) return false;
+    return this.parseExpression() && this.index === this.tokens.length;
   }
 
   parseArithmeticOnly(): boolean {
