@@ -23,6 +23,13 @@ export const IDS = {
     otherPersonal: "20000000-0000-4000-8000-000000000004",
     legacyEdition: "20000000-0000-4000-8000-000000000005",
   },
+  files: {
+    open: "30000000-0000-4000-8000-000000000001",
+    personal: "30000000-0000-4000-8000-000000000003",
+  },
+  chunks: {
+    open: "62000000-0000-4000-8000-000000000001",
+  },
   browserImportRun: "70000000-0000-4000-8000-000000000001",
 } as const;
 
@@ -222,8 +229,8 @@ export async function seedAccessFixture(database: Pool | PoolClient, options: Re
         [documentId, id, fileId, generationId, title, `Indexed document for ${title}`],
       );
       await client.query(
-        `INSERT INTO chunks(id,source_id,file_id,generation_id,chunk_index,text,quote_text,section_heading,page_number)
-         VALUES ($1,$2,$3,$4,0,$5,$5,'QA evidence',1)`,
+        `INSERT INTO chunks(id,source_id,file_id,generation_id,chunk_index,text,quote_text,section_heading,page_number,bbox)
+         VALUES ($1,$2,$3,$4,0,$5,$5,'QA evidence',1,'{"x1":35,"y1":120,"x2":190,"y2":180}'::jsonb)`,
         [chunkId, id, fileId, generationId, `Evidence quote for ${title}`],
       );
       await client.query("INSERT INTO compendium_entries(id,canonical_key,entry_type,edition) VALUES ($1,$2,'spell',$3)", [entryId, `qa-spell-${suffix}`, edition]);
