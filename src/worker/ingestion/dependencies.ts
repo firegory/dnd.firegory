@@ -1,6 +1,12 @@
 import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { delimiter, join } from "node:path";
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
+
+import { PDF_TOOL_TIMEOUT_MS, TOOL_STDIO_MAX_BYTES } from "../../server/ingestion/limits.ts";
+
+const execFile = promisify(execFileCb);
 
 export type PdfToolDependency = Readonly<{
   command: string;
@@ -11,6 +17,13 @@ export type PdfToolDependency = Readonly<{
 
 export type PdfDependencyStatus = PdfToolDependency & Readonly<{
   available: boolean;
+}>;
+
+export type TesseractLanguageStatus = Readonly<{
+  available: boolean;
+  languages: readonly string[];
+  missing: readonly ("eng" | "rus")[];
+  error: string | null;
 }>;
 
 export const PDF_TOOL_DEPENDENCIES: readonly PdfToolDependency[] = [
@@ -74,12 +87,55 @@ export async function isCommandAvailable(command: string): Promise<boolean> {
 }
 
 export async function checkPdfToolDependencies(): Promise<readonly PdfDependencyStatus[]> {
-  return Promise.all(
+  const commands = await Promise.all(
     PDF_TOOL_DEPENDENCIES.map(async (dependency) => ({
       ...dependency,
       available: await isCommandAvailable(dependency.command),
     })),
   );
+  const languageStatus = await checkTesseractLanguages();
+  return [
+    ...commands,
+    ...(["eng", "rus"] as const).map((language) => ({
+      command: `tesseract:${language}`,
+      packageName: `tesseract-ocr-${language}`,
+      purpose: `${language} OCR language data`,
+      required: false,
+      available: languageStatus.languages.includes(language),
+    })),
+  ];
+}
+
+export function parseTesseractLanguages(stdout: string): readonly string[] {
+  return stdout.split(/\r?\n/u).map((line) => line.trim()).filter((line) => /^[a-z][a-z0-9_]+$/iu.test(line));
+}
+
+export async function checkTesseractLanguages(overrides: Readonly<{
+  commandAvailable?: typeof isCommandAvailable;
+  run?: typeof execFile;
+}> = {}): Promise<TesseractLanguageStatus> {
+  const commandAvailable = overrides.commandAvailable ?? isCommandAvailable;
+  const run = overrides.run ?? execFile;
+  if (!(await commandAvailable("tesseract"))) {
+    return { available: false, languages: [], missing: ["eng", "rus"], error: "Tesseract executable is unavailable" };
+  }
+  try {
+    const { stdout } = await run("tesseract", ["--list-langs"], {
+      timeout: PDF_TOOL_TIMEOUT_MS,
+      maxBuffer: TOOL_STDIO_MAX_BYTES,
+      killSignal: "SIGKILL",
+    });
+    const languages = parseTesseractLanguages(stdout);
+    const missing = (["eng", "rus"] as const).filter((language) => !languages.includes(language));
+    return {
+      available: missing.length === 0,
+      languages,
+      missing,
+      error: missing.length > 0 ? `Missing Tesseract language data: ${missing.join(", ")}` : null,
+    };
+  } catch {
+    return { available: false, languages: [], missing: ["eng", "rus"], error: "Tesseract language check failed" };
+  }
 }
 
 export function formatPdfDependencyReport(statuses: readonly PdfDependencyStatus[]): string | null {

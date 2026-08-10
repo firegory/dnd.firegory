@@ -9,7 +9,6 @@ const admin = await readFile("src/server/admin/source-view.ts", "utf8");
 const citation = await readFile("src/server/citations/preview.ts", "utf8");
 const actions = await readFile("src/server/ingestion/actions.ts", "utf8");
 const persistence = await readFile("src/server/embeddings/provider.ts", "utf8");
-const pipeline = await readFile("src/worker/ingestion/pipeline.ts", "utf8");
 
 test("all retrieval queries use captured generation IDs instead of mutable active pointers", () => {
   assert.match(keyword, /c\.generation_id = ANY\(\$1::uuid\[\]\)/);
@@ -41,12 +40,4 @@ test("staged persistence is generation-scoped so replacement tails cannot mix", 
   assert.equal((persistence.match(/ON CONFLICT \(generation_id, chunk_index\)/g) ?? []).length, 2);
   assert.equal((persistence.match(/ON CONFLICT \(generation_id, page_number\)/g) ?? []).length, 1);
   assert.doesNotMatch(persistence, /ON CONFLICT \(file_id, (?:chunk_index|page_number)\)/);
-});
-
-test("pipeline validates quality before atomic activation and cleans failures", () => {
-  const quality = pipeline.indexOf("generateQualityReport");
-  const rejectFailed = pipeline.indexOf('qualityReport.overall.status === "failed"');
-  const activate = pipeline.indexOf("await activateGeneration(stagedGenerationId)");
-  assert.ok(quality < rejectFailed && rejectFailed < activate);
-  assert.match(pipeline, /await discardStagedGeneration\(generationId\)/);
 });

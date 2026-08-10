@@ -5,6 +5,7 @@
 
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 
 export function getStorageRoot(): string {
   const root = process.env.STORAGE_ROOT || "./storage";
@@ -32,4 +33,10 @@ export function artifactsRootPath(sourceId: string, fileId: string): string {
  */
 export function computeChecksum(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
+}
+
+export async function computeFileChecksum(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
 }

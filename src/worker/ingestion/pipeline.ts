@@ -5,16 +5,23 @@
  * Integrates with the ingestion job lifecycle from issue #7.
  */
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { normalizePdf, isValidPdf } from "./pdf-normalize.ts";
+import { normalizePdf } from "./pdf-normalize.ts";
 import {
   extractTextFromPdf,
   saveExtractionResults,
 } from "./pdf-extract.ts";
-import { ocrPdf, readOcrSidecar, isOcrAvailable } from "./pdf-ocr.ts";
 import { chunkPages } from "./chunking.ts";
+import {
+  assertBoundedFile,
+  createImmutablePdfSnapshot,
+  type ImmutablePdfSnapshot,
+  writeJsonLinesBounded,
+} from "./file-safety.ts";
+import { MAX_CHUNKS_JSONL_BYTES, MAX_PDF_INPUT_BYTES } from "../../server/ingestion/limits.ts";
+import { recoverPdfText } from "./text-recovery.ts";
 import { extractPageBboxes, computeChunkBboxes, type ChunkBbox } from "./bbox.ts";
 import {
   generateEmbeddings,
@@ -33,6 +40,7 @@ import {
   markJobFailed,
   updateJobProgress,
   getIngestionJob,
+  getSourceLanguage,
 } from "../../server/ingestion/storage.ts";
 import { artifactsRootPath } from "../../server/ingestion/paths.ts";
 import {
@@ -55,6 +63,38 @@ export type PipelineResult = Readonly<{
   pagesPersisted: number;
 }>;
 
+const pipelineDefaults = {
+  artifactsRootPath,
+  getIngestionJob,
+  markJobProcessing,
+  cleanupStaleGenerations,
+  createStagedGeneration,
+  resetStagedGeneration,
+  updateJobProgress,
+  createImmutablePdfSnapshot,
+  normalizePdf,
+  assertBoundedFile,
+  extractTextFromPdf,
+  getSourceLanguage,
+  recoverPdfText,
+  saveExtractionResults,
+  chunkPages,
+  extractPageBboxes,
+  computeChunkBboxes,
+  getIngestionEmbeddingConfig,
+  generateEmbeddings,
+  persistPages,
+  persistChunksWithEmbeddings,
+  persistChunksWithoutEmbeddings,
+  generateQualityReport,
+  saveQualityReport,
+  activateGeneration,
+  discardStagedGeneration,
+  markJobFailed,
+};
+
+export type PipelineDependencies = typeof pipelineDefaults;
+
 /**
  * Runs the full ingestion pipeline for a given job.
  *
@@ -68,26 +108,29 @@ export async function runPipeline(input: {
   sourceId: string;
   fileId: string;
   originalPdfPath: string;
-}): Promise<PipelineResult> {
+}, overrides: Partial<PipelineDependencies> = {}): Promise<PipelineResult> {
+  const dependencies = { ...pipelineDefaults, ...overrides };
   const { jobId, sourceId, fileId, originalPdfPath } = input;
-  const artifactsRoot = artifactsRootPath(sourceId, fileId);
+  const artifactsRoot = dependencies.artifactsRootPath(sourceId, fileId);
   let generationId: string | null = null;
+  let originalSnapshot: ImmutablePdfSnapshot | null = null;
+  let toolSnapshot: ImmutablePdfSnapshot | null = null;
   const jobArtifactsDir = join(artifactsRoot, jobId);
 
   // Verify job exists and is in correct state
-  const job = await getIngestionJob(jobId);
+  const job = await dependencies.getIngestionJob(jobId);
   if (!job) {
     throw new Error(`Job ${jobId} not found`);
   }
 
   // Mark as processing
-  if (!await markJobProcessing(jobId)) {
+  if (!await dependencies.markJobProcessing(jobId)) {
     throw new Error(`Job ${jobId} was already claimed or is no longer queued`);
   }
 
   try {
-    await cleanupStaleGenerations(fileId, jobId);
-    const generation = await createStagedGeneration({
+    await dependencies.cleanupStaleGenerations(fileId, jobId);
+    const generation = await dependencies.createStagedGeneration({
       sourceId,
       fileId,
       jobId,
@@ -95,96 +138,64 @@ export async function runPipeline(input: {
     });
     const stagedGenerationId = generation.id;
     generationId = stagedGenerationId;
-    await resetStagedGeneration(stagedGenerationId, jobId);
+    await dependencies.resetStagedGeneration(stagedGenerationId, jobId);
 
     // === Stage 1: Validate PDF ===
-    await updateJobProgress(jobId, 5);
+    await dependencies.updateJobProgress(jobId, 5);
 
-    const { readFile: readPdfFile } = await import("node:fs/promises");
-    const pdfData = await readPdfFile(originalPdfPath);
-
-    if (!isValidPdf(pdfData)) {
-      throw new Error("File is not a valid PDF (missing %PDF- header)");
-    }
+    originalSnapshot = await dependencies.createImmutablePdfSnapshot(originalPdfPath);
 
     // === Stage 2: Normalize PDF ===
-    await updateJobProgress(jobId, 10);
+    await dependencies.updateJobProgress(jobId, 10);
 
     const normalizeDir = join(jobArtifactsDir, "normalize");
-    const normalizeResult = await normalizePdf(originalPdfPath, normalizeDir);
+    const normalizeResult = await dependencies.normalizePdf(originalSnapshot.path, normalizeDir);
+    await dependencies.assertBoundedFile(normalizeResult.normalizedPath, MAX_PDF_INPUT_BYTES, "Normalized PDF");
+    toolSnapshot = await dependencies.createImmutablePdfSnapshot(normalizeResult.normalizedPath);
 
     // === Stage 3: Extract text ===
-    await updateJobProgress(jobId, 20);
+    await dependencies.updateJobProgress(jobId, 20);
 
     const extractDir = join(jobArtifactsDir, "extract");
-    let extractionResult = await extractTextFromPdf(
-      normalizeResult.normalizedPath,
+    const initialExtraction = await dependencies.extractTextFromPdf(
+      toolSnapshot.path,
       extractDir,
     );
+    const sourceLanguage = await dependencies.getSourceLanguage(sourceId);
 
     // === Stage 4: OCR fallback ===
-    await updateJobProgress(jobId, 35);
+    await dependencies.updateJobProgress(jobId, 35);
 
     const ocrDir = join(jobArtifactsDir, "ocr");
-    let ocrAvailable = false;
-    let ocrPagesOcred = 0;
-    let ocrErrors: string[] = [];
+    const recovery = await dependencies.recoverPdfText({
+      pdfPath: toolSnapshot.path,
+      ocrDir,
+      extraction: initialExtraction,
+      language: sourceLanguage,
+    });
+    const extractionResult = recovery.extraction;
 
-    try {
-      ocrAvailable = await isOcrAvailable();
-    } catch {
-      ocrAvailable = false;
-    }
-
-    const pagesNeedingOcr = extractionResult.pages
-      .filter((p) => p.isOcrCandidate)
-      .map((p) => p.pageNumber);
-
-    if (pagesNeedingOcr.length > 0 && ocrAvailable) {
-      const ocrResult = await ocrPdf(
-        normalizeResult.normalizedPath,
-        pagesNeedingOcr,
-        ocrDir,
-      );
-
-      ocrPagesOcred = ocrResult.ocredPages;
-      ocrErrors = [...ocrResult.errors];
-
-      // If OCR produced a new PDF, re-extract text from OCR'd pages
-      if (ocrResult.ocrPdfPath) {
-        const sidecarPath = join(ocrDir, "ocr-sidecar.txt");
-        const ocrTexts = await readOcrSidecar(sidecarPath);
-
-        // Merge OCR text back into extraction results
-        const mergedPages = extractionResult.pages.map((page) => {
-          if (!page.isOcrCandidate) return page;
-
-          const ocrText = ocrTexts[page.pageNumber - 1] ?? "";
-          if (ocrText.trim().length > page.text.trim().length) {
-            return {
-              ...page,
-              text: ocrText,
-              charCount: ocrText.length,
-              isOcrCandidate: false,
-            };
-          }
-          return page;
-        });
-
-        extractionResult = {
-          ...extractionResult,
-          pages: mergedPages,
-          totalChars: mergedPages.reduce((sum, p) => sum + p.charCount, 0),
-          pagesWithText: mergedPages.filter((p) => p.text.trim().length > 0).length,
-          pagesNeedingOcr: mergedPages.filter((p) => p.isOcrCandidate).length,
-        };
-      }
+    await mkdir(jobArtifactsDir, { recursive: true });
+    await writeFile(join(jobArtifactsDir, "page-quality.json"), JSON.stringify({
+      language: sourceLanguage,
+      initial: recovery.initialQuality,
+      final: recovery.finalQuality,
+      requestedPages: recovery.requestedPages,
+      replacedPages: recovery.replacedPages,
+      ocrFailureReason: recovery.ocrFailureReason,
+      failures: recovery.failures,
+    }, null, 2));
+    if (recovery.failures.length > 0) {
+      const details = recovery.failures
+        .map((failure) => `page ${failure.pageNumber}: ${failure.reason}`)
+        .join("; ");
+      throw new Error(`Ingestion page quality validation failed: ${details}`);
     }
 
     // Save extraction results
-    await saveExtractionResults(extractionResult, extractDir);
+    await dependencies.saveExtractionResults(extractionResult, extractDir);
 
-    await updateJobProgress(jobId, 50);
+    await dependencies.updateJobProgress(jobId, 50);
 
     // === Stage 5: Chunking ===
     const chunkInputs = extractionResult.pages.map((page) => ({
@@ -192,13 +203,13 @@ export async function runPipeline(input: {
       text: page.text,
     }));
 
-    const chunks = chunkPages(chunkInputs);
+    const chunks = dependencies.chunkPages(chunkInputs);
 
     // === Stage 5.5: Compute per-chunk bboxes ===
     const chunkBboxes = new Map<number, ChunkBbox>();
     try {
-      const pageBboxes = await extractPageBboxes(
-        normalizeResult.normalizedPath,
+      const pageBboxes = await dependencies.extractPageBboxes(
+        toolSnapshot.path,
         extractionResult.totalPages,
       );
 
@@ -212,7 +223,7 @@ export async function runPipeline(input: {
       for (const [pageNum, pageChunks] of chunksByPage) {
         const pb = pageBboxes.get(pageNum);
         if (!pb) continue;
-        const pageBboxMap = computeChunkBboxes(pb, pageChunks);
+        const pageBboxMap = dependencies.computeChunkBboxes(pb, pageChunks);
         for (const [chunkIdx, bbox] of pageBboxMap) {
           chunkBboxes.set(chunkIdx, bbox);
         }
@@ -224,26 +235,29 @@ export async function runPipeline(input: {
 
     // Save chunks as JSONL
     const chunksJsonlPath = join(jobArtifactsDir, "chunks.jsonl");
-    const chunksJsonl = chunks.map((c) =>
-      JSON.stringify({
-        chunk_index: c.chunkIndex,
-        page_number: c.pageNumber,
-        section_heading: c.sectionHeading,
-        text: c.text,
-        quote_text: c.quoteText,
-        text_span_start: c.textSpanStart,
-        text_span_end: c.textSpanEnd,
-        char_count: c.charCount,
-        bbox: chunkBboxes.get(c.chunkIndex) ?? null,
-      }),
-    ).join("\n");
     await mkdir(jobArtifactsDir, { recursive: true });
-    await writeFile(chunksJsonlPath, chunksJsonl + "\n");
+    await rm(chunksJsonlPath, { force: true });
+    function* chunkRecords() {
+      for (const chunk of chunks) {
+        yield {
+          chunk_index: chunk.chunkIndex,
+          page_number: chunk.pageNumber,
+          section_heading: chunk.sectionHeading,
+          text: chunk.text,
+          quote_text: chunk.quoteText,
+          text_span_start: chunk.textSpanStart,
+          text_span_end: chunk.textSpanEnd,
+          char_count: chunk.charCount,
+          bbox: chunkBboxes.get(chunk.chunkIndex) ?? null,
+        };
+      }
+    }
+    await writeJsonLinesBounded(chunksJsonlPath, chunkRecords(), MAX_CHUNKS_JSONL_BYTES, "Chunks JSONL");
 
-    await updateJobProgress(jobId, 60);
+    await dependencies.updateJobProgress(jobId, 60);
 
     // === Stage 6: Generate embeddings ===
-    const embeddingConfig = getIngestionEmbeddingConfig();
+    const embeddingConfig = dependencies.getIngestionEmbeddingConfig();
     let embeddingsGenerated = 0;
     let embeddingsSkipped = 0;
     const embeddingErrors: string[] = [];
@@ -273,7 +287,7 @@ export async function runPipeline(input: {
     if (canGenerateEmbeddings) {
       try {
         const texts = chunks.map((c) => c.text);
-        const embeddingResults = await generateEmbeddings(texts, embeddingConfig);
+        const embeddingResults = await dependencies.generateEmbeddings(texts, embeddingConfig);
 
         for (let i = 0; i < chunks.length; i++) {
           if (i < embeddingResults.length) {
@@ -312,7 +326,7 @@ export async function runPipeline(input: {
       }
     }
 
-    await updateJobProgress(jobId, 80);
+    await dependencies.updateJobProgress(jobId, 80);
 
     // === Stage 7: Persist to database ===
     // Persist pages
@@ -325,12 +339,12 @@ export async function runPipeline(input: {
       text: page.text,
       sectionHeading: null as string | null,
     }));
-    const pagesPersisted = await persistPages(pagesToPersist);
+    const pagesPersisted = await dependencies.persistPages(pagesToPersist);
 
     // Persist chunks with embeddings
     let chunksPersisted = 0;
     if (chunksWithEmbeddings.length > 0) {
-      chunksPersisted = await persistChunksWithEmbeddings(chunksWithEmbeddings);
+      chunksPersisted = await dependencies.persistChunksWithEmbeddings(chunksWithEmbeddings);
     }
 
     // Persist chunks without embeddings (if embedding failed but we still want chunks for full-text search)
@@ -349,13 +363,13 @@ export async function runPipeline(input: {
         textSpanEnd: c.textSpanEnd,
         bbox: chunkBboxes.get(c.chunkIndex) ?? null,
       }));
-      chunksPersisted = await persistChunksWithoutEmbeddings(chunkInputs);
+      chunksPersisted = await dependencies.persistChunksWithoutEmbeddings(chunkInputs);
     }
 
-    await updateJobProgress(jobId, 90);
+    await dependencies.updateJobProgress(jobId, 90);
 
     // === Stage 8: Quality report ===
-    const qualityReport = generateQualityReport({
+    const qualityReport = dependencies.generateQualityReport({
       sourceId,
       fileId,
       jobId,
@@ -370,9 +384,9 @@ export async function runPipeline(input: {
         totalChars: extractionResult.totalChars,
       },
       ocr: {
-        available: ocrAvailable,
-        pagesOcred: ocrPagesOcred,
-        errors: ocrErrors,
+        available: recovery.ocrAvailable,
+        pagesOcred: recovery.ocrPagesOcred,
+        errors: recovery.ocrErrors,
       },
       chunking: {
         totalChunks: chunks.length,
@@ -386,13 +400,13 @@ export async function runPipeline(input: {
       },
     });
 
-    await saveQualityReport(qualityReport, jobArtifactsDir);
+    await dependencies.saveQualityReport(qualityReport, jobArtifactsDir);
     if (qualityReport.overall.status === "failed") {
       throw new Error(`Ingestion quality validation failed: ${qualityReport.overall.warnings.join("; ")}`);
     }
 
     // === Stage 9: Finalize ===
-    await activateGeneration(stagedGenerationId);
+    await dependencies.activateGeneration(stagedGenerationId);
 
     return {
       jobId,
@@ -405,10 +419,13 @@ export async function runPipeline(input: {
       pagesPersisted,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    let message = error instanceof Error ? error.message : String(error);
+    for (const path of [originalPdfPath, originalSnapshot?.path, toolSnapshot?.path]) {
+      if (path) message = message.replaceAll(path, "<pdf>");
+    }
     if (generationId && !(error instanceof ActivationStateUnknownError)) {
       try {
-        await discardStagedGeneration(generationId);
+        await dependencies.discardStagedGeneration(generationId);
       } catch (cleanupError) {
         console.error(
           `[pipeline] Failed to clean staged generation ${generationId}:`,
@@ -416,7 +433,9 @@ export async function runPipeline(input: {
         );
       }
     }
-    await markJobFailed(jobId, message);
+    await dependencies.markJobFailed(jobId, message);
     throw error;
+  } finally {
+    await Promise.allSettled([toolSnapshot?.cleanup(), originalSnapshot?.cleanup()]);
   }
 }

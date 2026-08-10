@@ -3,20 +3,23 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { markJobProcessing } from "../../src/server/ingestion/storage.ts";
+import { runPipeline } from "../../src/worker/ingestion/pipeline.ts";
 
-const storage = await readFile("src/server/ingestion/storage.ts", "utf8");
-const pipeline = await readFile("src/worker/ingestion/pipeline.ts", "utf8");
 const actions = await readFile("src/server/ingestion/actions.ts", "utf8");
 
-test("job claim is one atomic queued update with RETURNING", () => {
-  const claim = storage.slice(storage.indexOf("export async function markJobProcessing"), storage.indexOf("Marks an ingestion job as succeeded"));
-  assert.match(claim, /UPDATE ingestion_jobs[\s\S]*status = 'processing'[\s\S]*status = 'queued'[\s\S]*RETURNING id/);
-  assert.match(claim, /return result\.rows\.length === 1/);
-  assert.match(pipeline, /if \(!await markJobProcessing\(jobId\)\)/);
-  assert.ok(
-    pipeline.indexOf("markJobProcessing(jobId)")
-      < pipeline.indexOf("const generation = await createStagedGeneration"),
-  );
+test("pipeline stops before staging when its atomic job claim loses", async () => {
+  let staged = false;
+  await assert.rejects(runPipeline({
+    jobId: "job-1", sourceId: "source-1", fileId: "file-1", originalPdfPath: "unused.pdf",
+  }, {
+    getIngestionJob: async () => ({ id: "job-1" } as never),
+    markJobProcessing: async () => false,
+    createStagedGeneration: async () => {
+      staged = true;
+      throw new Error("must not stage");
+    },
+  }), /already claimed/);
+  assert.equal(staged, false);
 });
 
 test("two workers cannot both claim the same queued job", async () => {
