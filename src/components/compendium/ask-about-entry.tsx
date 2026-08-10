@@ -7,6 +7,7 @@ import type { CompendiumEntryScope } from "../../server/retrieval/entity";
 type Citation = Readonly<{
   quote: string;
   sourceTitle: string;
+  chunkId: string;
   page: number | null;
   section: string | null;
   entityEvidence?: readonly Readonly<{ fieldPath: string | null; citationKind: "field" | "block" }>[];
@@ -14,6 +15,7 @@ type Citation = Readonly<{
 
 type AnswerResponse = Readonly<{
   answer: string;
+  claims: readonly Readonly<{ text: string; citations: readonly Citation[] }>[];
   citations: readonly Citation[];
   confident: boolean;
 }>;
@@ -81,10 +83,17 @@ export function AskAboutEntry({
       <div className="entry-question-status" aria-live="polite">
         {error ? <p role="alert">{error}</p> : null}
         {result ? <div>
-          <p>{result.answer}</p>
+          {result.claims.length
+            ? result.claims.map((claim, index) => <p key={`${claim.text}-${index}`}>{claim.text}{" "}{claim.citations.map((citation) => {
+                const citationIndex = result.citations.findIndex((candidate) => candidate.chunkId === citation.chunkId && candidate.quote === citation.quote);
+                return citationIndex >= 0
+                  ? <sup key={`${citation.chunkId}-${citationIndex}`}><a href={`#entry-answer-citation-${citationIndex + 1}`}>[{citationIndex + 1}]</a></sup>
+                  : null;
+              })}</p>)
+            : <p>{result.answer}</p>}
           {result.citations.length ? <details>
             <summary>{copy.citations.replace("{count}", String(result.citations.length))}</summary>
-            <ul>{result.citations.map((citation, index) => <li key={`${citation.sourceTitle}-${index}`}>
+            <ul>{result.citations.map((citation, index) => <li id={`entry-answer-citation-${index + 1}`} key={`${citation.sourceTitle}-${index}`}>
               <blockquote>«{citation.quote}»</blockquote>
               <span>{citation.sourceTitle}{citation.page === null ? "" : ` · ${copy.page} ${citation.page}`}{citation.section ? ` · ${citation.section}` : ""}</span>
               {citation.entityEvidence?.map((evidence, evidenceIndex) => evidence.fieldPath

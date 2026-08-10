@@ -1,456 +1,217 @@
-/**
- * Tests for RAG answer pipeline: prompt construction, citation mapping,
- * and LLM response parsing.
- *
- * generateAnswer itself depends on the full retrieval pipeline (DB + vector),
- * so it's tested through integration/e2e rather than unit tests. Here we
- * test all the pure sub-components.
- */
-
-import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { describe, it } from "node:test";
 
 import {
   buildSystemPrompt,
   buildUserMessage,
   formatRetrievalContext,
   parseLlmResponse,
-  mapCitations,
-  type RawLlmCitation,
+  resolveContextReferences,
 } from "../../src/server/rag/format.ts";
+import { validateClaimSupport } from "../../src/server/rag/support.ts";
 import type { RetrievalCandidate } from "../../src/server/retrieval/types.ts";
 
-// ---------- Helpers ----------
-
-function makeChunk(overrides: Partial<RetrievalCandidate> = {}): RetrievalCandidate {
+function chunk(overrides: Partial<RetrievalCandidate> = {}): RetrievalCandidate {
   return {
-    chunkId: "chunk-1",
-    sourceId: "src-1",
-    fileId: "file-1",
-    text: "A creature can take a reaction on another creature's turn.",
-    quoteText: "A creature can take a reaction on another creature's turn.",
-    sectionHeading: "Reactions",
-    pageNumber: 73,
-    edition: "5e",
-    language: "en",
-    sourceTitle: "Basic Rules",
-    sourceCategory: "core_rules",
-    accessTier: "open",
-    score: 0.95,
-    strategy: "keyword",
+    chunkId: "chunk-secret", sourceId: "source-secret", fileId: "file-secret",
+    text: "Lemure. Armor Class 7. Hit Points 13. Speed 15 ft.",
+    quoteText: "Lemure. Armor Class 7. Hit Points 13. Speed 15 ft.",
+    sectionHeading: "Lemure", pageNumber: 42, edition: "5e", language: "en",
+    sourceTitle: "Open Rules", sourceCategory: "core_rules", accessTier: "premium",
+    score: 1, strategy: "entity",
+    entityEvidence: [{
+      entryId: "entry-secret", entryType: "monster", canonicalKey: "lemure", title: "Lemure",
+      citationId: "citation-secret", citationKind: "block", fieldPath: null, quote: "Armor Class 7",
+    }],
     ...overrides,
   };
 }
 
-// ---------- buildSystemPrompt ----------
-
-describe("buildSystemPrompt", () => {
-  it("includes English instruction for en language", () => {
-    const prompt = buildSystemPrompt("en");
-    assert.ok(prompt.includes("Respond in English"));
+describe("ID-only provider contract", () => {
+  it("prompts for direct RU/EN claims and context IDs only", () => {
+    const en = buildSystemPrompt("en");
+    const ru = buildSystemPrompt("ru");
+    assert.match(en, /Write every claim in English/);
+    assert.match(ru, /русском языке/);
+    assert.match(en, /"references": \["C1"\]/);
+    assert.match(en, /Never return quotes, source metadata, locations/);
+    assert.doesNotMatch(en, /"citations"/);
   });
 
-  it("includes Russian instruction for ru language", () => {
-    const prompt = buildSystemPrompt("ru");
-    assert.ok(prompt.includes("русском"));
+  it("does not send RBAC or entity internals to the model", () => {
+    const context = formatRetrievalContext([chunk()]);
+    assert.match(context, /"contextId": "C1"/);
+    assert.doesNotMatch(context, /premium|source-secret|file-secret|entry-secret|citation-secret|accessTier|entityEvidence/);
+    assert.doesNotMatch(buildUserMessage("Question", [chunk()]), /role|owner|generationId/);
   });
 
-  it("includes JSON structure requirement", () => {
-    const prompt = buildSystemPrompt("en");
-    assert.ok(prompt.includes('"answer"'));
-    assert.ok(prompt.includes('"citations"'));
-    assert.ok(prompt.includes('"confident"'));
-  });
-
-  it("includes 'no outside knowledge' rule", () => {
-    const prompt = buildSystemPrompt("en");
-    assert.ok(
-      prompt.includes("ONLY from the provided source") ||
-        prompt.includes("only from the provided source"),
-    );
-  });
-
-  it("includes 'no support' fallback instruction", () => {
-    const prompt = buildSystemPrompt("en");
-    assert.ok(
-      prompt.includes("cannot answer") ||
-        prompt.includes("not find") ||
-        prompt.includes("could not find"),
-    );
-  });
-});
-
-// ---------- formatRetrievalContext ----------
-
-describe("formatRetrievalContext", () => {
-  it("returns no-sources message for empty chunks", () => {
-    const result = formatRetrievalContext([]);
-    assert.equal(result, "No relevant sources found.");
-  });
-
-  it("formats a single chunk with all fields", () => {
-    const chunk = makeChunk();
-    const result = formatRetrievalContext([chunk]);
-    assert.ok(result.includes("[Source 1]"));
-    assert.ok(result.includes("Title: Basic Rules"));
-    assert.ok(result.includes("Edition: 5e"));
-    assert.ok(result.includes("Page: 73"));
-    assert.ok(result.includes("Section: Reactions"));
-    assert.ok(result.includes("Category: core_rules"));
-    assert.ok(result.includes("Quote:"));
-  });
-
-  it("omits page when null", () => {
-    const chunk = makeChunk({ pageNumber: null });
-    const result = formatRetrievalContext([chunk]);
-    assert.ok(!result.includes("Page:"));
-  });
-
-  it("omits section when null", () => {
-    const chunk = makeChunk({ sectionHeading: null });
-    const result = formatRetrievalContext([chunk]);
-    assert.ok(!result.includes("Section:"));
-  });
-
-  it("formats multiple chunks with sequential numbering", () => {
-    const chunks = [
-      makeChunk({ sourceTitle: "Source A" }),
-      makeChunk({ sourceTitle: "Source B" }),
-    ];
-    const result = formatRetrievalContext(chunks);
-    assert.ok(result.includes("[Source 1]"));
-    assert.ok(result.includes("[Source 2]"));
-    assert.ok(result.includes("Source A"));
-    assert.ok(result.includes("Source B"));
-  });
-});
-
-// ---------- buildUserMessage ----------
-
-describe("buildUserMessage", () => {
-  it("includes the query", () => {
-    const msg = buildUserMessage("What is a reaction?", [makeChunk()]);
-    assert.ok(msg.includes("What is a reaction?"));
-  });
-
-  it("includes formatted context", () => {
-    const msg = buildUserMessage("test", [makeChunk()]);
-    assert.ok(msg.includes("[Source 1]"));
-    assert.ok(msg.includes("Basic Rules"));
-  });
-
-  it("includes Available sources header", () => {
-    const msg = buildUserMessage("test", [makeChunk()]);
-    assert.ok(msg.includes("Available sources:"));
-  });
-});
-
-// ---------- parseLlmResponse ----------
-
-describe("parseLlmResponse", () => {
-  it("parses valid JSON response", () => {
-    const input = JSON.stringify({
-      answer: "A reaction is a special action.",
-      confident: true,
-      citations: [{ quote: "A reaction...", sourceTitle: "Basic Rules" }],
+  it("accepts only the exact root and claim fields", () => {
+    assert.deepEqual(parseLlmResponse(JSON.stringify({
+      claims: [{ text: "Lemure Armor Class is 7.", references: ["C1"] }],
+    })), {
+      claims: [{ text: "Lemure Armor Class is 7.", references: ["C1"] }],
+      rejected: false,
     });
-    const result = parseLlmResponse(input);
-    assert.equal(result.answer, "A reaction is a special action.");
-    assert.equal(result.confident, true);
-    assert.equal(result.citations?.length, 1);
-  });
 
-  it("strips markdown code block wrapping with language tag", () => {
-    const json = JSON.stringify({
-      answer: "Test answer",
-      confident: false,
-      citations: [],
-    });
-    const wrapped = "```json\n" + json + "\n```";
-    const result = parseLlmResponse(wrapped);
-    assert.equal(result.answer, "Test answer");
-    assert.equal(result.confident, false);
-  });
-
-  it("handles plain code block without language tag", () => {
-    const json = JSON.stringify({ answer: "X", confident: true, citations: [] });
-    const wrapped = "```\n" + json + "\n```";
-    const result = parseLlmResponse(wrapped);
-    assert.equal(result.answer, "X");
-  });
-
-  it("returns raw text as answer on invalid JSON", () => {
-    const result = parseLlmResponse("This is not JSON");
-    assert.equal(result.answer, "This is not JSON");
-    assert.equal(result.confident, false);
-    assert.deepEqual(result.citations, []);
-  });
-
-  it("handles empty citations array", () => {
-    const input = JSON.stringify({ answer: "No info", confident: false, citations: [] });
-    const result = parseLlmResponse(input);
-    assert.deepEqual(result.citations, []);
-  });
-
-  it("handles missing optional fields", () => {
-    const input = JSON.stringify({ answer: "Partial answer" });
-    const result = parseLlmResponse(input);
-    assert.equal(result.answer, "Partial answer");
-    assert.equal(result.confident, undefined);
-    assert.equal(result.citations, undefined);
-  });
-
-  it("handles JSON with leading/trailing whitespace", () => {
-    const input = "  \n  " + JSON.stringify({ answer: "Trimmed", confident: true, citations: [] }) + "  \n  ";
-    const result = parseLlmResponse(input);
-    assert.equal(result.answer, "Trimmed");
-    assert.equal(result.confident, true);
-  });
-
-  it("drops model-provided structured claims and invalid field types", () => {
-    const result = parseLlmResponse(JSON.stringify({
-      answer: { range: "Self" },
-      confident: "yes",
-      entity: { range: "Self" },
-      citations: [{ quote: "Range: Self", page: "12", structuredClaim: { range: "Self" } }],
+    const unknown = parseLlmResponse(JSON.stringify({
+      claims: [{ text: "Lemure Armor Class is 7.", references: ["C1"], quote: "Armor Class" }],
     }));
+    assert.deepEqual(unknown, { claims: [], rejected: true });
+  });
 
-    assert.deepEqual(result, { citations: [{ quote: "Range: Self" }] });
+  it("rejects an entire claim for duplicate or malformed references", () => {
+    for (const references of [["C1", "C1"], ["C0"], ["chunk-secret"], ["C1", 2]]) {
+      const parsed = parseLlmResponse(JSON.stringify({ claims: [{ text: "Lemure Armor Class is 7.", references }] }));
+      assert.deepEqual(parsed, { claims: [], rejected: true });
+    }
+  });
+
+  it("rejects malformed JSON, empty claims, and oversized claims", () => {
+    assert.deepEqual(parseLlmResponse("not json"), { claims: [], rejected: true });
+    const parsed = parseLlmResponse(JSON.stringify({ claims: [
+      { text: " ", references: ["C1"] },
+      { text: "x".repeat(601), references: ["C1"] },
+      { text: "No source", references: [] },
+    ] }));
+    assert.deepEqual(parsed, { claims: [], rejected: true });
+  });
+
+  it("resolves references atomically against only supplied chunks", () => {
+    assert.deepEqual(resolveContextReferences(["C1"], [chunk()])?.map((item) => item.chunkId), ["chunk-secret"]);
+    assert.equal(resolveContextReferences(["C1", "C2"], [chunk()]), undefined);
+    assert.equal(resolveContextReferences(["C2"], [chunk()]), undefined);
   });
 });
 
-// ---------- mapCitations ----------
-
-describe("mapCitations", () => {
-  it("maps citation by exact source title match", () => {
-    const chunks = [makeChunk({ sourceTitle: "Basic Rules", sourceId: "src-1", fileId: "file-1" })];
-    const raw = [{ quote: "A creature can take a reaction", sourceTitle: "Basic Rules" }];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result.length, 1);
-    assert.equal(result[0].sourceTitle, "Basic Rules");
-    assert.equal(result[0].sourceId, "src-1");
-    assert.equal(result[0].fileId, "file-1");
+describe("deterministic claim support", () => {
+  it("rejects fire-immunity laundering through an Armor Class citation", () => {
+    const result = validateClaimSupport("The Lemure has Fire Immunity.", [chunk({ quoteText: "Lemure. Armor Class 7." })], "en");
+    assert.equal(result.supported, false);
+    assert.deepEqual(result.unsupportedTokens.sort(), ["fire", "immunity"]);
   });
 
-  it("maps citation by case-insensitive source title", () => {
-    const chunks = [makeChunk({ sourceTitle: "Basic Rules" })];
-    const raw = [{ quote: "A creature can take a reaction", sourceTitle: "basic rules" }];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result.length, 1);
-    assert.equal(result[0].sourceTitle, "Basic Rules");
+  it("rejects swapped Armor Class and Hit Points values even when every token exists", () => {
+    const result = validateClaimSupport("Lemure Armor Class is 13 and Hit Points are 7.", [chunk()], "en");
+    assert.equal(result.supported, false);
+    assert.deepEqual(result.unsupportedTokens, []);
   });
 
-  it("maps a normalized contiguous quote substring and derives the source quote", () => {
-    const chunks = [
-      makeChunk({
-        sourceTitle: "Player's Handbook",
-        quoteText: "A creature can take a reaction on another creature's turn.",
-      }),
-    ];
-    const raw = [{ quote: "A creature can take a reaction on another" }];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result.length, 1);
-    assert.equal(result[0].sourceTitle, "Player's Handbook");
-    assert.equal(result[0].quote, "A creature can take a reaction on another creature's turn.");
+  it("keeps signed, decimal, and fractional numbers indivisible", () => {
+    const numbers = chunk({ quoteText: "Armor Class +3. Speed 1.5 ft. Challenge Rating 1/2." });
+    assert.equal(validateClaimSupport("AC is +3.", [numbers], "en").supported, true);
+    assert.equal(validateClaimSupport("Speed is 1.5 feet.", [numbers], "en").supported, true);
+    assert.equal(validateClaimSupport("Challenge Rating is 1/2.", [numbers], "en").supported, true);
+    assert.equal(validateClaimSupport("Armor Class +1. Speed 3.5 feet. Challenge Rating 2/1.", [numbers], "en").supported, false);
   });
 
-  it("omits unmatched citations without source support", () => {
-    const chunks = [makeChunk({ sourceTitle: "Basic Rules" })];
-    const raw = [{ quote: "Something unrelated", sourceTitle: "Unknown Source" }];
-    const result = mapCitations(raw, chunks);
-    assert.deepEqual(result, []);
+  it("rejects unsupported negation", () => {
+    const result = validateClaimSupport("The Lemure is not immune to fire.", [chunk({ quoteText: "The Lemure is immune to fire." })], "en");
+    assert.equal(result.supported, false);
+    assert.deepEqual(result.unsupportedTokens, ["not"]);
   });
 
-  it("does not accept an unsupported short quote by incidental overlap", () => {
-    assert.deepEqual(
-      mapCitations([{ quote: "A", sourceTitle: "Basic Rules" }], [makeChunk()]),
-      [],
-    );
+  it("rejects punctuation-only and connector-only claims", () => {
+    assert.equal(validateClaimSupport("...", [chunk()], "en").supported, false);
+    assert.equal(validateClaimSupport("It is.", [chunk()], "en").supported, false);
   });
 
-  it("rejects a divergent quote that only shares a long prefix", () => {
-    const chunk = makeChunk({ quoteText: "A creature can take a reaction on another creature's turn." });
-    assert.deepEqual(
-      mapCitations([{ quote: "A creature can take a reaction that deals damage" }], [chunk]),
-      [],
-    );
+  it("allows supported unit spelling without weakening number-unit association", () => {
+    assert.equal(validateClaimSupport("Lemure Speed is 15 feet.", [chunk()], "en").supported, true);
+    assert.equal(validateClaimSupport("Lemure Speed is 13 feet.", [chunk()], "en").supported, false);
   });
 
-  it("propagates only field evidence supporting the final quote", () => {
-    const chunks = [makeChunk({
-      strategy: "entity",
-      entityEvidence: [
-        {
-          entryId: "entry-1",
-          entryType: "spell",
-          canonicalKey: "shield",
-          title: "Shield",
-          citationId: "citation-1",
-          citationKind: "field",
-          fieldPath: "$.range",
-          quote: "Range: Self",
-        },
-        {
-          entryId: "entry-1",
-          entryType: "spell",
-          canonicalKey: "shield",
-          title: "Shield",
-          citationId: "citation-2",
-          citationKind: "field",
-          fieldPath: "$.duration",
-          quote: "Duration: 1 round",
-        },
-      ],
-    })];
-
-    const result = mapCitations(
-      [{ quote: "Range: Self", sourceTitle: "Basic Rules" }],
-      chunks,
-    );
-
-    assert.equal(result.length, 1);
-    assert.deepEqual(result[0].entityEvidence?.map((evidence) => evidence.fieldPath), ["$.range"]);
+  it("allows only readability glue around adjacent stat evidence", () => {
+    const stats = chunk({ quoteText: "Lemure. Armor Class 7. Hit Points 13." });
+    assert.equal(validateClaimSupport("The Lemure has Armor Class 7.", [stats], "en").supported, true);
+    assert.equal(validateClaimSupport("The Lemure has 13 Hit Points.", [stats], "en").supported, true);
   });
 
-  it("propagates field evidence contained by a full authoritative chunk quote", () => {
-    const chunks = [makeChunk({
-      quoteText: "Range: Self. Duration: 1 round.",
-      strategy: "entity",
-      entityEvidence: [
-        {
-          entryId: "entry-1",
-          entryType: "spell",
-          canonicalKey: "shield",
-          title: "Shield",
-          citationId: "citation-range",
-          citationKind: "field",
-          fieldPath: "$.range",
-          quote: "Range: Self",
-        },
-        {
-          entryId: "entry-1",
-          entryType: "spell",
-          canonicalKey: "shield",
-          title: "Shield",
-          citationId: "citation-damage",
-          citationKind: "field",
-          fieldPath: "$.damage",
-          quote: "Damage: 4d6",
-        },
-      ],
-    })];
-
-    const result = mapCitations(
-      [{ quote: "Range: Self. Duration: 1 round." }],
-      chunks,
-    );
-
-    assert.deepEqual(result[0].entityEvidence?.map((evidence) => evidence.fieldPath), ["$.range"]);
+  it("handles Russian claims conservatively and preserves stat associations", () => {
+    const ru = chunk({
+      quoteText: "Лемур. Класс Доспеха 7. Хиты 13.", sectionHeading: "Лемур",
+      language: "ru", sourceTitle: "Открытые правила",
+    });
+    assert.equal(validateClaimSupport("Лемур: Класс Доспеха 7.", [ru], "ru").supported, true);
+    assert.equal(validateClaimSupport("Лемур: Хиты 13.", [ru], "ru").supported, true);
+    assert.equal(validateClaimSupport("Класс Доспеха лемура 13. Хиты 7.", [ru], "ru").supported, false);
+    assert.equal(validateClaimSupport("Лемур имеет иммунитет к огню.", [ru], "ru").supported, false);
   });
 
-  it("derives a narrow citation inside field evidence without attaching outside evidence", () => {
-    const chunks = [makeChunk({
-      strategy: "entity",
-      entityEvidence: [
-        {
-          entryId: "entry-1",
-          entryType: "spell",
-          canonicalKey: "shield",
-          title: "Shield",
-          citationId: "citation-range",
-          citationKind: "field",
-          fieldPath: "$.range",
-          quote: "Range: Self",
-        },
-        {
-          entryId: "entry-1",
-          entryType: "spell",
-          canonicalKey: "shield",
-          title: "Shield",
-          citationId: "citation-duration",
-          citationKind: "field",
-          fieldPath: "$.duration",
-          quote: "Duration: 1 round",
-        },
-      ],
-    })];
-
-    const result = mapCitations([{ quote: "Range: Se" }], chunks);
-
-    assert.equal(result[0].quote, "Range: Self");
-    assert.deepEqual(result[0].entityEvidence?.map((evidence) => evidence.fieldPath), ["$.range"]);
+  it("rejects reversed Imp/Lemure comparisons", () => {
+    const comparison = chunk({ sectionHeading: null, quoteText: "Imp has higher Armor Class than Lemure." });
+    assert.equal(validateClaimSupport("Imp has higher AC than Lemure.", [comparison], "en").supported, true);
+    assert.equal(validateClaimSupport("Lemure has higher AC than Imp.", [comparison], "en").supported, false);
   });
 
-  it("omits an entity field claim without a supporting carried citation", () => {
-    const chunks = [makeChunk({
-      strategy: "entity",
-      entityEvidence: [{
-        entryId: "entry-1",
-        entryType: "spell",
-        canonicalKey: "shield",
-        title: "Shield",
-        citationId: "citation-1",
-        citationKind: "field",
-        fieldPath: "$.range",
-        quote: "Range: Self",
-      }],
-    })];
-
-    assert.deepEqual(
-      mapCitations([{ quote: "Damage: 4d6", sourceTitle: "Basic Rules" }], chunks),
-      [],
-    );
+  it("rejects distributed negation and cross-entity poison resistance", () => {
+    const evidence = chunk({
+      sectionHeading: null,
+      quoteText: "Lemure is resistant to fire. Imp is not resistant to poison.",
+    });
+    assert.equal(validateClaimSupport("Imp is not resistant to poison.", [evidence], "en").supported, true);
+    assert.equal(validateClaimSupport("Lemure is not resistant to fire.", [evidence], "en").supported, false);
+    assert.equal(validateClaimSupport("Lemure is resistant to poison.", [evidence], "en").supported, false);
   });
 
-  it("skips citations without a quote", () => {
-    const chunks = [makeChunk()];
-    const raw = [{ sourceTitle: "Basic Rules" }];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result.length, 0);
+  it("rejects cross-entity AC values and Bite/Claw value swaps", () => {
+    const creatures = chunk({
+      sectionHeading: null,
+      quoteText: "Lemure Armor Class 7. Imp Armor Class 13. Bite deals 7 damage. Claw deals 5 damage.",
+    });
+    assert.equal(validateClaimSupport("Lemure AC is 7.", [creatures], "en").supported, true);
+    assert.equal(validateClaimSupport("Lemure AC is 13.", [creatures], "en").supported, false);
+    assert.equal(validateClaimSupport("Bite deals 7 damage.", [creatures], "en").supported, true);
+    assert.equal(validateClaimSupport("Claw deals 7 damage.", [creatures], "en").supported, false);
+
+    const denseRow = chunk({ sectionHeading: null, quoteText: "Lemure | AC 7 | Imp | AC 13" });
+    assert.equal(validateClaimSupport("Lemure AC is 13.", [denseRow], "en").supported, false);
   });
 
-  it("uses chunk metadata for page/section when LLM omits them", () => {
-    const chunks = [makeChunk({ pageNumber: 73, sectionHeading: "Reactions" })];
-    const raw = [{ quote: "A creature can take a reaction", sourceTitle: "Basic Rules" }];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result[0].page, 73);
-    assert.equal(result[0].section, "Reactions");
+  it("rejects Lemure reassignment from a following Imp and key in/on swaps", () => {
+    const entities = chunk({ sectionHeading: null, quoteText: "Lemure follows Imp Armor Class 13." });
+    assert.equal(validateClaimSupport("Lemure Armor Class is 13.", [entities], "en").supported, false);
+
+    const key = chunk({ sectionHeading: null, quoteText: "The key is in the lock." });
+    assert.equal(validateClaimSupport("The key is in the lock.", [key], "en").supported, true);
+    assert.equal(validateClaimSupport("The key is on the lock.", [key], "en").supported, false);
   });
 
-  it("ignores LLM-provided page/section in favor of chunk metadata", () => {
-    const chunks = [makeChunk({ pageNumber: 73, sectionHeading: "Reactions" })];
-    const raw = [{ quote: "A creature can take a reaction", sourceTitle: "Basic Rules", page: 99, section: "Combat" }];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result[0].page, 73);
-    assert.equal(result[0].section, "Reactions");
+  it("preserves the complete table row without silently skipping descriptors", () => {
+    const row = chunk({ sectionHeading: null, quoteText: "Lemure | Medium Fiend | AC 7 | HP 13" });
+    assert.equal(validateClaimSupport("Lemure is a Medium Fiend.", [row], "en").supported, true);
+    assert.equal(validateClaimSupport("Lemure, a Medium Fiend, has Armor Class 7.", [row], "en").supported, true);
+    assert.equal(validateClaimSupport("Lemure, a Medium Fiend, has AC 7 and HP 13.", [row], "en").supported, true);
+    assert.equal(validateClaimSupport("The Lemure has Armor Class 7.", [row], "en").supported, false);
+    assert.equal(validateClaimSupport("The Lemure has 13 Hit Points.", [row], "en").supported, false);
   });
 
-  it("maps multiple citations to different chunks", () => {
-    const chunks = [
-      makeChunk({ sourceId: "src-1", sourceTitle: "Basic Rules" }),
-      makeChunk({
-        sourceId: "src-2",
-        sourceTitle: "Player's Handbook",
-        quoteText: "Different text for testing overlap matching here",
-      }),
-    ];
-    const raw = [
-      { quote: "A creature can take a reaction", sourceTitle: "Basic Rules" },
-      { quote: "Different text for testing overlap" },
-    ];
-    const result = mapCitations(raw, chunks);
-    assert.equal(result.length, 2);
-    assert.equal(result[0].sourceId, "src-1");
-    assert.equal(result[1].sourceId, "src-2");
+  it("rejects table reassignment through intervening entity and relation cells", () => {
+    const entity = chunk({ sectionHeading: null, quoteText: "Lemure | Imp | AC 13" });
+    const relation = chunk({ sectionHeading: null, quoteText: "Lemure | follows Imp | AC 13" });
+    assert.equal(validateClaimSupport("Lemure Armor Class is 13.", [entity], "en").supported, false);
+    assert.equal(validateClaimSupport("Lemure Armor Class is 13.", [relation], "en").supported, false);
   });
 
-  it("returns empty array for empty raw citations", () => {
-    const result = mapCitations([], [makeChunk()]);
-    assert.equal(result.length, 0);
+  it("rejects pronoun-led claims without an explicit local subject", () => {
+    const evidence = chunk({ quoteText: "Lemure. Speed 15 ft. Imp. Speed 20 ft." });
+    assert.equal(validateClaimSupport("Its Speed is 15 feet.", [evidence], "en").supported, false);
+    assert.equal(validateClaimSupport("Their Speed is 20 feet.", [evidence], "en").supported, false);
+    assert.equal(validateClaimSupport("This has Speed 15 feet.", [evidence], "en").supported, false);
   });
 
-  it("returns empty array for null citations", () => {
-    const result = mapCitations(null as unknown as readonly RawLlmCitation[], [makeChunk()]);
-    assert.equal(result.length, 0);
+  it("does not take a value from a later stat label", () => {
+    const incomplete = chunk({ sectionHeading: null, quoteText: "Lemure | AC natural armor | HP 13" });
+    assert.equal(validateClaimSupport("Lemure AC is 13.", [incomplete], "en").supported, false);
+  });
+
+  it("rejects swapped Russian Speed and Armor Class values in one table row", () => {
+    const row = chunk({
+      sectionHeading: "Лемур", language: "ru", sourceTitle: "Открытые правила",
+      quoteText: "Лемур | КД 13 | Скорость 30 футов",
+    });
+    assert.equal(validateClaimSupport("Лемур: КД 13, Скорость 30 футов.", [row], "ru").supported, true);
+    assert.equal(validateClaimSupport("Лемур: Скорость 30 футов.", [row], "ru").supported, false);
+    assert.equal(validateClaimSupport("Лемур: КД 30.", [row], "ru").supported, false);
+    assert.equal(validateClaimSupport("Лемур: Скорость 13 футов.", [row], "ru").supported, false);
   });
 });
