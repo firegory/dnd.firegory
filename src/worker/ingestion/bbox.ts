@@ -19,10 +19,8 @@
  * </doc>
  */
 
-import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFile = promisify(execFileCb);
+import { PDF_TOOL_TIMEOUT_MS, TOOL_STDIO_MAX_BYTES } from "../../server/ingestion/limits.ts";
+import { runMonitoredTool } from "./tool-runner.ts";
 
 const PDFTOTEXT_PATH = process.env.PDFTOTEXT_PATH ?? "pdftotext";
 
@@ -73,7 +71,7 @@ export async function extractPageBboxes(
 }
 
 async function runBboxLayout(pdfPath: string, page: number): Promise<string> {
-  const { stdout } = await execFile(PDFTOTEXT_PATH, [
+  const { stdout } = await runMonitoredTool(PDFTOTEXT_PATH, [
     "-bbox-layout",
     "-f", String(page),
     "-l", String(page),
@@ -81,8 +79,8 @@ async function runBboxLayout(pdfPath: string, page: number): Promise<string> {
     pdfPath,
     "-",
   ], {
-    maxBuffer: 10 * 1024 * 1024,
-    timeout: 30_000,
+    maxStdoutBytes: TOOL_STDIO_MAX_BYTES,
+    timeoutMs: PDF_TOOL_TIMEOUT_MS,
   });
   return stdout;
 }

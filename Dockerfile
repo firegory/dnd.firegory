@@ -95,6 +95,12 @@ CMD ["node", "--experimental-strip-types", "scripts/migrate.mts"]
 FROM ${NODE_IMAGE} AS app-production
 
 WORKDIR /app
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends poppler-utils \
+  && command -v pdfinfo \
+  && command -v pdftoppm \
+  && command -v pdftocairo \
+  && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production \
     HOME=/tmp \
     HOSTNAME=0.0.0.0 \
@@ -105,6 +111,7 @@ COPY --from=production-build --chown=10001:10001 /app/.next/standalone ./
 COPY --from=production-build --chown=10001:10001 /app/.next/static ./.next/static
 COPY --chown=10001:10001 docker/entrypoint.prod.sh ./docker/entrypoint.prod.sh
 COPY --chown=10001:10001 scripts/app-healthcheck.mjs ./scripts/app-healthcheck.mjs
+COPY --chown=10001:10001 scripts/production-preview-smoke.mjs ./scripts/production-preview-smoke.mjs
 RUN mkdir -p /app/storage && chmod 0777 /app/storage
 USER 10001:10001
 EXPOSE 3000

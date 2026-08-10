@@ -17,7 +17,10 @@ import {
   normalizeFileInput,
   ContentMetadataValidationError,
 } from "../../src/server/content/metadata.ts";
-import { computeChecksum } from "../../src/server/ingestion/paths.ts";
+import { computeChecksum, computeFileChecksum } from "../../src/server/ingestion/paths.ts";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createSourceRecord } from "../../src/server/ingestion/storage.ts";
 
 const ownerUserId = "11111111-1111-4111-8111-111111111111";
@@ -196,6 +199,18 @@ describe("ingestion: source metadata validation", () => {
 
     assert.deepEqual(result.metadata, { isbn: "978-0-123456-78-9", pages: 320 });
   });
+});
+
+it("streams file checksums without loading the complete PDF", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pdf-hash-"));
+  const path = join(root, "input.pdf");
+  try {
+    const data = Buffer.from("%PDF-1.7 streamed checksum");
+    await writeFile(path, data);
+    assert.equal(await computeFileChecksum(path), computeChecksum(data));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 describe("ingestion: source record creation", () => {

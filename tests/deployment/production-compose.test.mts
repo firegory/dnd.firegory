@@ -17,6 +17,7 @@ const preflight = await readFile(new URL("../../scripts/production-nfs-preflight
 const productionUp = await readFile(new URL("../../scripts/production-up.sh", import.meta.url), "utf8");
 const permissionsSmoke = await readFile(new URL("../../scripts/production-permissions-smoke.sh", import.meta.url), "utf8");
 const replacementSmoke = await readFile(new URL("../../scripts/production-replacement-smoke.sh", import.meta.url), "utf8");
+const compendiumQa = await readFile(new URL("../../.github/workflows/compendium-qa.yml", import.meta.url), "utf8");
 
 type Volume = string | { source?: string; target?: string; read_only?: boolean; bind?: { create_host_path?: boolean } };
 type Service = {
@@ -89,7 +90,10 @@ test("production Docker stages preserve dependency and runtime boundaries", () =
   assert.equal(copyInstructions(agentDependencies).some(copiesWholeBuildContext), false);
 
   const workerRuns = worker.instructions.filter((instruction) => instruction.keyword === "RUN").map((instruction) => instruction.value).join(" ");
+  const appRuns = app.instructions.filter((instruction) => instruction.keyword === "RUN").map((instruction) => instruction.value).join(" ");
   assert.ok(["ocrmypdf", "tesseract-ocr", "tesseract-ocr-eng", "tesseract-ocr-rus"].every((dependency) => workerRuns.split(/\s+/).includes(dependency)));
+  assert.match(appRuns, /apt-get install -y --no-install-recommends poppler-utils/);
+  assert.ok(["pdfinfo", "pdftoppm", "pdftocairo"].every((tool) => appRuns.includes(`command -v ${tool}`)));
   for (const stage of [app, gateway, productionBase, productionDependencies, agentDependencies]) {
     const runTokens = stage.instructions.filter((instruction) => instruction.keyword === "RUN").flatMap((instruction) => instruction.value.split(/\s+/));
     assert.equal(runTokens.some((token) => token === "ocrmypdf" || token.startsWith("tesseract-ocr")), false, stage.name);
@@ -101,6 +105,7 @@ test("production Docker stages preserve dependency and runtime boundaries", () =
     { keyword: "COPY", options: { from: "production-build", chown: "10001:10001" }, sources: ["/app/.next/static"], destination: "./.next/static" },
     { keyword: "COPY", options: { chown: "10001:10001" }, sources: ["docker/entrypoint.prod.sh"], destination: "./docker/entrypoint.prod.sh" },
     { keyword: "COPY", options: { chown: "10001:10001" }, sources: ["scripts/app-healthcheck.mjs"], destination: "./scripts/app-healthcheck.mjs" },
+    { keyword: "COPY", options: { chown: "10001:10001" }, sources: ["scripts/production-preview-smoke.mjs"], destination: "./scripts/production-preview-smoke.mjs" },
   ]);
   assert.deepEqual(copyInstructions(gateway), [
     { keyword: "COPY", options: { from: "agent-dependencies" }, sources: ["/app/node_modules"], destination: "./node_modules" },
@@ -112,6 +117,13 @@ test("production Docker stages preserve dependency and runtime boundaries", () =
     { keyword: "COPY", options: {}, sources: ["docker/entrypoint.prod.sh"], destination: "./docker/entrypoint.prod.sh" },
   ]);
   assert.equal([...copyInstructions(app), ...copyInstructions(gateway)].some(copiesWholeBuildContext), false);
+});
+
+test("Compendium QA executes the PDF renderer from the production app image", () => {
+  assert.match(compendiumQa, /docker build --target app-production --tag dnd-firegory-app-qa/);
+  assert.match(compendiumQa, /docker run --rm[\s\S]*--user 10001:10001[\s\S]*--read-only[\s\S]*--tmpfs \/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777/);
+  assert.match(compendiumQa, /--mount type=bind,source="\$PWD\/qa-artifacts\/production-preview-storage",target=\/app\/storage/);
+  assert.match(compendiumQa, /dnd-firegory-app-qa scripts\/production-preview-smoke\.mjs/);
 });
 
 test("canonical host bind access is read-only except for the worker", () => {

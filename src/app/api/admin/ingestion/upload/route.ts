@@ -14,13 +14,12 @@ import {
 } from "../../../../../server/access/retrieval-filter";
 import { ContentMetadataValidationError } from "../../../../../server/content/metadata";
 import { parseUploadSourceMetadata } from "../../../../../server/ingestion/upload-metadata";
+import { MAX_PDF_INPUT_BYTES } from "../../../../../server/ingestion/limits";
 
 const VALID_CATEGORIES = new Set<string>(SOURCE_CATEGORIES);
 const VALID_EDITIONS = new Set<string>(SOURCE_EDITIONS);
 const VALID_LANGUAGES = new Set<string>(SOURCE_LANGUAGES);
 const VALID_TIERS = new Set<string>(ACCESS_TIERS);
-
-const MAX_PDF_SIZE = 1024 * 1024 * 1024; // 1 GB
 
 export async function POST(request: Request) {
   let user;
@@ -46,8 +45,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Only PDF files are accepted." }, { status: 400 });
   }
 
-  if (file.size > MAX_PDF_SIZE) {
-    return NextResponse.json({ error: `File too large. Maximum size is ${MAX_PDF_SIZE / (1024 * 1024 * 1024)} GB.` }, { status: 400 });
+  if (file.size > MAX_PDF_INPUT_BYTES) {
+    return NextResponse.json({ error: `File too large. Maximum size is ${MAX_PDF_INPUT_BYTES / (1024 * 1024)} MB.` }, { status: 400 });
   }
 
   const title = formData.get("title");
