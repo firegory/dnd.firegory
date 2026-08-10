@@ -29,6 +29,10 @@ const MAX_CROP_DIMENSION_PX = 2000;
 const MAX_PREVIEW_DIMENSION_PX = MAX_CROP_DIMENSION_PX;
 const MAX_TOOL_OUTPUT_BYTES = 64 * 1024;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_IHDR = 0x49484452;
+const PNG_PLTE = 0x504c5445;
+const PNG_IDAT = 0x49444154;
+const PNG_IEND = 0x49454e44;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -395,10 +399,14 @@ function isValidPng(image: Buffer): boolean {
     const crcOffset = dataOffset + length;
     const nextOffset = crcOffset + 4;
     if (length > MAX_PREVIEW_BYTES || nextOffset > image.byteLength) return false;
-    const type = image.subarray(typeOffset, dataOffset).toString("ascii");
-    if (!/^[A-Za-z]{4}$/.test(type) || pngCrc32(image, typeOffset, crcOffset) !== image.readUInt32BE(crcOffset)) return false;
+    const typeBytes = image.subarray(typeOffset, dataOffset);
+    if (![...typeBytes].every(isAsciiLetter) || !isAsciiUppercase(typeBytes[2])) return false;
+    const type = image.readUInt32BE(typeOffset);
+    const knownCritical = type === PNG_IHDR || type === PNG_PLTE || type === PNG_IDAT || type === PNG_IEND;
+    if (isAsciiUppercase(typeBytes[0]) && !knownCritical) return false;
+    if (pngCrc32(image, typeOffset, crcOffset) !== image.readUInt32BE(crcOffset)) return false;
     chunks += 1;
-    if (type === "IHDR") {
+    if (type === PNG_IHDR) {
       ihdr += 1;
       if (chunks !== 1 || ihdr !== 1 || length !== 13) return false;
       const width = image.readUInt32BE(dataOffset);
@@ -416,12 +424,12 @@ function isValidPng(image: Buffer): boolean {
       rowBytes = Math.ceil(rowBits / 8);
       expectedScanlineBytes = (rowBytes + 1) * height;
       if (!Number.isSafeInteger(expectedScanlineBytes) || expectedScanlineBytes > MAX_PREVIEW_DECOMPRESSED_BYTES) return false;
-    } else if (type === "IDAT") {
+    } else if (type === PNG_IDAT) {
       if (ihdr !== 1 || iend !== 0 || idatEnded) return false;
       idatBytes += length;
       if (idatBytes > MAX_PREVIEW_BYTES) return false;
       idatChunks.push(image.subarray(dataOffset, crcOffset));
-    } else if (type === "IEND") {
+    } else if (type === PNG_IEND) {
       iend += 1;
       if (length !== 0 || iend !== 1 || ihdr !== 1 || idatBytes === 0 || nextOffset !== image.byteLength) return false;
     } else if (idatBytes > 0) {
@@ -440,6 +448,14 @@ function isValidPng(image: Buffer): boolean {
     return false;
   }
   return true;
+}
+
+function isAsciiLetter(value: number): boolean {
+  return isAsciiUppercase(value) || (value >= 0x61 && value <= 0x7a);
+}
+
+function isAsciiUppercase(value: number): boolean {
+  return value >= 0x41 && value <= 0x5a;
 }
 
 const PNG_CRC_TABLE = Array.from({ length: 256 }, (_, value) => {

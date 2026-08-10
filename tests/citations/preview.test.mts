@@ -191,6 +191,21 @@ test("PNG decode validation accepts Poppler-compatible non-interlaced 8-bit colo
   }
 });
 
+test("PNG chunk types reject high-bit aliases, unknown critical types, and invalid reserved bits", () => {
+  const idatLike = Buffer.from([0xc9, 0x44, 0x41, 0x54]);
+  assert.equal(isValidCitationPreviewPng(pngWithChunks({ beforeIdat: [rawPngChunk(idatLike, Buffer.alloc(0))] })), false);
+  assert.equal(isValidCitationPreviewPng(pngWithChunks({ beforeIdat: [pngChunk("ABCD", Buffer.alloc(0))] })), false);
+  assert.equal(isValidCitationPreviewPng(pngWithChunks({ beforeIdat: [pngChunk("abcD", Buffer.alloc(0))] })), false);
+});
+
+test("PNG chunk types allow CRC-valid ancillary chunks in valid order", () => {
+  const image = pngWithChunks({
+    beforeIdat: [pngChunk("tEXt", Buffer.from("source=poppler"))],
+    afterIdat: [pngChunk("tIME", Buffer.from([0x07, 0xe8, 1, 1, 0, 0, 0]))],
+  });
+  assert.equal(isValidCitationPreviewPng(image), true);
+});
+
 test("corrupt canonical cache entries are truncated and rerendered from the canonical source PDF", async () => {
   const fixture = await rendererFixture();
   const originalPath = process.env.PATH;
@@ -339,25 +354,36 @@ function syntheticPng(options: Readonly<{
 }
 
 function pngWithSeparatedIdatChunks(): Buffer {
-  const base = syntheticPng();
-  const ihdrEnd = 8 + 25;
-  const idatLength = base.readUInt32BE(ihdrEnd);
-  const idatEnd = ihdrEnd + idatLength + 12;
-  return Buffer.concat([
-    base.subarray(0, idatEnd),
-    pngChunk("tEXt", Buffer.from("separator")),
-    pngChunk("IDAT", deflateSync(Buffer.from([0, 0, 0]))),
-    pngChunk("IEND", Buffer.alloc(0)),
-  ]);
+  return pngWithChunks({
+    afterIdat: [pngChunk("tEXt", Buffer.from("separator")), pngChunk("IDAT", deflateSync(Buffer.from([0, 0, 0])))],
+  });
 }
 
 function pngChunk(type: string, data: Buffer): Buffer {
+  return rawPngChunk(Buffer.from(type, "ascii"), data);
+}
+
+function rawPngChunk(type: Buffer, data: Buffer): Buffer {
+  assert.equal(type.byteLength, 4);
   const chunk = Buffer.alloc(data.byteLength + 12);
   chunk.writeUInt32BE(data.byteLength, 0);
-  chunk.write(type, 4, 4, "ascii");
+  type.copy(chunk, 4);
   data.copy(chunk, 8);
   chunk.writeUInt32BE(testCrc32(chunk, 4, 8 + data.byteLength), 8 + data.byteLength);
   return chunk;
+}
+
+function pngWithChunks(options: Readonly<{ beforeIdat?: readonly Buffer[]; afterIdat?: readonly Buffer[] }>): Buffer {
+  const base = syntheticPng();
+  const idatOffset = 8 + 25;
+  const idatEnd = idatOffset + base.readUInt32BE(idatOffset) + 12;
+  return Buffer.concat([
+    base.subarray(0, idatOffset),
+    ...(options.beforeIdat ?? []),
+    base.subarray(idatOffset, idatEnd),
+    ...(options.afterIdat ?? []),
+    base.subarray(idatEnd),
+  ]);
 }
 
 function testCrc32(buffer: Buffer, start: number, end: number): number {
