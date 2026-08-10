@@ -116,8 +116,8 @@ describe("deterministic claim support", () => {
   });
 
   it("allows supported unit spelling without weakening number-unit association", () => {
-    assert.equal(validateClaimSupport("Its Speed is 15 feet.", [chunk()], "en").supported, true);
-    assert.equal(validateClaimSupport("Its Speed is 13 feet.", [chunk()], "en").supported, false);
+    assert.equal(validateClaimSupport("Lemure Speed is 15 feet.", [chunk()], "en").supported, true);
+    assert.equal(validateClaimSupport("Lemure Speed is 13 feet.", [chunk()], "en").supported, false);
   });
 
   it("allows only readability glue around adjacent stat evidence", () => {
@@ -174,6 +174,20 @@ describe("deterministic claim support", () => {
     const key = chunk({ sectionHeading: null, quoteText: "The key is in the lock." });
     assert.equal(validateClaimSupport("The key is in the lock.", [key], "en").supported, true);
     assert.equal(validateClaimSupport("The key is on the lock.", [key], "en").supported, false);
+  });
+
+  it("keeps the first table entity as anchor across descriptive cells", () => {
+    const row = chunk({ sectionHeading: null, quoteText: "Lemure | Medium Fiend | AC 7 | HP 13" });
+    assert.equal(validateClaimSupport("Lemure is a Medium Fiend.", [row], "en").supported, true);
+    assert.equal(validateClaimSupport("The Lemure has Armor Class 7.", [row], "en").supported, true);
+    assert.equal(validateClaimSupport("The Lemure has 13 Hit Points.", [row], "en").supported, true);
+  });
+
+  it("rejects pronoun-led claims without an explicit local subject", () => {
+    const evidence = chunk({ quoteText: "Lemure. Speed 15 ft. Imp. Speed 20 ft." });
+    assert.equal(validateClaimSupport("Its Speed is 15 feet.", [evidence], "en").supported, false);
+    assert.equal(validateClaimSupport("Their Speed is 20 feet.", [evidence], "en").supported, false);
+    assert.equal(validateClaimSupport("This has Speed 15 feet.", [evidence], "en").supported, false);
   });
 
   it("does not take a value from a later stat label", () => {

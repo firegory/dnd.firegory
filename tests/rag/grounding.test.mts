@@ -22,13 +22,13 @@ describe("claim grounding", () => {
       { text: "The Lemure is a Medium Fiend Devil.", references: ["C1"] },
       { text: "Lemure AC is 7.", references: ["C1"] },
       { text: "Lemure Hit Points are 13.", references: ["C1"] },
-      { text: "Its Speed is 15 feet.", references: ["C1"] },
-      { text: "Damage Immunities are Fire and Poison.", references: ["C1"] },
+      { text: "Lemure Speed is 15 feet.", references: ["C1"] },
+      { text: "Lemure Damage Immunities are Fire and Poison.", references: ["C1"] },
     ], rejected: false }, [chunk()], "en");
 
     assert.equal(result.claims.length, 5);
     assert.match(result.answer, /Medium Fiend Devil/);
-    assert.match(result.answer, /Speed is 15 feet/);
+    assert.match(result.answer, /Lemure Speed is 15 feet/);
     assert.equal(result.claims[0].citations[0].quote, chunk().quoteText);
     assert.equal(result.claims[0].citations[0].page, 12);
     assert.equal(result.confident, true);
@@ -64,6 +64,17 @@ describe("claim grounding", () => {
     ], rejected: false }, [fire, poison], "en");
     assert.equal(result.answer, "Lemure is resistant to fire.");
     assert.equal(result.claims[0].citations.length, 1);
+    assert.equal(result.confident, false);
+  });
+
+  it("does not resolve Its Speed across Lemure and Imp claims", () => {
+    const lemure = chunk({ chunkId: "lemure", quoteText: "Lemure. Speed 15 ft." });
+    const imp = chunk({ chunkId: "imp", sectionHeading: "Imp", quoteText: "Imp. Speed 20 ft." });
+    const result = groundGeneratedAnswer({ claims: [
+      { text: "Lemure Speed is 15 feet.", references: ["C1"] },
+      { text: "Its Speed is 20 feet.", references: ["C2"] },
+    ], rejected: false }, [lemure, imp], "en");
+    assert.equal(result.answer, "Lemure Speed is 15 feet.");
     assert.equal(result.confident, false);
   });
 

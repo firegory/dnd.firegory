@@ -6,11 +6,20 @@ const MAX_SEGMENT_LENGTH = 800;
 
 const FUNCTION_WORDS: Record<AnswerLanguage, ReadonlySet<string>> = {
   en: new Set([
-    "a", "an", "and", "are", "has", "had", "have", "is", "it", "its", "that", "the",
-    "their", "this", "was", "were",
+    "a", "an", "and", "are", "has", "had", "have", "is", "the", "was", "were",
   ]),
   ru: new Set([
-    "его", "ее", "и", "их", "это", "эта", "этот", "эти",
+    "и",
+  ]),
+};
+
+const PRONOUNS: Record<AnswerLanguage, ReadonlySet<string>> = {
+  en: new Set([
+    "he", "her", "hers", "him", "his", "it", "its", "she", "that", "their", "theirs", "them",
+    "these", "they", "this", "those",
+  ]),
+  ru: new Set([
+    "его", "ее", "ему", "ей", "им", "их", "она", "они", "оно", "он", "этим", "эти", "это", "эта", "этот",
   ]),
 };
 
@@ -57,10 +66,14 @@ export function validateClaimSupport(
   chunks: readonly RetrievalCandidate[],
   language: AnswerLanguage,
 ): ClaimSupportResult {
-  const claimTokens = normalizeClaimStatOrder(
-    canonicalTokens(claim, language).filter((token) => !token.functionWord),
-  );
+  const claimTokens = normalizeClaimStatOrder(canonicalTokens(claim, language).filter((token) => !token.functionWord));
   if (claimTokens.length === 0) return { supported: false, unsupportedTokens: [] };
+  if (!pronounsAreBound(claimTokens, language)) {
+    return {
+      supported: false,
+      unsupportedTokens: claimTokens.filter((token) => PRONOUNS[language].has(token.value)).map((token) => token.value),
+    };
+  }
 
   const segmentsByContext = chunks.map((chunk) => evidenceSegments(chunk, language));
   const supported = segmentsByContext.length > 0 && segmentsByContext.every((segments) =>
@@ -74,6 +87,18 @@ export function validateClaimSupport(
     .filter((token) => !evidenceTokens.some((evidence) => tokensMatch(token.value, evidence.value, language)))
     .map((token) => token.value);
   return { supported: false, unsupportedTokens };
+}
+
+function pronounsAreBound(tokens: readonly Token[], language: AnswerLanguage): boolean {
+  let explicitSubjectSeen = false;
+  for (const token of tokens) {
+    if (PRONOUNS[language].has(token.value)) {
+      if (!explicitSubjectSeen) return false;
+    } else if (!token.value.startsWith("label-") && !isNumericToken(token.value) && !token.value.startsWith("unit-")) {
+      explicitSubjectSeen = true;
+    }
+  }
+  return true;
 }
 
 function segmentSupportsClaim(
@@ -146,11 +171,18 @@ function tableRowSegments(line: string): string[] {
     return [cells.join(" ")];
   }
   const segments: string[] = [];
-  let anchor = cells[0];
+  const anchor = cells[0];
+  let fieldsStarted = false;
   for (const cell of cells.slice(1)) {
     const tokens = tokenize(cell);
-    if (tokens.some((_, index) => labelAt(tokens, index))) segments.push(`${anchor} ${cell}`);
-    else anchor = cell;
+    if (tokens.some((_, index) => labelAt(tokens, index))) {
+      fieldsStarted = true;
+      segments.push(`${anchor} ${cell}`);
+    } else if (fieldsStarted) {
+      break;
+    } else {
+      segments.push(`${anchor} ${cell}`);
+    }
   }
   return segments.length > 0 ? segments : [line];
 }
