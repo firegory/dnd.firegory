@@ -3,16 +3,14 @@ import type { RetrievalCandidate } from "../retrieval/types.ts";
 
 const TOKEN_PATTERN = /[-+]?\d+d\d+|[-+]?\d+(?:[.,]\d+)?(?:\/\d+)?|[<>≤≥]|[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)?/gu;
 const MAX_SEGMENT_LENGTH = 800;
-const MAX_MEANINGFUL_GAP = 2;
 
 const FUNCTION_WORDS: Record<AnswerLanguage, ReadonlySet<string>> = {
   en: new Set([
-    "a", "an", "and", "are", "at", "by", "for", "in", "is", "it", "its", "of", "on", "or",
-    "that", "the", "their", "this", "to", "was", "were", "with",
+    "a", "an", "and", "are", "has", "had", "have", "is", "it", "its", "that", "the",
+    "their", "this", "was", "were",
   ]),
   ru: new Set([
-    "а", "в", "во", "для", "его", "ее", "и", "из", "или", "их", "к", "ко", "на", "о", "об",
-    "от", "по", "с", "со", "у", "это", "эта", "этот", "эти", "за",
+    "его", "ее", "и", "их", "это", "эта", "этот", "эти",
   ]),
 };
 
@@ -59,13 +57,18 @@ export function validateClaimSupport(
   chunks: readonly RetrievalCandidate[],
   language: AnswerLanguage,
 ): ClaimSupportResult {
-  const claimTokens = canonicalTokens(claim, language).filter((token) => !token.functionWord);
+  const claimTokens = normalizeClaimStatOrder(
+    canonicalTokens(claim, language).filter((token) => !token.functionWord),
+  );
   if (claimTokens.length === 0) return { supported: false, unsupportedTokens: [] };
 
-  const segments = chunks.flatMap((chunk) => evidenceSegments(chunk, language));
-  const supported = segments.some((segment) => segmentSupportsClaim(claimTokens, segment, language));
+  const segmentsByContext = chunks.map((chunk) => evidenceSegments(chunk, language));
+  const supported = segmentsByContext.length > 0 && segmentsByContext.every((segments) =>
+    segments.some((segment) => segmentSupportsClaim(claimTokens, segment, language)),
+  );
   if (supported) return { supported: true, unsupportedTokens: [] };
 
+  const segments = segmentsByContext.flat();
   const evidenceTokens = segments.flatMap((segment) => segment.tokens).filter((token) => !token.functionWord);
   const unsupportedTokens = claimTokens
     .filter((token) => !evidenceTokens.some((evidence) => tokensMatch(token.value, evidence.value, language)))
@@ -79,31 +82,33 @@ function segmentSupportsClaim(
   language: AnswerLanguage,
 ): boolean {
   const evidenceTokens = segment.tokens.filter((token) => !token.functionWord);
-  if (!orderedNearSubsequence(claimTokens, evidenceTokens, language)) return false;
+  if (!contiguousSequence(claimTokens, evidenceTokens, language)) return false;
   return statAssociationsSupported(claimTokens, evidenceTokens)
     && comparisonSymbolsSupported(claimTokens, evidenceTokens);
 }
 
-function orderedNearSubsequence(
+function contiguousSequence(
   claimTokens: readonly Token[],
   evidenceTokens: readonly Token[],
   language: AnswerLanguage,
 ): boolean {
-  let evidenceIndex = 0;
-  let previousMatch = -1;
-  for (const claimToken of claimTokens) {
-    let match = -1;
-    for (let index = evidenceIndex; index < evidenceTokens.length; index++) {
-      if (tokensMatch(claimToken.value, evidenceTokens[index].value, language)) {
-        match = index;
-        break;
-      }
+  if (claimTokens.length > evidenceTokens.length) return false;
+  return evidenceTokens.some((_, start) => claimTokens.every((claimToken, offset) =>
+    tokensMatch(claimToken.value, evidenceTokens[start + offset]?.value ?? "", language),
+  ));
+}
+
+function normalizeClaimStatOrder(tokens: readonly Token[]): Token[] {
+  const normalized: Token[] = [];
+  for (let index = 0; index < tokens.length; index++) {
+    if (isNumericToken(tokens[index].value) && tokens[index + 1]?.value.startsWith("label-")) {
+      normalized.push(tokens[index + 1], tokens[index]);
+      index++;
+    } else {
+      normalized.push(tokens[index]);
     }
-    if (match < 0 || (previousMatch >= 0 && match - previousMatch - 1 > MAX_MEANINGFUL_GAP)) return false;
-    previousMatch = match;
-    evidenceIndex = match + 1;
   }
-  return true;
+  return normalized;
 }
 
 function tokensMatch(claim: string, evidence: string, language: AnswerLanguage): boolean {
@@ -118,7 +123,7 @@ function evidenceSegments(chunk: RetrievalCandidate, language: AnswerLanguage): 
   for (const rawLine of chunk.quoteText.split(/\r?\n/)) {
     const line = rawLine.replaceAll(/\s+/g, " ").trim();
     if (!line) continue;
-    const parts = isTableRow(line) ? [line] : line.split(/(?<=[.!?;])\s+/u);
+    const parts = isTableRow(line) ? tableRowSegments(line) : line.split(/(?<=[.!?;])\s+/u);
     for (const part of parts) {
       for (const bounded of boundSegment(part)) {
         const text = prefixSection(chunk.sectionHeading, bounded);
@@ -131,6 +136,23 @@ function evidenceSegments(chunk: RetrievalCandidate, language: AnswerLanguage): 
 
 function isTableRow(line: string): boolean {
   return line.includes("|") || line.includes("\t");
+}
+
+function tableRowSegments(line: string): string[] {
+  const cells = line.split(/[|\t]/).map((cell) => cell.trim()).filter(Boolean);
+  if (cells.length < 2) return [line];
+  const firstTokens = tokenize(cells[0]);
+  if (firstTokens.some((_, index) => labelAt(firstTokens, index))) {
+    return [cells.join(" ")];
+  }
+  const segments: string[] = [];
+  let anchor = cells[0];
+  for (const cell of cells.slice(1)) {
+    const tokens = tokenize(cell);
+    if (tokens.some((_, index) => labelAt(tokens, index))) segments.push(`${anchor} ${cell}`);
+    else anchor = cell;
+  }
+  return segments.length > 0 ? segments : [line];
 }
 
 function boundSegment(value: string): string[] {

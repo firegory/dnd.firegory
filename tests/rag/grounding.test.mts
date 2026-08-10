@@ -54,15 +54,16 @@ describe("claim grounding", () => {
     assert.equal(result.confident, false);
   });
 
-  it("requires one referenced context to support the whole claim instead of combining contexts", () => {
+  it("rejects a claim when any referenced context is unrelated", () => {
     const fire = chunk({ chunkId: "fire", quoteText: "Lemure is resistant to fire." });
     const poison = chunk({ chunkId: "poison", sectionHeading: "Imp", quoteText: "Imp is not resistant to poison." });
     const result = groundGeneratedAnswer({ claims: [
       { text: "Lemure is not resistant to poison.", references: ["C1", "C2"] },
       { text: "Lemure is resistant to fire.", references: ["C1", "C2"] },
+      { text: "Lemure is resistant to fire.", references: ["C1"] },
     ], rejected: false }, [fire, poison], "en");
     assert.equal(result.answer, "Lemure is resistant to fire.");
-    assert.equal(result.claims[0].citations.length, 2);
+    assert.equal(result.claims[0].citations.length, 1);
     assert.equal(result.confident, false);
   });
 

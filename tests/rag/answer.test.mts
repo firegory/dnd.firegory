@@ -87,7 +87,7 @@ describe("deterministic claim support", () => {
   it("rejects fire-immunity laundering through an Armor Class citation", () => {
     const result = validateClaimSupport("The Lemure has Fire Immunity.", [chunk({ quoteText: "Lemure. Armor Class 7." })], "en");
     assert.equal(result.supported, false);
-    assert.deepEqual(result.unsupportedTokens.sort(), ["fire", "has", "immunity"]);
+    assert.deepEqual(result.unsupportedTokens.sort(), ["fire", "immunity"]);
   });
 
   it("rejects swapped Armor Class and Hit Points values even when every token exists", () => {
@@ -118,6 +118,12 @@ describe("deterministic claim support", () => {
   it("allows supported unit spelling without weakening number-unit association", () => {
     assert.equal(validateClaimSupport("Its Speed is 15 feet.", [chunk()], "en").supported, true);
     assert.equal(validateClaimSupport("Its Speed is 13 feet.", [chunk()], "en").supported, false);
+  });
+
+  it("allows only readability glue around adjacent stat evidence", () => {
+    const stats = chunk({ quoteText: "Lemure. Armor Class 7. Hit Points 13." });
+    assert.equal(validateClaimSupport("The Lemure has Armor Class 7.", [stats], "en").supported, true);
+    assert.equal(validateClaimSupport("The Lemure has 13 Hit Points.", [stats], "en").supported, true);
   });
 
   it("handles Russian claims conservatively and preserves stat associations", () => {
@@ -159,6 +165,15 @@ describe("deterministic claim support", () => {
 
     const denseRow = chunk({ sectionHeading: null, quoteText: "Lemure | AC 7 | Imp | AC 13" });
     assert.equal(validateClaimSupport("Lemure AC is 13.", [denseRow], "en").supported, false);
+  });
+
+  it("rejects Lemure reassignment from a following Imp and key in/on swaps", () => {
+    const entities = chunk({ sectionHeading: null, quoteText: "Lemure follows Imp Armor Class 13." });
+    assert.equal(validateClaimSupport("Lemure Armor Class is 13.", [entities], "en").supported, false);
+
+    const key = chunk({ sectionHeading: null, quoteText: "The key is in the lock." });
+    assert.equal(validateClaimSupport("The key is in the lock.", [key], "en").supported, true);
+    assert.equal(validateClaimSupport("The key is on the lock.", [key], "en").supported, false);
   });
 
   it("does not take a value from a later stat label", () => {

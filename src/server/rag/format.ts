@@ -55,7 +55,7 @@ Rules:
 1. Return multiple atomic claims when answering requires more than one source sentence, line, or table row. Each claim must be independently supported by one such context segment.
 2. Every claim must reference one or more contextId values that support that specific claim. Never use evidence attached only to another claim.
 3. A reference is only the exact contextId string. Never return quotes, source metadata, locations, or invented IDs.
-4. Use source vocabulary for every entity, fact, number, unit, negation, and comparison. Add only minimal grammatical connectors. Omit anything that is not explicitly supported.
+4. Use source vocabulary and order for every entity, relationship verb, preposition, adverb, fact, number, unit, negation, and comparison. Add only articles, copulas, possession, or basic conjunctions. Omit anything that is not explicitly supported.
 5. Summarize tables and stat blocks in readable atomic sentences, but never combine facts from separate rows or sentences and keep each number associated with its original label (for example, Armor Class, Hit Points, or Speed).
 6. Return at most ${MAX_CLAIMS} claims, each no longer than ${MAX_CLAIM_LENGTH} characters, and at most ${MAX_REFERENCES_PER_CLAIM} unique references per claim.
 
@@ -69,7 +69,7 @@ Return ONLY valid JSON with exactly this closed shape and no markdown:
   ]
 }
 
-Both claim fields are required. Unknown fields, malformed references, and duplicate references invalidate that claim. If no claim is supported, return {"claims":[]}.`;
+Both claim fields are required. Every referenced context must independently support the complete claim. Unknown fields, malformed references, duplicate references, and unrelated references invalidate that claim. If no claim is supported, return {"claims":[]}.`;
 }
 
 /** Only user-visible source metadata is sent to the model. */
