@@ -389,6 +389,8 @@ function isValidPng(image: Buffer): boolean {
   let expectedScanlineBytes = 0;
   let rowBytes = 0;
   let height = 0;
+  let colorType = -1;
+  let plte = 0;
   let idatEnded = false;
   const idatChunks: Buffer[] = [];
   while (offset < image.byteLength) {
@@ -413,7 +415,7 @@ function isValidPng(image: Buffer): boolean {
       height = image.readUInt32BE(dataOffset + 4);
       if (width < 1 || height < 1 || width > MAX_PREVIEW_DIMENSION_PX || height > MAX_PREVIEW_DIMENSION_PX) return false;
       const bitDepth = image[dataOffset + 8];
-      const colorType = image[dataOffset + 9];
+      colorType = image[dataOffset + 9];
       const compression = image[dataOffset + 10];
       const filter = image[dataOffset + 11];
       const interlace = image[dataOffset + 12];
@@ -424,6 +426,11 @@ function isValidPng(image: Buffer): boolean {
       rowBytes = Math.ceil(rowBits / 8);
       expectedScanlineBytes = (rowBytes + 1) * height;
       if (!Number.isSafeInteger(expectedScanlineBytes) || expectedScanlineBytes > MAX_PREVIEW_DECOMPRESSED_BYTES) return false;
+    } else if (type === PNG_PLTE) {
+      plte += 1;
+      if (ihdr !== 1 || idatBytes > 0 || iend !== 0 || plte > 1) return false;
+      if (colorType !== 2 && colorType !== 6) return false;
+      if (length < 3 || length > 768 || length % 3 !== 0) return false;
     } else if (type === PNG_IDAT) {
       if (ihdr !== 1 || iend !== 0 || idatEnded) return false;
       idatBytes += length;

@@ -206,6 +206,34 @@ test("PNG chunk types allow CRC-valid ancillary chunks in valid order", () => {
   assert.equal(isValidCitationPreviewPng(image), true);
 });
 
+test("PNG PLTE is forbidden for grayscale and allowed once before IDAT for RGB", () => {
+  const palette = pngChunk("PLTE", Buffer.from([0, 0, 0, 255, 255, 255]));
+  for (const colorType of [0, 4]) {
+    assert.equal(isValidCitationPreviewPng(pngWithChunks({ colorType, beforeIdat: [palette] })), false);
+  }
+  for (const colorType of [2, 6]) {
+    assert.equal(isValidCitationPreviewPng(pngWithChunks({ colorType, beforeIdat: [palette] })), true);
+  }
+  for (const length of [3, 768]) {
+    assert.equal(isValidCitationPreviewPng(pngWithChunks({
+      colorType: 2,
+      beforeIdat: [pngChunk("PLTE", Buffer.alloc(length))],
+    })), true);
+  }
+});
+
+test("PNG PLTE rejects malformed sizes, duplicates, and post-IDAT placement", () => {
+  for (const length of [0, 1, 2, 4, 769, 771]) {
+    assert.equal(isValidCitationPreviewPng(pngWithChunks({
+      colorType: 2,
+      beforeIdat: [pngChunk("PLTE", Buffer.alloc(length))],
+    })), false);
+  }
+  const palette = pngChunk("PLTE", Buffer.from([0, 0, 0]));
+  assert.equal(isValidCitationPreviewPng(pngWithChunks({ colorType: 2, beforeIdat: [palette, palette] })), false);
+  assert.equal(isValidCitationPreviewPng(pngWithChunks({ colorType: 2, afterIdat: [palette] })), false);
+});
+
 test("corrupt canonical cache entries are truncated and rerendered from the canonical source PDF", async () => {
   const fixture = await rendererFixture();
   const originalPath = process.env.PATH;
@@ -373,8 +401,9 @@ function rawPngChunk(type: Buffer, data: Buffer): Buffer {
   return chunk;
 }
 
-function pngWithChunks(options: Readonly<{ beforeIdat?: readonly Buffer[]; afterIdat?: readonly Buffer[] }>): Buffer {
-  const base = syntheticPng();
+function pngWithChunks(options: Readonly<{ colorType?: number; beforeIdat?: readonly Buffer[]; afterIdat?: readonly Buffer[] }>): Buffer {
+  const channels = options.colorType === 2 ? 3 : options.colorType === 6 ? 4 : options.colorType === 0 ? 1 : 2;
+  const base = syntheticPng({ colorType: options.colorType, scanlines: Buffer.alloc(1 + channels) });
   const idatOffset = 8 + 25;
   const idatEnd = idatOffset + base.readUInt32BE(idatOffset) + 12;
   return Buffer.concat([
