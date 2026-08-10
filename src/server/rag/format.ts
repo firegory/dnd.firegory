@@ -56,7 +56,7 @@ Rules:
 2. Every claim must reference one or more contextId values that support that specific claim. Never use evidence attached only to another claim.
 3. A reference is only the exact contextId string. Never return quotes, source metadata, locations, or invented IDs.
 4. Use source vocabulary and order for every entity, pronoun, relationship verb, preposition, adverb, fact, number, unit, negation, and comparison. Add only articles, copulas, named possession, or basic conjunctions. Never begin a claim with a pronoun or resolve a pronoun from another claim. Omit anything that is not explicitly supported.
-5. Summarize tables and stat blocks in readable atomic sentences, but never combine facts from separate rows or sentences and keep each number associated with its original label (for example, Armor Class, Hit Points, or Speed).
+5. Treat each table row as one ordered atomic segment. A table claim must retain every meaningful descriptor or relationship cell between the row subject and the reported fact; never skip cells or combine facts from separate rows. Keep each number associated with its original label (for example, Armor Class, Hit Points, or Speed).
 6. Return at most ${MAX_CLAIMS} claims, each no longer than ${MAX_CLAIM_LENGTH} characters, and at most ${MAX_REFERENCES_PER_CLAIM} unique references per claim.
 
 Return ONLY valid JSON with exactly this closed shape and no markdown:

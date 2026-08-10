@@ -66,7 +66,8 @@ export function validateClaimSupport(
   chunks: readonly RetrievalCandidate[],
   language: AnswerLanguage,
 ): ClaimSupportResult {
-  const claimTokens = normalizeClaimStatOrder(canonicalTokens(claim, language).filter((token) => !token.functionWord));
+  const claimTokens = normalizeClaimStatOrder(canonicalTokens(claim, language))
+    .filter((token) => !token.functionWord);
   if (claimTokens.length === 0) return { supported: false, unsupportedTokens: [] };
   if (!pronounsAreBound(claimTokens, language)) {
     return {
@@ -126,7 +127,9 @@ function contiguousSequence(
 function normalizeClaimStatOrder(tokens: readonly Token[]): Token[] {
   const normalized: Token[] = [];
   for (let index = 0; index < tokens.length; index++) {
-    if (isNumericToken(tokens[index].value) && tokens[index + 1]?.value.startsWith("label-")) {
+    if (isNumericToken(tokens[index].value)
+      && tokens[index + 1]?.value.startsWith("label-")
+      && !tokens[index - 1]?.value.startsWith("label-")) {
       normalized.push(tokens[index + 1], tokens[index]);
       index++;
     } else {
@@ -148,7 +151,7 @@ function evidenceSegments(chunk: RetrievalCandidate, language: AnswerLanguage): 
   for (const rawLine of chunk.quoteText.split(/\r?\n/)) {
     const line = rawLine.replaceAll(/\s+/g, " ").trim();
     if (!line) continue;
-    const parts = isTableRow(line) ? tableRowSegments(line) : line.split(/(?<=[.!?;])\s+/u);
+    const parts = isTableRow(line) ? [line] : line.split(/(?<=[.!?;])\s+/u);
     for (const part of parts) {
       for (const bounded of boundSegment(part)) {
         const text = prefixSection(chunk.sectionHeading, bounded);
@@ -161,30 +164,6 @@ function evidenceSegments(chunk: RetrievalCandidate, language: AnswerLanguage): 
 
 function isTableRow(line: string): boolean {
   return line.includes("|") || line.includes("\t");
-}
-
-function tableRowSegments(line: string): string[] {
-  const cells = line.split(/[|\t]/).map((cell) => cell.trim()).filter(Boolean);
-  if (cells.length < 2) return [line];
-  const firstTokens = tokenize(cells[0]);
-  if (firstTokens.some((_, index) => labelAt(firstTokens, index))) {
-    return [cells.join(" ")];
-  }
-  const segments: string[] = [];
-  const anchor = cells[0];
-  let fieldsStarted = false;
-  for (const cell of cells.slice(1)) {
-    const tokens = tokenize(cell);
-    if (tokens.some((_, index) => labelAt(tokens, index))) {
-      fieldsStarted = true;
-      segments.push(`${anchor} ${cell}`);
-    } else if (fieldsStarted) {
-      break;
-    } else {
-      segments.push(`${anchor} ${cell}`);
-    }
-  }
-  return segments.length > 0 ? segments : [line];
 }
 
 function boundSegment(value: string): string[] {

@@ -176,11 +176,20 @@ describe("deterministic claim support", () => {
     assert.equal(validateClaimSupport("The key is on the lock.", [key], "en").supported, false);
   });
 
-  it("keeps the first table entity as anchor across descriptive cells", () => {
+  it("preserves the complete table row without silently skipping descriptors", () => {
     const row = chunk({ sectionHeading: null, quoteText: "Lemure | Medium Fiend | AC 7 | HP 13" });
     assert.equal(validateClaimSupport("Lemure is a Medium Fiend.", [row], "en").supported, true);
-    assert.equal(validateClaimSupport("The Lemure has Armor Class 7.", [row], "en").supported, true);
-    assert.equal(validateClaimSupport("The Lemure has 13 Hit Points.", [row], "en").supported, true);
+    assert.equal(validateClaimSupport("Lemure, a Medium Fiend, has Armor Class 7.", [row], "en").supported, true);
+    assert.equal(validateClaimSupport("Lemure, a Medium Fiend, has AC 7 and HP 13.", [row], "en").supported, true);
+    assert.equal(validateClaimSupport("The Lemure has Armor Class 7.", [row], "en").supported, false);
+    assert.equal(validateClaimSupport("The Lemure has 13 Hit Points.", [row], "en").supported, false);
+  });
+
+  it("rejects table reassignment through intervening entity and relation cells", () => {
+    const entity = chunk({ sectionHeading: null, quoteText: "Lemure | Imp | AC 13" });
+    const relation = chunk({ sectionHeading: null, quoteText: "Lemure | follows Imp | AC 13" });
+    assert.equal(validateClaimSupport("Lemure Armor Class is 13.", [entity], "en").supported, false);
+    assert.equal(validateClaimSupport("Lemure Armor Class is 13.", [relation], "en").supported, false);
   });
 
   it("rejects pronoun-led claims without an explicit local subject", () => {
@@ -200,8 +209,8 @@ describe("deterministic claim support", () => {
       sectionHeading: "Лемур", language: "ru", sourceTitle: "Открытые правила",
       quoteText: "Лемур | КД 13 | Скорость 30 футов",
     });
-    assert.equal(validateClaimSupport("Лемур: КД 13.", [row], "ru").supported, true);
-    assert.equal(validateClaimSupport("Лемур: Скорость 30 футов.", [row], "ru").supported, true);
+    assert.equal(validateClaimSupport("Лемур: КД 13, Скорость 30 футов.", [row], "ru").supported, true);
+    assert.equal(validateClaimSupport("Лемур: Скорость 30 футов.", [row], "ru").supported, false);
     assert.equal(validateClaimSupport("Лемур: КД 30.", [row], "ru").supported, false);
     assert.equal(validateClaimSupport("Лемур: Скорость 13 футов.", [row], "ru").supported, false);
   });
