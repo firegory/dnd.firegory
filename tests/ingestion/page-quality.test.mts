@@ -74,6 +74,30 @@ y = 3*x^4 - 2*x^2 + 7*x - 11
   }
 });
 
+test("accepts complete compact equation sequences separated by whitespace", () => {
+  for (const equations of [
+    "1+2=3 2*3=6 3^2=9",
+    "1 + 2 = 3   2*3 = 6  3 ** 2=9",
+    "x^2=4 y=(x+1)^2 z/2=3",
+    "1+2=3 2 * 3 = 6 3^2 = 9 ".repeat(8).trim(),
+  ]) {
+    assert.equal(assessPageTextQuality(9, equations, "ru").metrics.structuredContent, true, equations);
+  }
+});
+
+test("rejects near-valid compact equation chains without independent relations", () => {
+  for (const invalid of [
+    "1+2=3 2*3=6 3^2 >= <= 9",
+    "1+2=3 + 2*3=6",
+    "1+2=3x=4",
+    "1+2=3 2*3=6=6",
+    "1+2=3 >=<= 2*3=6",
+  ]) {
+    assert.equal(assessPageTextQuality(9, invalid, "ru").metrics.structuredContent, false, invalid);
+    assert.equal(assessPageTextQuality(9, `${invalid} `.repeat(20), "ru").status, "corrupt", invalid);
+  }
+});
+
 test("accepts coherent matrices and numeric CSV tables", () => {
   const matrix = `
 [ 1,  0, -2,  4 ]

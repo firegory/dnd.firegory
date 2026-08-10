@@ -2,7 +2,12 @@ const MAX_STRUCTURED_SCAN_CHARS = 64 * 1024;
 const MAX_STRUCTURED_LINES = 512;
 const MAX_EXPRESSION_TOKENS = 512;
 
-type Token = Readonly<{ kind: "number" | "identifier" | "operator" | "left" | "right" | "comma"; value: string }>;
+type Token = Readonly<{
+  kind: "number" | "identifier" | "operator" | "left" | "right" | "comma";
+  value: string;
+  start: number;
+  end: number;
+}>;
 
 export function isCoherentStructuredContent(text: string): boolean {
   if (text.length === 0 || text.length > MAX_STRUCTURED_SCAN_CHARS) return false;
@@ -22,7 +27,7 @@ function isEquation(line: string): boolean {
   const tokens = tokenize(line);
   if (!tokens) return false;
   const parser = new ExpressionParser(tokens);
-  return parser.parseRelation();
+  return parser.parseRelationSequence();
 }
 
 function isMatrix(text: string, lines: readonly string[]): boolean {
@@ -111,12 +116,14 @@ function tokenize(value: string): readonly Token[] | null {
     if (!match || match.index !== index) return null;
     index = matcher.lastIndex;
     const raw = match[0].trim();
-    if (match[1]) tokens.push({ kind: "number", value: raw });
-    else if (match[2]) tokens.push({ kind: "identifier", value: raw });
-    else if (raw === "(") tokens.push({ kind: "left", value: raw });
-    else if (raw === ")") tokens.push({ kind: "right", value: raw });
-    else if (raw === ",") tokens.push({ kind: "comma", value: raw });
-    else tokens.push({ kind: "operator", value: raw });
+    const start = match.index + match[0].search(/\S/u);
+    const token = { value: raw, start, end: start + raw.length };
+    if (match[1]) tokens.push({ kind: "number", ...token });
+    else if (match[2]) tokens.push({ kind: "identifier", ...token });
+    else if (raw === "(") tokens.push({ kind: "left", ...token });
+    else if (raw === ")") tokens.push({ kind: "right", ...token });
+    else if (raw === ",") tokens.push({ kind: "comma", ...token });
+    else tokens.push({ kind: "operator", ...token });
     if (tokens.length > MAX_EXPRESSION_TOKENS) return null;
   }
   return tokens.length > 0 ? tokens : null;
@@ -130,10 +137,20 @@ class ExpressionParser {
     this.tokens = tokens;
   }
 
-  parseRelation(): boolean {
-    if (!this.parseExpression()) return false;
-    if (!this.takeOperator(["=", "<", ">", "<=", ">="])) return false;
-    return this.parseExpression() && this.index === this.tokens.length;
+  parseRelationSequence(): boolean {
+    let relations = 0;
+    while (this.index < this.tokens.length) {
+      const start = this.index;
+      if (!this.parseExpression()) return false;
+      if (!this.takeOperator(["=", "<", ">", "<=", ">="])) return false;
+      if (!this.parseExpression() || this.index <= start) return false;
+      relations++;
+      if (this.index === this.tokens.length) return relations > 0;
+      const previous = this.tokens[this.index - 1];
+      const next = this.tokens[this.index];
+      if (next.start <= previous.end) return false;
+    }
+    return false;
   }
 
   parseArithmeticOnly(): boolean {
