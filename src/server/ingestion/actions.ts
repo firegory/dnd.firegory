@@ -1,23 +1,17 @@
 /**
- * Admin actions for ingestion job management: retry, reprocess, delete.
+ * Admin actions for ingestion job management: retry and reprocess.
  *
  * All actions require admin authorization (enforced at the API route layer).
  * Status guards prevent invalid state transitions.
- * Delete soft-deletes the source for audit, then hard-deletes files (which
- * cascades to documents, pages, chunks). Artifacts on disk are also removed.
  */
 
-import { rm } from "node:fs/promises";
-import { join } from "node:path";
-
-import { query, withTransaction } from "../db/client.ts";
+import { withTransaction } from "../db/client.ts";
 import {
   getIngestionJob,
   createIngestionJob,
   type IngestionJobRecord,
 } from "./storage.ts";
 import { enqueueJob } from "./queue.ts";
-import { getStorageRoot } from "./paths.ts";
 
 // ---------------------------------------------------------------------------
 // Retry
@@ -51,6 +45,14 @@ export async function retryFailedJob(
   let job: IngestionJobRecord;
   try {
     job = await withTransaction(async (client) => {
+      const source = await client.query<{ deleted_at: string | null }>(
+        "SELECT deleted_at FROM sources WHERE id = $1 FOR UPDATE",
+        [sourceId],
+      );
+      if (!source.rows[0] || source.rows[0].deleted_at !== null) {
+        throw new Error(`Cannot retry job ${jobId}: source ${sourceId} is archived or unavailable.`);
+      }
+
       const file = await client.query<{ source_id: string; deleted_at: string | null }>(
         "SELECT source_id, deleted_at FROM files WHERE id = $1 FOR UPDATE",
         [fileId],
@@ -71,14 +73,6 @@ export async function retryFailedJob(
         || current.rows[0].source_id !== sourceId
         || current.rows[0].file_id !== fileId) {
         throw new Error(`Cannot retry job ${jobId}: it is no longer a matching failed or cancelled job.`);
-      }
-
-      const source = await client.query<{ deleted_at: string | null }>(
-        "SELECT deleted_at FROM sources WHERE id = $1",
-        [sourceId],
-      );
-      if (!source.rows[0] || source.rows[0].deleted_at !== null) {
-        throw new Error(`Cannot retry job ${jobId}: source ${sourceId} is unavailable.`);
       }
 
       const active = await client.query<{ id: string; status: string }>(
@@ -125,30 +119,31 @@ export async function reprocessSource(
   sourceId: string,
   requestedByUserId: string,
 ): Promise<{ job: IngestionJobRecord; queueId: string }> {
-  // Find the latest file for this source
-  const fileResult = await query<{
-    id: string;
-  }>(
-    `SELECT id
-     FROM files
-     WHERE source_id = $1 AND deleted_at IS NULL
-     ORDER BY created_at DESC
-     LIMIT 1`,
-    [sourceId],
-  );
-  if (fileResult.rows.length === 0) {
-    throw new Error(
-      `Cannot reprocess source ${sourceId}: no active file found.`,
-    );
-  }
-
-  const file = fileResult.rows[0];
-
   // Lock active jobs and create the replacement job atomically. Content and
   // artifacts are immutable generation data and are not removed here.
   let job: IngestionJobRecord;
   try {
     job = await withTransaction(async (client) => {
+      const source = await client.query<{ deleted_at: string | null }>(
+        "SELECT deleted_at FROM sources WHERE id = $1 FOR UPDATE",
+        [sourceId],
+      );
+      if (!source.rows[0]) throw new Error(`Source not found: ${sourceId}`);
+      if (source.rows[0].deleted_at !== null) {
+        throw new Error(`Source ${sourceId} is archived and cannot be reprocessed.`);
+      }
+
+      const fileResult = await client.query<{ id: string }>(
+        `SELECT id FROM files
+         WHERE source_id = $1 AND deleted_at IS NULL
+         ORDER BY created_at DESC LIMIT 1`,
+        [sourceId],
+      );
+      const file = fileResult.rows[0];
+      if (!file) {
+        throw new Error(`Cannot reprocess source ${sourceId}: no active file found.`);
+      }
+
       const lockedFile = await client.query<{ source_id: string; deleted_at: string | null }>(
         "SELECT source_id, deleted_at FROM files WHERE id = $1 FOR UPDATE",
         [file.id],
@@ -157,15 +152,6 @@ export async function reprocessSource(
         || lockedFile.rows[0].source_id !== sourceId
         || lockedFile.rows[0].deleted_at !== null) {
         throw new Error(`Cannot reprocess source ${sourceId}: selected file is unavailable.`);
-      }
-
-      const source = await client.query<{ deleted_at: string | null }>(
-        "SELECT deleted_at FROM sources WHERE id = $1",
-        [sourceId],
-      );
-      if (!source.rows[0]) throw new Error(`Source not found: ${sourceId}`);
-      if (source.rows[0].deleted_at !== null) {
-        throw new Error(`Source ${sourceId} has been deleted and cannot be reprocessed.`);
       }
 
       const activeJobs = await client.query<{ id: string; status: string }>(
@@ -185,7 +171,7 @@ export async function reprocessSource(
       });
     });
   } catch (error) {
-    if (isActiveJobUniqueViolation(error)) throw replacementConflict(file.id);
+    if (isActiveJobUniqueViolation(error)) throw replacementConflict("the selected source file");
     throw error;
   }
 
@@ -205,120 +191,4 @@ function isActiveJobUniqueViolation(error: unknown): boolean {
     && error.code === "23505"
     && "constraint" in error
     && error.constraint === "ingestion_jobs_one_active_file_idx";
-}
-
-// ---------------------------------------------------------------------------
-// Delete
-// ---------------------------------------------------------------------------
-
-/**
- * Soft-deletes a source by setting `deleted_at`, preserving the source record
- * for audit. Then hard-deletes files which cascades to documents, pages, and
- * chunks via ON DELETE CASCADE FK constraints. Also removes processed
- * artifacts and original files from disk.
- *
- * Any active (queued/processing) jobs for this source are cancelled first.
- * All DB mutations run inside a single transaction for atomicity.
- *
- * @throws If the source doesn't exist or is already deleted.
- */
-export async function deleteSource(
-  sourceId: string,
-  _requestedByUserId: string,
-): Promise<{
-  cancelledJobs: string[];
-  removedFiles: string[];
-}> {
-  // Verify source exists
-  const sourceCheck = await query<{
-    id: string;
-    deleted_at: string | null;
-  }>(
-    "SELECT id, deleted_at FROM sources WHERE id = $1",
-    [sourceId],
-  );
-  if (sourceCheck.rows.length === 0) {
-    throw new Error(`Source not found: ${sourceId}`);
-  }
-  if (sourceCheck.rows[0].deleted_at !== null) {
-    throw new Error(`Source ${sourceId} is already deleted.`);
-  }
-
-  // Collect file paths for disk cleanup (before DB changes)
-  const files = await query<{ id: string; storage_path: string; processed_artifacts_root: string | null }>(
-    "SELECT id, storage_path, processed_artifacts_root FROM files WHERE source_id = $1",
-    [sourceId],
-  );
-
-  // All DB mutations inside a transaction for atomicity
-  const cancelledJobs = await withTransaction<string[]>(async (client) => {
-    // Cancel any active jobs
-    const activeJobs = await client.query<{ id: string }>(
-      `UPDATE ingestion_jobs
-       SET status = 'cancelled', finished_at = now()
-       WHERE source_id = $1 AND status IN ('queued', 'processing')
-       RETURNING id`,
-      [sourceId],
-    );
-    const cancelled = activeJobs.rows.map((r) => r.id);
-
-    // Soft-delete the source for audit trail
-    await client.query(
-      "UPDATE sources SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
-      [sourceId],
-    );
-
-    // Hard-delete files — ON DELETE CASCADE removes documents, pages, chunks
-    await client.query(
-      "DELETE FROM files WHERE source_id = $1",
-      [sourceId],
-    );
-
-    return cancelled;
-  });
-
-  // Remove files from disk (outside DB transaction — non-fatal)
-  const removedFiles: string[] = [];
-  for (const file of files.rows) {
-    // Remove original file
-    try {
-      await rm(file.storage_path, { force: true });
-      removedFiles.push(file.storage_path);
-    } catch (err) {
-      console.error(
-        `[delete] Failed to remove original file ${file.storage_path}:`,
-        err instanceof Error ? err.message : err,
-      );
-    }
-
-    // Remove processed artifacts
-    if (file.processed_artifacts_root) {
-      try {
-        await rm(file.processed_artifacts_root, { recursive: true, force: true });
-        removedFiles.push(file.processed_artifacts_root);
-      } catch (err) {
-        console.error(
-          `[delete] Failed to remove artifacts ${file.processed_artifacts_root}:`,
-          err instanceof Error ? err.message : err,
-        );
-      }
-    }
-  }
-
-  // Also attempt to remove the source directory from storage
-  try {
-    const storageRoot = getStorageRoot();
-    const sourceOriginalsDir = join(storageRoot, "originals", sourceId);
-    await rm(sourceOriginalsDir, { recursive: true, force: true });
-    const sourceProcessedDir = join(storageRoot, "processed", sourceId);
-    await rm(sourceProcessedDir, { recursive: true, force: true });
-  } catch (err) {
-    // Non-fatal
-    console.error(
-      `[delete] Failed to clean source directory for ${sourceId}:`,
-      err instanceof Error ? err.message : err,
-    );
-  }
-
-  return { cancelledJobs, removedFiles };
 }

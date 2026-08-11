@@ -9,6 +9,7 @@ import { requireAdmin } from "../../../../server/auth/session";
 import { ContentMetadataNotFoundError } from "../../../../server/content/metadata";
 import { getSourceWithStats, listSourceChunkPreviews } from "../../../../server/admin/source-view";
 import { SourceMetadataEditor } from "./source-metadata-editor";
+import { ArchiveSource } from "./archive-source";
 
 const STATUS_STYLES: Record<string, string> = {
   queued: "text-text-muted",
@@ -130,6 +131,8 @@ export default async function SourceDetailPage({ params }: PageProps) {
             </div>
           )}
         </section>
+
+        <ArchiveSource sourceId={source.id} title={source.title} />
       </div>
     </AppLayout>
   );
