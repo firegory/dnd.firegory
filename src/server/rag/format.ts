@@ -69,10 +69,11 @@ Rules:
 export function evidenceSegments(chunks: readonly RetrievalCandidate[]): readonly EvidenceSegment[] {
   return chunks.flatMap((chunk, chunkIndex) => {
     const subjects = segmentSubjects(chunk);
+    const anchor = segmentAnchor(chunk);
     return segmentText(chunk.quoteText).map((quote, segmentIndex) => ({
       id: `C${chunkIndex + 1}:S${segmentIndex + 1}`,
       quote,
-      text: renderSegment(quote, subjects),
+      text: renderSegment(quote, anchor),
       chunk,
       subjects,
     }));
@@ -151,6 +152,7 @@ export function resolveSegmentSelections(
 }
 
 export function sourceCitation(chunk: RetrievalCandidate, quote = chunk.quoteText): SourceCitation {
+  const entityEvidence = citationEvidenceForQuote(chunk, quote);
   return {
     quote,
     sourceTitle: chunk.sourceTitle,
@@ -162,10 +164,29 @@ export function sourceCitation(chunk: RetrievalCandidate, quote = chunk.quoteTex
     fileId: chunk.fileId,
     sourceId: chunk.sourceId,
     chunkId: chunk.chunkId,
-    ...(chunk.entityEvidence?.length
-      ? { entityEvidence: chunk.entityEvidence.map(citationEntityEvidence) }
+    ...(entityEvidence.length
+      ? { entityEvidence: entityEvidence.map(citationEntityEvidence) }
       : {}),
   };
+}
+
+function citationEvidenceForQuote(
+  chunk: RetrievalCandidate,
+  quote: string,
+): readonly EntityEvidence[] {
+  if (!chunk.entityEvidence?.length || quote === chunk.quoteText) return chunk.entityEvidence ?? [];
+  const quoteWords = normalizedWords(quote);
+  return chunk.entityEvidence.filter((evidence) => {
+    const evidenceWords = normalizedWords(evidence.quote);
+    return evidenceWords.length > 0
+      && (containsWordSequence(quoteWords, evidenceWords) || containsWordSequence(evidenceWords, quoteWords));
+  });
+}
+
+function containsWordSequence(words: readonly string[], expected: readonly string[]): boolean {
+  return expected.length <= words.length && words.some((_, start) => (
+    expected.every((word, offset) => words[start + offset] === word)
+  ));
 }
 
 export function citationEntityEvidence(evidence: EntityEvidence): CitationEntityEvidence {
@@ -211,10 +232,7 @@ function boundedUnits(value: string): string[] {
 }
 
 function segmentSubjects(chunk: RetrievalCandidate): string[] {
-  const candidates = [
-    chunk.sectionHeading,
-    ...(chunk.entityEvidence?.map((evidence) => evidence.title) ?? []),
-  ];
+  const candidates = [...(chunk.entityEvidence?.map((evidence) => evidence.title) ?? []), chunk.sectionHeading];
   const seen = new Set<string>();
   return candidates.filter((candidate): candidate is string => {
     const normalized = candidate?.trim().toLocaleLowerCase();
@@ -224,9 +242,15 @@ function segmentSubjects(chunk: RetrievalCandidate): string[] {
   });
 }
 
-function renderSegment(quote: string, subjects: readonly string[]): string {
-  if (subjects.length !== 1 || containsNormalized(quote, subjects[0])) return quote;
-  return `${subjects[0]}: ${quote}`;
+function segmentAnchor(chunk: RetrievalCandidate): string | null {
+  const entityTitles = [...new Set(chunk.entityEvidence?.map((evidence) => evidence.title.trim()).filter(Boolean) ?? [])];
+  if (entityTitles.length === 1) return entityTitles[0];
+  return chunk.sectionHeading?.trim() || null;
+}
+
+function renderSegment(quote: string, anchor: string | null): string {
+  if (!anchor || containsNormalized(quote, anchor)) return quote;
+  return `${anchor}: ${quote}`;
 }
 
 function containsNormalized(value: string, expected: string): boolean {
@@ -239,7 +263,7 @@ export function selectionAnswersQuery(
   selected: readonly EvidenceSegment[],
   allSegments: readonly EvidenceSegment[],
 ): boolean {
-  const queryWords = new Set(normalizedWords(query).filter((word) => !QUERY_GLUE.has(word)));
+  const queryWords = new Set(normalizedWords(query, true).filter((word) => !QUERY_GLUE.has(word)));
   if (queryWords.size === 0) return false;
 
   const knownSubjects = [...new Set(allSegments.flatMap((segment) => segment.subjects))];
@@ -247,36 +271,60 @@ export function selectionAnswersQuery(
     const words = normalizedWords(subject);
     return words.length > 0 && words.every((word) => queryWords.has(word));
   });
-
-  return selected.every((segment) => {
-    const words = new Set(normalizedWords(segment.text));
-    if (requestedSubjects.length > 0) {
-      return requestedSubjects.some((subject) => normalizedWords(subject).every((word) => words.has(word)));
+  const selectedWordSets = selected.map((segment) => new Set(normalizedWords(segment.text)));
+  const subjectWords = new Set(requestedSubjects.flatMap((subject) => normalizedWords(subject)));
+  const requiredWords = [...queryWords].filter((word) => !subjectWords.has(word));
+  const selectedUnion = new Set(selectedWordSets.flatMap((words) => [...words]));
+  if (requestedSubjects.length > 0) {
+    const matchesSubject = (words: ReadonlySet<string>, subject: string) => (
+      normalizedWords(subject).every((word) => words.has(word))
+    );
+    if (!selectedWordSets.every((words) => requestedSubjects.some((subject) => matchesSubject(words, subject)))) {
+      return false;
     }
-    return [...queryWords].some((word) => words.has(word));
-  });
+    if (!requestedSubjects.every((subject) => matchesSubject(selectedUnion, subject))) return false;
+  }
+  if (!requiredWords.every((word) => selectedUnion.has(word))) return false;
+
+  const relevanceWords = new Set(requiredWords.length > 0 ? requiredWords : subjectWords);
+  return selectedWordSets.every((words) => [...relevanceWords].some((word) => words.has(word)));
 }
 
 const QUERY_GLUE = new Set([
-  "a", "an", "and", "are", "can", "do", "does", "for", "how", "i", "in", "is", "me", "of", "on", "the",
-  "to", "what", "when", "where", "which", "who", "why", "with", "you", "your",
-  "а", "в", "где", "для", "и", "из", "как", "когда", "кто", "мне", "на", "о", "об", "по", "про", "что", "это",
+  "a", "about", "an", "and", "are", "can", "do", "does", "for", "have", "how", "i", "in", "is", "many", "me", "much",
+  "number", "of", "on", "or", "please", "s", "show", "tell", "the", "to", "value", "what", "when", "where", "which",
+  "who", "why", "with", "you", "your",
+  "compare",
+  "а", "в", "где", "для", "есть", "и", "из", "известно", "как", "какой", "какая", "какие", "когда", "кто", "мне",
+  "значение", "ли", "на", "о", "об", "покажи", "по", "про", "расскажи", "сколько", "сравни", "сравнить", "у", "что", "это", "или",
 ]);
 
-function normalizedWords(value: string): string[] {
-  return value.normalize("NFC").toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu)?.flatMap((word) => {
+const SPEED_QUESTION_WORDS = new Set(["fast", "quickly", "быстро", "быстрее"]);
+const SPEED_QUESTION_FRAMING = new Set([
+  "move", "moves", "moving", "movement", "двигается", "двигаться", "движение", "движения",
+]);
+
+function normalizedWords(value: string, canonicalizeAliases = false): string[] {
+  const rawWords = value.normalize("NFC").toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  const speedQuestion = canonicalizeAliases && rawWords.some((word, index) => (
+    (word === "how" || word === "как") && SPEED_QUESTION_WORDS.has(rawWords[index + 1] ?? "")
+  ));
+  return rawWords.flatMap((word) => {
     if (word === "ac") return ["armor", "class"];
     if (word === "hp") return ["hit", "point"];
-    if (word === "кд") return ["класс", "доспеха"];
+    if (word === "кд") return ["класс", "доспех"];
+    if (speedQuestion && SPEED_QUESTION_WORDS.has(word)) return [/^[а-яё]+$/u.test(word) ? "скорость" : "speed"];
+    if (speedQuestion && SPEED_QUESTION_FRAMING.has(word)) return [];
+    if (word === "class") return [word];
     if (/^[а-яё]+$/u.test(word)) return [russianStem(word)];
     return [word.length > 4 && /s$/u.test(word) ? word.slice(0, -1) : word];
-  }) ?? [];
+  });
 }
 
 function russianStem(word: string): string {
-  if (word.length < 5) return word;
-  for (const suffix of ["иями", "ями", "ами", "ого", "ему", "ому", "ах", "ях", "ов", "ев", "ом", "ем", "ой", "ей", "а", "я", "у", "ю", "ы", "и"]) {
-    if (word.endsWith(suffix) && word.length - suffix.length >= 4) return word.slice(0, -suffix.length);
+  if (word.length < 4) return word;
+  for (const suffix of ["иями", "ями", "ами", "ого", "его", "ему", "ому", "ая", "яя", "ую", "юю", "ах", "ях", "ов", "ев", "ом", "ем", "ый", "ий", "ой", "ей", "а", "я", "у", "ю", "ы", "и"]) {
+    if (word.endsWith(suffix) && word.length - suffix.length >= 3) return word.slice(0, -suffix.length);
   }
   return word;
 }

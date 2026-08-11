@@ -81,10 +81,10 @@ export function extractiveFallback(
 ): GroundedAnswer {
   if (chunks.length === 0) return unsupportedAnswer(language, 0);
   const messages = FALLBACK_MESSAGES[language];
-  const citations = chunks.slice(0, 3).flatMap((chunk) => {
+  const citations = chunks.flatMap((chunk) => {
     const segment = evidenceSegments([chunk])[0];
     return segment ? [sourceCitation(chunk, segment.quote)] : [];
-  });
+  }).slice(0, 3);
   return {
     answer: messages[reason],
     claims: [],
