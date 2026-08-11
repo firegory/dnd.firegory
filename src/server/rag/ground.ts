@@ -1,6 +1,7 @@
 import {
   evidenceSegments,
   resolveSegmentSelections,
+  selectionAnswersQuery,
   sourceCitation,
   type AnswerLanguage,
   type RawLlmResponse,
@@ -16,6 +17,7 @@ export type AnswerFallbackReason =
   | "malformed_selection"
   | "partial_response"
   | "no_selection"
+  | "irrelevant_selection"
   | "selection_normalized";
 
 export type GroundedClaim = Readonly<{
@@ -36,16 +38,20 @@ export function groundGeneratedAnswer(
   parsed: RawLlmResponse,
   chunks: readonly RetrievalCandidate[],
   language: AnswerLanguage,
+  query: string,
 ): GroundedAnswer {
   if (parsed.rejected) return extractiveFallback(language, chunks, "malformed_selection");
   if (parsed.selections.length === 0) return extractiveFallback(language, chunks, "no_selection");
 
   const selected = resolveSegmentSelections(parsed.selections, chunks);
   if (!selected) return extractiveFallback(language, chunks, "malformed_selection");
+  if (!selectionAnswersQuery(query, selected, evidenceSegments(chunks))) {
+    return extractiveFallback(language, chunks, "irrelevant_selection");
+  }
 
   const claims = selected.map((segment) => ({
     text: segment.text,
-    citations: [sourceCitation(segment.chunk, segment.text)],
+    citations: [sourceCitation(segment.chunk, segment.quote)],
   }));
   return {
     answer: claims.map((claim) => claim.text).join("\n\n"),
@@ -77,7 +83,7 @@ export function extractiveFallback(
   const messages = FALLBACK_MESSAGES[language];
   const citations = chunks.slice(0, 3).flatMap((chunk) => {
     const segment = evidenceSegments([chunk])[0];
-    return segment ? [sourceCitation(chunk, segment.text)] : [];
+    return segment ? [sourceCitation(chunk, segment.quote)] : [];
   });
   return {
     answer: messages[reason],
@@ -97,6 +103,7 @@ const FALLBACK_MESSAGES: Record<AnswerLanguage, Record<Exclude<AnswerFallbackRea
     malformed_selection: "The AI response could not be safely validated. Review the retrieved source excerpts below.",
     partial_response: "The AI response was incomplete. Review the retrieved source excerpts below.",
     no_selection: "No directly supporting segment was selected. Review the retrieved source excerpts below.",
+    irrelevant_selection: "The selected source text does not answer this question. Review the retrieved source excerpts below.",
   },
   ru: {
     provider_not_configured: "Генерация ответа ИИ не настроена. Ниже приведены найденные фрагменты источников.",
@@ -105,6 +112,7 @@ const FALLBACK_MESSAGES: Record<AnswerLanguage, Record<Exclude<AnswerFallbackRea
     malformed_selection: "Ответ ИИ не прошёл безопасную проверку. Ниже приведены найденные фрагменты источников.",
     partial_response: "Ответ ИИ был получен не полностью. Ниже приведены найденные фрагменты источников.",
     no_selection: "Подходящий подтверждающий фрагмент не выбран. Ниже приведены найденные фрагменты источников.",
+    irrelevant_selection: "Выбранный фрагмент источника не отвечает на этот вопрос. Ниже приведены найденные фрагменты источников.",
   },
 };
 

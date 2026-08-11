@@ -30,7 +30,7 @@ type SearchResult = Readonly<{
   citations: readonly Citation[];
   confident: boolean;
   fallbackReason: "insufficient_retrieval" | "provider_not_configured" | "provider_config_error"
-    | "provider_unavailable" | "malformed_selection" | "partial_response" | "no_selection"
+    | "provider_unavailable" | "malformed_selection" | "partial_response" | "no_selection" | "irrelevant_selection"
     | "selection_normalized" | null;
   retrievedChunks: number;
   meta: {
@@ -221,7 +221,7 @@ function SearchResultView({ result, isAdmin }: { result: SearchResult; isAdmin: 
       <section className="rounded-2xl border border-accent/30 bg-accent/5 p-6">
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <span className="rounded-full bg-accent/15 px-2.5 py-0.5 text-xs font-semibold text-accent">
-            {t("aiAnswer")}
+            {t(result.claims.length ? "aiAnswer" : "sourceExcerpts")}
           </span>
           <span className="rounded-full bg-surface px-2.5 py-0.5 text-xs font-medium text-text-muted">
             {t("basedOnCitations", { count: result.citations.length })}

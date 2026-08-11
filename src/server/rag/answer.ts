@@ -189,7 +189,7 @@ export async function generateAnswer(
     };
   }
   const parsed = parseLlmResponse(result.content);
-  const answer: RagAnswer = groundGeneratedAnswer(parsed, chunks, answerLanguage);
+  const answer: RagAnswer = groundGeneratedAnswer(parsed, chunks, answerLanguage, query);
 
   return {
     answer,

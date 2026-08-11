@@ -25,8 +25,10 @@ export type CitationEntityEvidence = Readonly<Pick<
 
 export type EvidenceSegment = Readonly<{
   id: string;
+  quote: string;
   text: string;
   chunk: RetrievalCandidate;
+  subjects: readonly string[];
 }>;
 
 export type RawLlmResponse = Readonly<{
@@ -65,11 +67,16 @@ Rules:
 
 /** Produces stable IDs over exact, bounded substrings of authorized quote text. */
 export function evidenceSegments(chunks: readonly RetrievalCandidate[]): readonly EvidenceSegment[] {
-  return chunks.flatMap((chunk, chunkIndex) => segmentText(chunk.quoteText).map((text, segmentIndex) => ({
-    id: `C${chunkIndex + 1}:S${segmentIndex + 1}`,
-    text,
-    chunk,
-  })));
+  return chunks.flatMap((chunk, chunkIndex) => {
+    const subjects = segmentSubjects(chunk);
+    return segmentText(chunk.quoteText).map((quote, segmentIndex) => ({
+      id: `C${chunkIndex + 1}:S${segmentIndex + 1}`,
+      quote,
+      text: renderSegment(quote, subjects),
+      chunk,
+      subjects,
+    }));
+  });
 }
 
 /** Only user-visible source metadata and exact authorized segments are sent to the model. */
@@ -198,16 +205,80 @@ function sentenceUnits(line: string): string[] {
 }
 
 function boundedUnits(value: string): string[] {
-  const units: string[] = [];
-  let remainder = value;
-  while (remainder.length > MAX_SEGMENT_LENGTH) {
-    const whitespace = remainder.lastIndexOf(" ", MAX_SEGMENT_LENGTH);
-    const boundary = whitespace >= Math.floor(MAX_SEGMENT_LENGTH / 2) ? whitespace : MAX_SEGMENT_LENGTH;
-    units.push(remainder.slice(0, boundary).trimEnd());
-    remainder = remainder.slice(boundary).trimStart();
+  // Never cut a sentence or table row: doing so can detach the subject,
+  // negation, comparison, or label from its value.
+  return value.length <= MAX_SEGMENT_LENGTH ? [value] : [];
+}
+
+function segmentSubjects(chunk: RetrievalCandidate): string[] {
+  const candidates = [
+    chunk.sectionHeading,
+    ...(chunk.entityEvidence?.map((evidence) => evidence.title) ?? []),
+  ];
+  const seen = new Set<string>();
+  return candidates.filter((candidate): candidate is string => {
+    const normalized = candidate?.trim().toLocaleLowerCase();
+    if (!normalized || normalized.length > 120 || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
+}
+
+function renderSegment(quote: string, subjects: readonly string[]): string {
+  if (subjects.length !== 1 || containsNormalized(quote, subjects[0])) return quote;
+  return `${subjects[0]}: ${quote}`;
+}
+
+function containsNormalized(value: string, expected: string): boolean {
+  const words = new Set(normalizedWords(value));
+  return normalizedWords(expected).every((word) => words.has(word));
+}
+
+export function selectionAnswersQuery(
+  query: string,
+  selected: readonly EvidenceSegment[],
+  allSegments: readonly EvidenceSegment[],
+): boolean {
+  const queryWords = new Set(normalizedWords(query).filter((word) => !QUERY_GLUE.has(word)));
+  if (queryWords.size === 0) return false;
+
+  const knownSubjects = [...new Set(allSegments.flatMap((segment) => segment.subjects))];
+  const requestedSubjects = knownSubjects.filter((subject) => {
+    const words = normalizedWords(subject);
+    return words.length > 0 && words.every((word) => queryWords.has(word));
+  });
+
+  return selected.every((segment) => {
+    const words = new Set(normalizedWords(segment.text));
+    if (requestedSubjects.length > 0) {
+      return requestedSubjects.some((subject) => normalizedWords(subject).every((word) => words.has(word)));
+    }
+    return [...queryWords].some((word) => words.has(word));
+  });
+}
+
+const QUERY_GLUE = new Set([
+  "a", "an", "and", "are", "can", "do", "does", "for", "how", "i", "in", "is", "me", "of", "on", "the",
+  "to", "what", "when", "where", "which", "who", "why", "with", "you", "your",
+  "а", "в", "где", "для", "и", "из", "как", "когда", "кто", "мне", "на", "о", "об", "по", "про", "что", "это",
+]);
+
+function normalizedWords(value: string): string[] {
+  return value.normalize("NFC").toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu)?.flatMap((word) => {
+    if (word === "ac") return ["armor", "class"];
+    if (word === "hp") return ["hit", "point"];
+    if (word === "кд") return ["класс", "доспеха"];
+    if (/^[а-яё]+$/u.test(word)) return [russianStem(word)];
+    return [word.length > 4 && /s$/u.test(word) ? word.slice(0, -1) : word];
+  }) ?? [];
+}
+
+function russianStem(word: string): string {
+  if (word.length < 5) return word;
+  for (const suffix of ["иями", "ями", "ами", "ого", "ему", "ому", "ах", "ях", "ов", "ев", "ом", "ем", "ой", "ей", "а", "я", "у", "ю", "ы", "и"]) {
+    if (word.endsWith(suffix) && word.length - suffix.length >= 4) return word.slice(0, -suffix.length);
   }
-  if (remainder) units.push(remainder);
-  return units;
+  return word;
 }
 
 function compareSegmentIds(left: string, right: string): number {

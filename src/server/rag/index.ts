@@ -11,6 +11,7 @@ export {
   parseLlmResponse,
   evidenceSegments,
   resolveSegmentSelections,
+  selectionAnswersQuery,
   type AnswerLanguage,
   type EvidenceSegment,
   type SourceCitation,
