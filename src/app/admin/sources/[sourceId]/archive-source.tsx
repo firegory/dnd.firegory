@@ -24,7 +24,7 @@ export function ArchiveSource({ sourceId, title }: { sourceId: string; title: st
       const data = await response.json();
       if (!response.ok) {
         setStatus("error");
-        setError(data.error ?? t("archiveSourceFailed"));
+        setError(archiveErrorMessage(data.code, t) ?? data.error ?? t("archiveSourceFailed"));
         return;
       }
       router.replace("/admin/sources");
@@ -61,4 +61,12 @@ export function ArchiveSource({ sourceId, title }: { sourceId: string; title: st
       </button>
     </section>
   );
+}
+
+function archiveErrorMessage(code: unknown, t: ReturnType<typeof useUiLanguage>["t"]): string | null {
+  if (code === "SOURCE_ARCHIVE_TITLE_MISMATCH") return t("archiveSourceTitleMismatch");
+  if (code === "SOURCE_HAS_ACTIVE_JOBS") return t("archiveSourceActiveJobs");
+  if (code === "SOURCE_MANAGED_BY_NFS") return t("archiveSourceNfsManaged");
+  if (code === "SOURCE_ALREADY_ARCHIVED") return t("archiveSourceAlreadyArchived");
+  return null;
 }

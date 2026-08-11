@@ -232,6 +232,19 @@ test("content metadata service soft-deletes files without exposing source deleti
 
   assert.equal(deletedFile.deletedAt, now.toISOString());
   assert.match(db.calls[0]?.sql ?? "", /UPDATE files SET deleted_at = now\(\)/);
+  assert.match(db.calls[0]?.sql ?? "", /SELECT id FROM sources WHERE id = \$2 AND deleted_at IS NULL FOR UPDATE/);
+});
+
+test("content metadata service locks the active source before file updates", async () => {
+  const current = fileRow();
+  const db = new RecordingDb([[current], [{ ...current, original_filename: "updated.pdf" }]]);
+  const service = new ContentMetadataService(db);
+
+  const updated = await service.updateFile(admin, "source-1", "file-1", { originalFilename: "updated.pdf" });
+
+  assert.equal(updated.originalFilename, "updated.pdf");
+  assert.match(db.calls[1]?.sql ?? "", /SELECT id FROM sources WHERE id = \$2 AND deleted_at IS NULL FOR UPDATE/);
+  assert.match(db.calls[1]?.sql ?? "", /UPDATE files/);
 });
 
 test("content metadata service deep-merges partial publication updates without loss", async () => {

@@ -405,14 +405,18 @@ export class ContentMetadataService {
     const current = await this.getFile(admin, sourceId, fileId);
     const merged = normalizeFileInput({ ...current, sourceId, ...input });
     const result = await this.db.query<FileRow>(
-      `UPDATE files
+      `WITH active_source AS MATERIALIZED (
+        SELECT id FROM sources WHERE id = $2 AND deleted_at IS NULL FOR UPDATE
+      )
+      UPDATE files
       SET original_filename = $3,
           mime_type = $4,
           checksum_sha256 = $5,
           byte_size = $6,
           storage_path = $7,
           processed_artifacts_root = $8
-      WHERE id = $1 AND source_id = $2 AND deleted_at IS NULL
+      FROM active_source
+      WHERE files.id = $1 AND files.source_id = active_source.id AND files.deleted_at IS NULL
       RETURNING *`,
       [
         fileId,
@@ -426,7 +430,7 @@ export class ContentMetadataService {
       ],
     );
     const row = result.rows[0];
-    if (!row) throw new ContentMetadataNotFoundError("File metadata record was not found.");
+    if (!row) throw new ContentMetadataConflictError("Archived or unavailable sources cannot modify files.");
     return mapFileRow(row);
   }
 
@@ -435,13 +439,17 @@ export class ContentMetadataService {
     validateId(sourceId, "sourceId");
     validateId(fileId, "fileId");
     const result = await this.db.query<FileRow>(
-      `UPDATE files SET deleted_at = now()
-      WHERE id = $1 AND source_id = $2 AND deleted_at IS NULL
+      `WITH active_source AS MATERIALIZED (
+        SELECT id FROM sources WHERE id = $2 AND deleted_at IS NULL FOR UPDATE
+      )
+      UPDATE files SET deleted_at = now()
+      FROM active_source
+      WHERE files.id = $1 AND files.source_id = active_source.id AND files.deleted_at IS NULL
       RETURNING *`,
       [fileId, sourceId],
     );
     const row = result.rows[0];
-    if (!row) throw new ContentMetadataNotFoundError("File metadata record was not found.");
+    if (!row) throw new ContentMetadataConflictError("Archived or unavailable sources cannot delete files.");
     return mapFileRow(row);
   }
 }
