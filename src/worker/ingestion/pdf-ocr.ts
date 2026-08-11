@@ -125,8 +125,10 @@ export async function ocrPdf(
     ), {
       timeoutMs: OCR_TOOL_TIMEOUT_MS,
       maxStdoutBytes: TOOL_STDIO_MAX_BYTES,
-      maxOutputBytes: MAX_OCR_WORKSPACE_BYTES,
-      monitorPaths: [workspace],
+      monitorLimits: [
+        { path: privateOcrPath, maxBytes: MAX_OCR_OUTPUT_BYTES, kind: "file", label: "OCR output PDF" },
+        { path: workspace, maxBytes: MAX_OCR_WORKSPACE_BYTES, kind: "directory", label: "OCR workspace" },
+      ],
       cwd: workspace,
       env: { ...process.env, TMPDIR: workspace },
     });
@@ -191,7 +193,10 @@ export async function readOcrSidecar(sidecarPath: string): Promise<string[]> {
 
 export function sanitizeOcrError(error: unknown): string {
   if (error instanceof ToolExecutionError && error.reason === "timeout") return "OCR command timed out";
-  if (error instanceof ToolExecutionError && error.reason === "output-limit") return "OCR workspace exceeded size limit";
+  if (error instanceof ToolExecutionError && error.reason === "output-limit") {
+    return `${error.limitLabel ?? "OCR workspace"} exceeded size limit`;
+  }
+  if (error instanceof ToolExecutionError && error.reason === "monitor-error") return "OCR workspace monitoring failed";
   if (error instanceof ToolExecutionError && error.reason === "stdout-limit") return "OCR command output exceeded size limit";
   if (error instanceof ToolExecutionError && error.reason === "exit") return `OCR command failed with code ${error.exitCode ?? "unknown"}`;
   if (error instanceof Error && "killed" in error && error.killed) return "OCR command timed out";

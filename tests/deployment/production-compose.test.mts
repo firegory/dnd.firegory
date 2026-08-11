@@ -167,6 +167,16 @@ test("all services have least-privilege runtime limits", () => {
   assert.deepEqual(Object.keys(production.volumes).sort(), ["postgres_data", "redis_data", "upload_spool"]);
 });
 
+test("worker resources accommodate the bounded OCR workspace and remain overrideable", () => {
+  assert.deepEqual(production.services.worker.tmpfs, [
+    "/tmp:rw,nosuid,nodev,size=${WORKER_TMPFS_SIZE:-3G},mode=1777",
+  ]);
+  assert.deepEqual(production.services.worker.deploy?.resources?.limits, {
+    cpus: "${WORKER_CPU_LIMIT:-2.0}",
+    memory: "${WORKER_MEMORY_LIMIT:-4G}",
+  });
+});
+
 test("Redis generates protected tmpfs configuration without password arguments", () => {
   assert.match(redisEntrypoint, /sha256sum/);
   assert.match(redisEntrypoint, /user healthcheck on nopass -@all \+ping/);

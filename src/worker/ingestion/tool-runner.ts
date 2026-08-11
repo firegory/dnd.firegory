@@ -1,21 +1,38 @@
 import { spawn } from "node:child_process";
-import { lstat, opendir } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { lstat, open, opendir, type FileHandle } from "node:fs/promises";
+import { join } from "node:path";
 
 import { TOOL_SIZE_POLL_MS } from "../../server/ingestion/limits.ts";
 
-export type ToolFailureReason = "exit" | "timeout" | "stdout-limit" | "output-limit";
+export type ToolFailureReason = "exit" | "timeout" | "stdout-limit" | "output-limit" | "monitor-error";
+
+type MonitorLimit = Readonly<{
+  path: string;
+  maxBytes: number;
+  kind?: "file" | "directory";
+  label?: string;
+}>;
 
 export class ToolExecutionError extends Error {
   readonly reason: ToolFailureReason;
   readonly exitCode: number | null;
+  readonly limitLabel: string | null;
 
   constructor(
     reason: ToolFailureReason,
     exitCode: number | null = null,
+    limitLabel: string | null = null,
   ) {
-    super(reason === "exit" ? `Tool exited with code ${exitCode ?? "unknown"}` : `Tool exceeded ${reason}`);
+    super(reason === "exit"
+      ? `Tool exited with code ${exitCode ?? "unknown"}`
+      : reason === "monitor-error"
+        ? "Tool output monitoring failed"
+        : `Tool exceeded ${reason}`);
+    this.name = "ToolExecutionError";
     this.reason = reason;
     this.exitCode = exitCode;
+    this.limitLabel = limitLabel;
   }
 }
 
@@ -27,12 +44,21 @@ export async function runMonitoredTool(
     maxStdoutBytes: number;
     maxOutputBytes?: number;
     monitorPaths?: readonly string[];
-    monitorLimits?: readonly Readonly<{ path: string; maxBytes: number }>[];
+    monitorLimits?: readonly MonitorLimit[];
     cwd?: string;
     env?: NodeJS.ProcessEnv;
     pollMs?: number;
   }>,
 ): Promise<Readonly<{ stdout: string; stderr: string }>> {
+  const directoryRoots = new Map<string, FileIdentity>();
+  try {
+    for (const monitor of options.monitorLimits ?? []) {
+      if (monitor.kind === "directory") directoryRoots.set(monitor.path, await realDirectoryIdentity(monitor.path));
+    }
+  } catch {
+    throw new ToolExecutionError("monitor-error");
+  }
+
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
@@ -45,8 +71,9 @@ export async function runMonitoredTool(
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
+    let closing = false;
     let failure: ToolExecutionError | null = null;
-    let polling = false;
+    let monitorPromise: Promise<void> | null = null;
 
     const killGroup = () => {
       if (!child.pid) return;
@@ -79,32 +106,33 @@ export async function runMonitoredTool(
       reject(error);
     });
 
+    const inspectMonitors = async () => {
+      const aggregateSizes = await Promise.all((options.monitorPaths ?? []).map((path) => pathSizeOrZero(path)));
+      const limitSizes = await Promise.all((options.monitorLimits ?? []).map(async (monitor) => ({
+        ...monitor,
+        size: monitor.kind === "directory"
+          ? await directorySizeNoFollow(monitor.path, directoryRoots.get(monitor.path)!)
+          : await pathSizeOrZero(monitor.path, monitor.kind),
+      })));
+      if (options.maxOutputBytes !== undefined
+        && aggregateSizes.reduce((sum, size) => sum + size, 0) > options.maxOutputBytes) {
+        fail(new ToolExecutionError("output-limit"));
+        return;
+      }
+      const exceeded = limitSizes.find((monitor) => monitor.size > monitor.maxBytes);
+      if (exceeded) fail(new ToolExecutionError("output-limit", null, exceeded.label ?? null));
+    };
+    const monitor = () => {
+      if (monitorPromise) return;
+      monitorPromise = inspectMonitors()
+        .catch(() => fail(new ToolExecutionError("monitor-error")))
+        .finally(() => { monitorPromise = null; });
+    };
     const timeout = setTimeout(() => fail(new ToolExecutionError("timeout")), options.timeoutMs);
     const hasMonitors = Boolean(
-      (options.maxOutputBytes && options.monitorPaths?.length) || options.monitorLimits?.length,
+      (options.maxOutputBytes !== undefined && options.monitorPaths?.length) || options.monitorLimits?.length,
     );
-    const poll = hasMonitors
-      ? setInterval(async () => {
-        if (polling) return;
-        polling = true;
-        try {
-          const aggregateSizes = await Promise.all((options.monitorPaths ?? []).map(pathSizeOrZero));
-          const limitSizes = await Promise.all((options.monitorLimits ?? []).map(async (monitor) => ({
-            ...monitor,
-            size: await pathSizeOrZero(monitor.path),
-          })));
-          if ((options.maxOutputBytes !== undefined
-              && aggregateSizes.reduce((sum, size) => sum + size, 0) > options.maxOutputBytes)
-            || limitSizes.some((monitor) => monitor.size > monitor.maxBytes)) {
-            fail(new ToolExecutionError("output-limit"));
-          }
-        } catch {
-          fail(new ToolExecutionError("output-limit"));
-        } finally {
-          polling = false;
-        }
-      }, options.pollMs ?? TOOL_SIZE_POLL_MS)
-      : undefined;
+    const poll = hasMonitors ? setInterval(monitor, options.pollMs ?? TOOL_SIZE_POLL_MS) : undefined;
     poll?.unref();
     timeout.unref();
 
@@ -112,10 +140,15 @@ export async function runMonitoredTool(
       clearTimeout(timeout);
       if (poll) clearInterval(poll);
     };
-    child.on("close", (code) => {
-      if (settled) return;
-      settled = true;
+    child.on("close", async (code) => {
+      if (settled || closing) return;
+      closing = true;
       cleanup();
+      await monitorPromise;
+      if (!failure && code === 0 && hasMonitors) {
+        await inspectMonitors().catch(() => fail(new ToolExecutionError("monitor-error")));
+      }
+      settled = true;
       // Tools must not leave helpers running after the direct child exits.
       killGroup();
       if (failure) return reject(failure);
@@ -125,21 +158,81 @@ export async function runMonitoredTool(
   });
 }
 
-async function pathSizeOrZero(path: string): Promise<number> {
+type FileIdentity = Readonly<{ dev: bigint; ino: bigint }>;
+
+async function realDirectoryIdentity(path: string): Promise<FileIdentity> {
+  const metadata = await lstat(path, { bigint: true });
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error("Monitored root is not a real directory");
+  return { dev: metadata.dev, ino: metadata.ino };
+}
+
+async function pathSizeOrZero(path: string, kind?: MonitorLimit["kind"]): Promise<number> {
   try {
-    return await pathSizeNoFollow(path);
+    const metadata = await lstat(path);
+    if (kind === "file" && !metadata.isFile()) {
+      throw new Error("Monitored output is not a regular file");
+    }
+    return await pathSizeNoFollow(path, metadata);
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return 0;
     throw error;
   }
 }
 
-async function pathSizeNoFollow(path: string): Promise<number> {
-  const metadata = await lstat(path);
-  if (metadata.isSymbolicLink()) throw new Error("Monitored output contains a symbolic link");
+async function directorySizeNoFollow(path: string, expected: FileIdentity): Promise<number> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    const current = await handle.stat({ bigint: true });
+    if (current.dev !== expected.dev || current.ino !== expected.ino) throw new Error("Monitored root was replaced");
+    return await openedDirectorySizeNoFollow(handle);
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function pathSizeNoFollow(path: string, knownMetadata?: Stats): Promise<number> {
+  let metadata: Stats;
+  try {
+    metadata = knownMetadata ?? await lstat(path);
+  } catch (error) {
+    if (isMissing(error)) return 0;
+    throw error;
+  }
   if (!metadata.isDirectory()) return metadata.size;
+
+  let handle: FileHandle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  } catch (error) {
+    // A nested entry may disappear or change type between lstat and open.
+    // The next poll will account for its replacement without ever following it.
+    if (isNestedDirectoryRace(error)) return 0;
+    throw error;
+  }
+
+  try {
+    return await openedDirectorySizeNoFollow(handle);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function openedDirectorySizeNoFollow(handle: FileHandle): Promise<number> {
   let total = 0;
-  const directory = await opendir(path);
-  for await (const entry of directory) total += await pathSizeNoFollow(`${path}/${entry.name}`);
+  // /proc/self/fd pins every parent directory while child names are inspected.
+  const pinnedPath = `/proc/self/fd/${handle.fd}`;
+  const directory = await opendir(pinnedPath);
+  for await (const entry of directory) total += await pathSizeNoFollow(join(pinnedPath, entry.name));
   return total;
+}
+
+function isMissing(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function isNestedDirectoryRace(error: unknown): boolean {
+  return error instanceof Error
+    && "code" in error
+    && (error.code === "ENOENT" || error.code === "ENOTDIR" || error.code === "ELOOP");
 }

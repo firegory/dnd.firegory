@@ -119,7 +119,7 @@ services:
           create_host_path: false
       - upload_spool:/app/storage
     tmpfs:
-      - /tmp:rw,nosuid,nodev,size=${WORKER_TMPFS_SIZE:-1G},mode=1777
+      - /tmp:rw,nosuid,nodev,size=${WORKER_TMPFS_SIZE:-3G},mode=1777
     depends_on:
       postgres:
         condition: service_healthy
@@ -137,7 +137,7 @@ services:
       resources:
         limits:
           cpus: "${WORKER_CPU_LIMIT:-2.0}"
-          memory: ${WORKER_MEMORY_LIMIT:-2G}
+          memory: ${WORKER_MEMORY_LIMIT:-4G}
 
   gateway:
     <<: *service-defaults
