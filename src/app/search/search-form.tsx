@@ -29,6 +29,9 @@ type SearchResult = Readonly<{
   claims: readonly Readonly<{ text: string; citations: readonly Citation[] }>[];
   citations: readonly Citation[];
   confident: boolean;
+  fallbackReason: "insufficient_retrieval" | "provider_not_configured" | "provider_config_error"
+    | "provider_unavailable" | "malformed_selection" | "partial_response" | "no_selection"
+    | "selection_normalized" | null;
   retrievedChunks: number;
   meta: {
     model?: string;

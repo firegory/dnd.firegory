@@ -14,7 +14,7 @@
  */
 
 import { hybridSearch, type HybridSearchResult } from "../retrieval/pipeline";
-import { chatCompletion, type ChatMessage, type LlmConfig } from "../llm/client";
+import { chatCompletion, LlmConfigurationError, type ChatMessage, type LlmConfig } from "../llm/client";
 import type { RetrievalUser, RetrievalSelection } from "../access/retrieval-filter";
 import type { CompendiumEntryScope } from "../retrieval/entity";
 import {
@@ -24,7 +24,13 @@ import {
   type AnswerLanguage,
   type SourceCitation,
 } from "./format";
-import { extractiveFallback, groundGeneratedAnswer, unsupportedAnswer, type GroundedClaim } from "./ground.ts";
+import {
+  extractiveFallback,
+  groundGeneratedAnswer,
+  unsupportedAnswer,
+  type AnswerFallbackReason,
+  type GroundedClaim,
+} from "./ground.ts";
 
 // Re-export format utilities for direct testing
 export {
@@ -32,10 +38,11 @@ export {
   buildUserMessage,
   formatRetrievalContext,
   parseLlmResponse,
-  resolveContextReferences,
+  evidenceSegments,
+  resolveSegmentSelections,
   type AnswerLanguage,
   type SourceCitation,
-  type RawLlmClaim,
+  type EvidenceSegment,
   type RawLlmResponse,
 } from "./format";
 
@@ -69,6 +76,8 @@ export type RagAnswer = Readonly<{
   confident: boolean;
   /** The retrieval candidates used as context (for diagnostics). */
   retrievedChunks: number;
+  /** Safe, non-provider-specific explanation for a non-authoritative answer. */
+  fallbackReason: AnswerFallbackReason | null;
 }>;
 
 export type AnswerPipelineResult = Readonly<{
@@ -154,10 +163,12 @@ export async function generateAnswer(
   try {
     result = await chatCompletion(messages, { ...llmConfig, responseFormat: "json" });
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error("[rag] LLM generation failed:", msg);
+    const reason = error instanceof LlmConfigurationError
+      ? (error.message.startsWith("No LLM API key") ? "provider_not_configured" : "provider_config_error")
+      : "provider_unavailable";
+    console.error(`[rag] LLM generation failed: ${reason}`);
     return {
-      answer: extractiveFallback(answerLanguage, chunks),
+      answer: extractiveFallback(answerLanguage, chunks, reason),
       retrieval,
       llmModel: "none",
       usage: {
@@ -169,6 +180,14 @@ export async function generateAnswer(
   }
 
   // 5. Parse and map
+  if (result.finishReason && !["stop", "end_turn"].includes(result.finishReason)) {
+    return {
+      answer: extractiveFallback(answerLanguage, chunks, "partial_response"),
+      retrieval,
+      llmModel: result.model,
+      usage: result.usage,
+    };
+  }
   const parsed = parseLlmResponse(result.content);
   const answer: RagAnswer = groundGeneratedAnswer(parsed, chunks, answerLanguage);
 

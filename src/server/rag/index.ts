@@ -9,9 +9,10 @@ export {
   buildUserMessage,
   formatRetrievalContext,
   parseLlmResponse,
-  resolveContextReferences,
+  evidenceSegments,
+  resolveSegmentSelections,
   type AnswerLanguage,
+  type EvidenceSegment,
   type SourceCitation,
-  type RawLlmClaim,
   type RawLlmResponse,
 } from "./format";

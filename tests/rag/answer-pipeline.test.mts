@@ -12,11 +12,9 @@ it("runs authorized context through ID-only JSON to linked synthesis end to end"
     edition: "5e", language: "en", sourceTitle: "Basic Rules", sourceCategory: "core_rules",
     accessTier: "open", score: 1, strategy: "keyword",
   }];
-  assert.match(buildUserMessage("What is a reaction?", chunks), /"contextId": "C1"/);
+  assert.match(buildUserMessage("What is a reaction?", chunks), /"segmentId": "C1:S1"/);
 
-  const parsed = parseLlmResponse(JSON.stringify({ claims: [{
-    text: "A reaction happens in response to a trigger.", references: ["C1"],
-  }] }));
+  const parsed = parseLlmResponse(JSON.stringify({ selections: ["C1:S1"] }));
   const result = groundGeneratedAnswer(parsed, chunks, "en");
   assert.equal(result.answer, "A reaction happens in response to a trigger.");
   assert.equal(result.claims[0].citations[0], result.citations[0]);

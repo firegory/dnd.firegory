@@ -18,6 +18,7 @@ type AnswerResponse = Readonly<{
   claims: readonly Readonly<{ text: string; citations: readonly Citation[] }>[];
   citations: readonly Citation[];
   confident: boolean;
+  fallbackReason: string | null;
 }>;
 
 type ExactEntryScope = CompendiumEntryScope & Readonly<{

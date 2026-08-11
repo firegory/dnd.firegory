@@ -9,6 +9,8 @@
  * Otherwise uses the standard OpenAI-compatible /chat/completions endpoint.
  */
 
+import { readFileSync } from "node:fs";
+
 export type LlmConfig = Readonly<{
   apiKey: string;
   baseUrl: string;
@@ -25,28 +27,51 @@ const DEFAULT_LLM_CONFIG: LlmConfig = {
   temperature: 0.2,
 };
 
+const DEFAULT_ZAI_LLM_CONFIG: LlmConfig = {
+  ...DEFAULT_LLM_CONFIG,
+  baseUrl: "https://api.z.ai/api/paas/v4",
+  model: "glm-4.5-flash",
+};
+
+export class LlmConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LlmConfigurationError";
+  }
+}
+
 /**
  * Gets the LLM configuration from environment variables.
  */
 export function getLlmConfig(): LlmConfig {
-  const baseUrl = (
-    process.env.LLM_BASE_URL ?? process.env.ZAI_LLM_BASE_URL ?? DEFAULT_LLM_CONFIG.baseUrl
-  ).replace(/\/+$/, "");
-  const maxTokensStr = process.env.LLM_MAX_TOKENS ?? process.env.ZAI_LLM_MAX_TOKENS ?? String(DEFAULT_LLM_CONFIG.maxTokens);
-  const maxTokens = parseInt(maxTokensStr, 10);
-  const temperatureStr = process.env.LLM_TEMPERATURE ?? process.env.ZAI_LLM_TEMPERATURE ?? "0.2";
-  const temperature = parseFloat(temperatureStr);
-  if (!Number.isFinite(maxTokens)) {
-    throw new Error(`Invalid LLM_MAX_TOKENS: ${maxTokensStr}`);
+  const llmKey = optionalSecret("LLM_API_KEY", "LLM_API_KEY_FILE");
+  const zaiKey = llmKey ? undefined : optionalSecret("ZAI_API_KEY", "ZAI_API_KEY_FILE");
+  const defaults = !llmKey && zaiKey ? DEFAULT_ZAI_LLM_CONFIG : DEFAULT_LLM_CONFIG;
+  const apiKey = llmKey ?? zaiKey ?? "";
+  const baseUrl = (nonBlank(process.env.LLM_BASE_URL)
+    ?? nonBlank(process.env.ZAI_LLM_BASE_URL)
+    ?? defaults.baseUrl).replace(/\/+$/, "");
+  const model = nonBlank(process.env.LLM_MODEL) ?? nonBlank(process.env.ZAI_LLM_MODEL) ?? defaults.model;
+  const maxTokensStr = nonBlank(process.env.LLM_MAX_TOKENS)
+    ?? nonBlank(process.env.ZAI_LLM_MAX_TOKENS)
+    ?? String(defaults.maxTokens);
+  const temperatureStr = nonBlank(process.env.LLM_TEMPERATURE)
+    ?? nonBlank(process.env.ZAI_LLM_TEMPERATURE)
+    ?? String(defaults.temperature);
+  const maxTokens = Number(maxTokensStr);
+  const temperature = Number(temperatureStr);
+  if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 8192) {
+    throw new LlmConfigurationError("LLM_MAX_TOKENS must be an integer from 1 through 8192.");
   }
-  if (!Number.isFinite(temperature)) {
-    throw new Error(`Invalid LLM_TEMPERATURE: ${temperatureStr}`);
+  if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
+    throw new LlmConfigurationError("LLM_TEMPERATURE must be a number from 0 through 2.");
   }
+  validateBaseUrl(baseUrl);
   return {
-    ...DEFAULT_LLM_CONFIG,
-    apiKey: process.env.LLM_API_KEY ?? process.env.ZAI_API_KEY ?? "",
+    ...defaults,
+    apiKey,
     baseUrl,
-    model: process.env.LLM_MODEL ?? process.env.ZAI_LLM_MODEL ?? DEFAULT_LLM_CONFIG.model,
+    model,
     maxTokens,
     temperature,
   };
@@ -248,7 +273,15 @@ export async function chatCompletion(
   config?: Partial<LlmConfig> & { preferOllamaNative?: boolean; responseFormat?: "json"; signal?: AbortSignal },
 ): Promise<ChatCompletionResult> {
   const { preferOllamaNative, responseFormat, signal, ...rest } = config ?? {};
-  const cfg = { ...getLlmConfig(), ...rest };
+  const configured = getLlmConfig();
+  const cfg: LlmConfig = {
+    ...configured,
+    ...rest,
+    apiKey: nonBlank(rest.apiKey) ?? configured.apiKey,
+    baseUrl: (nonBlank(rest.baseUrl) ?? configured.baseUrl).replace(/\/+$/, ""),
+    model: nonBlank(rest.model) ?? configured.model,
+  };
+  validateBaseUrl(cfg.baseUrl);
 
   if (isOllama(cfg.baseUrl, cfg.apiKey)) {
     if (preferOllamaNative || responseFormat === "json") {
@@ -258,8 +291,39 @@ export async function chatCompletion(
   }
 
   if (!cfg.apiKey && !isPrivateUrl(cfg.baseUrl)) {
-    throw new Error("LLM_API_KEY is not configured");
+    throw new LlmConfigurationError("No LLM API key is configured for the remote provider.");
   }
 
   return openAiChatCompletion(messages, cfg, responseFormat, signal);
+}
+
+function nonBlank(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function optionalSecret(environmentName: string, fileEnvironmentName: string): string | undefined {
+  const inline = nonBlank(process.env[environmentName]);
+  const file = nonBlank(process.env[fileEnvironmentName]);
+  if (inline) return inline;
+  if (!file) return undefined;
+
+  try {
+    return nonBlank(readFileSync(file, "utf8"));
+  } catch {
+    throw new LlmConfigurationError(`${fileEnvironmentName} could not be read.`);
+  }
+}
+
+function validateBaseUrl(value: string): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new LlmConfigurationError("LLM_BASE_URL must be a valid HTTP(S) URL.");
+  }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password
+    || url.search || url.hash) {
+    throw new LlmConfigurationError("LLM_BASE_URL must be an HTTP(S) origin/path without credentials, query, or fragment.");
+  }
 }
