@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, rm, stat, truncate, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rename, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -101,4 +101,26 @@ test("OCR always recursively removes its private workspace after monitored failu
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("OCR removes the outer workspace when the monitored execution root is replaced", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ocr-root-cleanup-"));
+  const input = join(root, "input.pdf");
+  const outputDir = join(root, "output");
+  const workspaceRoot = join(root, "private-workspace");
+  await writeFile(input, "%PDF-1.7 input");
+  await mkdir(workspaceRoot);
+  const result = await ocrPdf(input, [1], outputDir, {
+    getOcrAvailability: async () => ({ available: true, reason: null }),
+    createWorkspace: async () => workspaceRoot,
+    runMonitoredTool: async (_command, _args, options) => {
+      await rename(options.cwd!, join(workspaceRoot, "moved-work"));
+      await mkdir(options.cwd!);
+      throw new ToolExecutionError("monitor-error");
+    },
+  });
+  assert.equal(result.ocrPdfPath, null);
+  assert.deepEqual(result.errors, ["OCR workspace monitoring failed"]);
+  await assert.rejects(access(workspaceRoot), /ENOENT/);
+  await rm(root, { recursive: true, force: true });
 });

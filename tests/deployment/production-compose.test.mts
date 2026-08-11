@@ -169,11 +169,13 @@ test("all services have least-privilege runtime limits", () => {
 
 test("worker resources accommodate the bounded OCR workspace and remain overrideable", () => {
   assert.deepEqual(production.services.worker.tmpfs, [
-    "/tmp:rw,nosuid,nodev,size=${WORKER_TMPFS_SIZE:-3G},mode=1777",
+    "/tmp:rw,nosuid,nodev,size=${WORKER_TMPFS_SIZE:-1536M},mode=1777",
+    "/run/dnd-ocr:rw,nosuid,nodev,size=${OCR_TMPFS_SIZE:-2G},mode=0700,uid=${APP_UID:-10001},gid=${APP_GID:-10001}",
   ]);
+  assert.equal(production.services.worker.environment?.OCR_TMPDIR, "/run/dnd-ocr");
   assert.deepEqual(production.services.worker.deploy?.resources?.limits, {
     cpus: "${WORKER_CPU_LIMIT:-2.0}",
-    memory: "${WORKER_MEMORY_LIMIT:-4G}",
+    memory: "${WORKER_MEMORY_LIMIT:-6G}",
   });
 });
 

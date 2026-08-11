@@ -57,9 +57,10 @@ APP_BIND_ADDRESS=127.0.0.1
 GATEWAY_BIND_ADDRESS=127.0.0.1
 PRODUCTION_SECRETS_ROOT=./secrets
 
-# OCR workspace defaults; raise both together for unusually large documents
-WORKER_TMPFS_SIZE=3G
-WORKER_MEMORY_LIMIT=4G
+# OCR workspace defaults; raise the OCR tmpfs and worker memory together
+WORKER_TMPFS_SIZE=1536M
+OCR_TMPFS_SIZE=2G
+WORKER_MEMORY_LIMIT=6G
 ```
 
 Create the secret files below under `PRODUCTION_SECRETS_ROOT`; every file must
@@ -181,11 +182,13 @@ Run through this checklist:
 - Requires the same environment variables as the app.
 - The image includes PDF processing packages (`poppler-utils`, `qpdf`, `ghostscript`, `ocrmypdf`, `tesseract-ocr`, `tesseract-ocr-eng`, `tesseract-ocr-rus`) needed by the ingestion pipeline.
 - The final OCR PDF has a separate 768 MiB live limit, while OCRmyPDF's private
-  temporary workspace is limited to 2 GiB. The default 3 GiB `/tmp` tmpfs leaves
-  filesystem headroom, and the 4 GiB worker memory limit accounts for tmpfs being
-  charged to container memory. Override `WORKER_TMPFS_SIZE` and
-  `WORKER_MEMORY_LIMIT` together; neither override changes the application-level
-  output or workspace limits.
+  temporary workspace is limited to 2 GiB. `/run/dnd-ocr` is a separate 2 GiB
+  tmpfs, so growth between application polling intervals cannot exceed that
+  physical boundary. General `/tmp` defaults to 1536 MiB for immutable snapshots.
+  The 6 GiB worker memory limit leaves processing headroom because tmpfs pages
+  count against container memory. Override `OCR_TMPFS_SIZE` and
+  `WORKER_MEMORY_LIMIT` together; the OCR tmpfs must not be smaller than the
+  application-level workspace limit.
 
 **gateway**:
 

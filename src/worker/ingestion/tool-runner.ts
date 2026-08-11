@@ -152,8 +152,13 @@ export async function runMonitoredTool(
       // Tools must not leave helpers running after the direct child exits.
       killGroup();
       if (failure) return reject(failure);
+      const stderrText = Buffer.concat(stderr).toString("utf8");
+      const workspaceLimit = options.monitorLimits?.find((limit) => limit.kind === "directory");
+      if (code !== 0 && workspaceLimit && /ENOSPC|no space left|disk quota exceeded/i.test(stderrText)) {
+        return reject(new ToolExecutionError("output-limit", code, workspaceLimit.label ?? null));
+      }
       if (code !== 0) return reject(new ToolExecutionError("exit", code));
-      resolve({ stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") });
+      resolve({ stdout: Buffer.concat(stdout).toString("utf8"), stderr: stderrText });
     });
   });
 }

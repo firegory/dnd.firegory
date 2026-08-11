@@ -67,6 +67,23 @@ setInterval(() => fs.appendFileSync(process.argv[2], Buffer.alloc(16384)), 5);
   }
 });
 
+test("classifies a hard workspace ENOSPC exit as the workspace limit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tool-enospc-"));
+  try {
+    await assert.rejects(runMonitoredTool(process.execPath, [
+      "-e", "console.error('ENOSPC: no space left on device'); process.exit(1)",
+    ], {
+      timeoutMs: 2_000,
+      maxStdoutBytes: 1024,
+      monitorLimits: [{ path: root, maxBytes: 1024, kind: "directory", label: "OCR workspace" }],
+    }), (error: unknown) => error instanceof ToolExecutionError
+      && error.reason === "output-limit"
+      && error.limitLabel === "OCR workspace");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("does not follow a nested symlink to an oversized outside target", async () => {
   const root = await mkdtemp(join(tmpdir(), "tool-symlink-"));
   const outside = join(tmpdir(), `tool-outside-${process.pid}-${Date.now()}.bin`);
