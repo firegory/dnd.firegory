@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 
+import { normalizePlainUuid } from "./canonical-values.ts";
 import { withTransaction } from "../db/client.ts";
 
 export const SOURCE_ARCHIVE_ERROR_CODES = {
@@ -52,10 +53,14 @@ export async function archiveSourceWithClient(
       SOURCE_ARCHIVE_ERROR_CODES.titleRequired,
     );
   }
+  const normalizedSourceId = normalizePlainUuid(sourceId);
+  if (!normalizedSourceId) {
+    throw new SourceArchiveError("Source was not found.", 404, SOURCE_ARCHIVE_ERROR_CODES.notFound);
+  }
 
   const source = await client.query<{ id: string; title: string; deleted_at: Date | string | null }>(
     "SELECT id, title, deleted_at FROM sources WHERE id = $1 FOR UPDATE",
-    [sourceId],
+    [normalizedSourceId],
   );
   const row = source.rows[0];
   if (!row) {
@@ -76,7 +81,7 @@ export async function archiveSourceWithClient(
     `SELECT id, status FROM ingestion_jobs
      WHERE source_id = $1 AND status IN ('queued', 'processing')
      ORDER BY queued_at ASC LIMIT 1`,
-    [sourceId],
+    [normalizedSourceId],
   );
   if (activeJob.rows[0]) {
     throw new SourceArchiveError(
@@ -88,7 +93,7 @@ export async function archiveSourceWithClient(
 
   const nfsMapping = await client.query<{ repository_id: string }>(
     "SELECT repository_id FROM nfs_index_managed_sources WHERE source_id = $1 LIMIT 1",
-    [sourceId],
+    [normalizedSourceId],
   );
   if (nfsMapping.rows[0]) {
     throw new SourceArchiveError(
@@ -101,7 +106,7 @@ export async function archiveSourceWithClient(
   const archived = await client.query<{ id: string; title: string; deleted_at: Date | string }>(
     `UPDATE sources SET deleted_at = now(), updated_at = now()
      WHERE id = $1 RETURNING id, title, deleted_at`,
-    [sourceId],
+    [normalizedSourceId],
   );
   const archivedRow = archived.rows[0];
   return {

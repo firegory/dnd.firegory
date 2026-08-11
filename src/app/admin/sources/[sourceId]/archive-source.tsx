@@ -64,6 +64,8 @@ export function ArchiveSource({ sourceId, title }: { sourceId: string; title: st
 }
 
 function archiveErrorMessage(code: unknown, t: ReturnType<typeof useUiLanguage>["t"]): string | null {
+  if (code === "SOURCE_ARCHIVE_TITLE_REQUIRED") return t("archiveSourceTitleRequired");
+  if (code === "SOURCE_NOT_FOUND") return t("archiveSourceNotFound");
   if (code === "SOURCE_ARCHIVE_TITLE_MISMATCH") return t("archiveSourceTitleMismatch");
   if (code === "SOURCE_HAS_ACTIVE_JOBS") return t("archiveSourceActiveJobs");
   if (code === "SOURCE_MANAGED_BY_NFS") return t("archiveSourceNfsManaged");

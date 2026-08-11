@@ -5,6 +5,7 @@ import { AdminRequiredError, type AdminContext } from "../../src/server/admin/ad
 import {
   ContentMetadataService,
   ContentMetadataConflictError,
+  ContentMetadataNotFoundError,
   ContentMetadataValidationError,
   normalizeFileInput,
   normalizeSourceInput,
@@ -235,6 +236,35 @@ test("content metadata service soft-deletes files without exposing source deleti
   assert.match(db.calls[0]?.sql ?? "", /SELECT id FROM sources WHERE id = \$2 AND deleted_at IS NULL FOR UPDATE/);
 });
 
+test("file deletion distinguishes a missing file from an archived source", async () => {
+  const activeSource = new ContentMetadataService(new RecordingDb([[], [{ id: "source-1", deleted_at: null }]]));
+  await assert.rejects(
+    () => activeSource.deleteFile(admin, "source-1", "missing-file"),
+    ContentMetadataNotFoundError,
+  );
+
+  const archivedSource = new ContentMetadataService(new RecordingDb([[], [{ id: "source-1", deleted_at: now }]]));
+  await assert.rejects(
+    () => archivedSource.deleteFile(admin, "source-1", "file-1"),
+    ContentMetadataConflictError,
+  );
+});
+
+test("file creation distinguishes a missing source from an archived source", async () => {
+  const input = {
+    sourceId: "source-1", originalFilename: "rules.pdf", mimeType: "application/pdf",
+    checksumSha256: checksum, byteSize: 123, storagePath: "originals/source-1/rules.pdf",
+  };
+  await assert.rejects(
+    () => new ContentMetadataService(new RecordingDb([[], []])).createFile(admin, input),
+    ContentMetadataNotFoundError,
+  );
+  await assert.rejects(
+    () => new ContentMetadataService(new RecordingDb([[], [{ id: "source-1" }]])).createFile(admin, input),
+    ContentMetadataConflictError,
+  );
+});
+
 test("content metadata service locks the active source before file updates", async () => {
   const current = fileRow();
   const db = new RecordingDb([[current], [{ ...current, original_filename: "updated.pdf" }]]);
@@ -313,7 +343,7 @@ test("content metadata service creates file records linked to a source", async (
 });
 
 test("content metadata service rejects file creation when the source lock finds no active source", async () => {
-  const service = new ContentMetadataService(new RecordingDb([[]]));
+  const service = new ContentMetadataService(new RecordingDb([[], [{ id: "source-1" }]]));
 
   await assert.rejects(
     () => service.createFile(admin, {

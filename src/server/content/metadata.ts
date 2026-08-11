@@ -391,7 +391,7 @@ export class ContentMetadataService {
       ],
     );
     const row = result.rows[0];
-    if (!row) throw new ContentMetadataConflictError("Archived or unavailable sources cannot accept new files.");
+    if (!row) return this.throwSourceWriteMiss(file.sourceId, "Archived sources cannot accept new files.");
     return mapFileRow(row);
   }
 
@@ -430,7 +430,7 @@ export class ContentMetadataService {
       ],
     );
     const row = result.rows[0];
-    if (!row) throw new ContentMetadataConflictError("Archived or unavailable sources cannot modify files.");
+    if (!row) return this.throwFileMutationMiss(sourceId, "Archived or unavailable sources cannot modify files.");
     return mapFileRow(row);
   }
 
@@ -449,8 +449,24 @@ export class ContentMetadataService {
       [fileId, sourceId],
     );
     const row = result.rows[0];
-    if (!row) throw new ContentMetadataConflictError("Archived or unavailable sources cannot delete files.");
+    if (!row) return this.throwFileMutationMiss(sourceId, "Archived or unavailable sources cannot delete files.");
     return mapFileRow(row);
+  }
+
+  private async throwFileMutationMiss(sourceId: string, conflictMessage: string): Promise<never> {
+    const source = await this.db.query<{ id: string; deleted_at: Date | string | null }>(
+      "SELECT id, deleted_at FROM sources WHERE id = $1",
+      [sourceId],
+    );
+    if (!source.rows[0]) throw new ContentMetadataNotFoundError("Source metadata record was not found.");
+    if (source.rows[0].deleted_at === null) throw new ContentMetadataNotFoundError("File metadata record was not found.");
+    throw new ContentMetadataConflictError(conflictMessage);
+  }
+
+  private async throwSourceWriteMiss(sourceId: string, conflictMessage: string): Promise<never> {
+    const source = await this.db.query<{ id: string }>("SELECT id FROM sources WHERE id = $1", [sourceId]);
+    if (!source.rows[0]) throw new ContentMetadataNotFoundError("Source metadata record was not found.");
+    throw new ContentMetadataConflictError(conflictMessage);
   }
 }
 

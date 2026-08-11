@@ -8,6 +8,7 @@ import {
 } from "../../src/server/content/source-lifecycle.ts";
 
 type QueryResult = Readonly<{ rows: readonly Record<string, unknown>[] }>;
+const SOURCE_ID = "11111111-1111-4111-8111-111111111111";
 
 class SequencedClient {
   readonly calls: Array<{ sql: string; values: readonly unknown[] }> = [];
@@ -34,7 +35,7 @@ test("source archival locks and soft-deletes only the source after all guards pa
     { rows: [{ id: "source-1", title: "Rules", deleted_at: archivedAt }] },
   ]);
 
-  assert.deepEqual(await archiveSourceWithClient(client as never, "source-1", "Rules"), {
+  assert.deepEqual(await archiveSourceWithClient(client as never, SOURCE_ID, "Rules"), {
     id: "source-1",
     title: "Rules",
     deletedAt: archivedAt.toISOString(),
@@ -52,7 +53,7 @@ test("source archival rejects a stale confirmation before checking jobs", async 
   ]);
 
   await rejectsWithCode(
-    archiveSourceWithClient(client as never, "source-1", "Old title"),
+    archiveSourceWithClient(client as never, SOURCE_ID, "Old title"),
     SOURCE_ARCHIVE_ERROR_CODES.titleMismatch,
   );
   assert.equal(client.calls.length, 1);
@@ -65,7 +66,7 @@ test("source archival rejects active jobs without mutating the source", async ()
   ]);
 
   await rejectsWithCode(
-    archiveSourceWithClient(client as never, "source-1", "Rules"),
+    archiveSourceWithClient(client as never, SOURCE_ID, "Rules"),
     SOURCE_ARCHIVE_ERROR_CODES.activeJobs,
   );
   assert.equal(client.calls.length, 2);
@@ -79,7 +80,7 @@ test("source archival rejects NFS-managed sources without mutating preserved con
   ]);
 
   await rejectsWithCode(
-    archiveSourceWithClient(client as never, "source-1", "Rules"),
+    archiveSourceWithClient(client as never, SOURCE_ID, "Rules"),
     SOURCE_ARCHIVE_ERROR_CODES.nfsManaged,
   );
   assert.equal(client.calls.length, 3);
@@ -88,14 +89,21 @@ test("source archival rejects NFS-managed sources without mutating preserved con
 
 test("source archival distinguishes missing and already archived sources", async () => {
   await rejectsWithCode(
-    archiveSourceWithClient(new SequencedClient([{ rows: [] }]) as never, "missing", "Rules"),
+    archiveSourceWithClient(new SequencedClient([{ rows: [] }]) as never, SOURCE_ID, "Rules"),
     SOURCE_ARCHIVE_ERROR_CODES.notFound,
   );
   await rejectsWithCode(
     archiveSourceWithClient(new SequencedClient([{
       rows: [{ id: "source-1", title: "Rules", deleted_at: new Date() }],
-    }]) as never, "source-1", "Rules"),
+    }]) as never, SOURCE_ID, "Rules"),
     SOURCE_ARCHIVE_ERROR_CODES.alreadyArchived,
+  );
+});
+
+test("source archival rejects malformed source IDs before querying PostgreSQL", async () => {
+  await rejectsWithCode(
+    archiveSourceWithClient({ query: async () => assert.fail("database must not be queried") } as never, "not-a-uuid", "Rules"),
+    SOURCE_ARCHIVE_ERROR_CODES.notFound,
   );
 });
 
