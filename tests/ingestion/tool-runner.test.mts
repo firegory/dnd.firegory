@@ -84,6 +84,40 @@ test("classifies a hard workspace ENOSPC exit as the workspace limit", async () 
   }
 });
 
+test("classifies ENOSPC written after the bounded stderr prefix", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tool-late-enospc-"));
+  try {
+    await assert.rejects(runMonitoredTool(process.execPath, [
+      "-e", "process.stderr.write('x'.repeat(4096)); console.error('ENOSPC: no space left on device'); process.exit(1)",
+    ], {
+      timeoutMs: 2_000,
+      maxStdoutBytes: 128,
+      monitorLimits: [{ path: root, maxBytes: 1024, kind: "directory", label: "OCR workspace" }],
+    }), (error: unknown) => error instanceof ToolExecutionError
+      && error.reason === "output-limit"
+      && error.limitLabel === "OCR workspace");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("classifies an ENOSPC diagnostic split across retained stderr windows", async () => {
+  const root = await mkdtemp(join(tmpdir(), "tool-split-enospc-"));
+  try {
+    await assert.rejects(runMonitoredTool(process.execPath, [
+      "-e", "process.stderr.write('x'.repeat(61) + 'ENOSPC'); process.exit(1)",
+    ], {
+      timeoutMs: 2_000,
+      maxStdoutBytes: 128,
+      monitorLimits: [{ path: root, maxBytes: 1024, kind: "directory", label: "OCR workspace" }],
+    }), (error: unknown) => error instanceof ToolExecutionError
+      && error.reason === "output-limit"
+      && error.limitLabel === "OCR workspace");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("does not follow a nested symlink to an oversized outside target", async () => {
   const root = await mkdtemp(join(tmpdir(), "tool-symlink-"));
   const outside = join(tmpdir(), `tool-outside-${process.pid}-${Date.now()}.bin`);

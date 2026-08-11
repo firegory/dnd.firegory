@@ -67,9 +67,14 @@ export async function runMonitoredTool(
       stdio: ["ignore", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
+    const stderrHead: Buffer[] = [];
+    const stderrTail: Buffer[] = [];
+    const stderrHeadLimit = Math.ceil(options.maxStdoutBytes / 2);
+    const stderrTailLimit = options.maxStdoutBytes - stderrHeadLimit;
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    let stderrHeadBytes = 0;
+    let stderrTailBytes = 0;
     let settled = false;
     let closing = false;
     let failure: ToolExecutionError | null = null;
@@ -97,7 +102,32 @@ export async function runMonitoredTool(
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderrBytes += chunk.length;
-      if (stderrBytes <= options.maxStdoutBytes) stderr.push(chunk);
+      let remainder = chunk;
+      if (stderrHeadBytes < stderrHeadLimit) {
+        const length = Math.min(remainder.length, stderrHeadLimit - stderrHeadBytes);
+        stderrHead.push(Buffer.from(remainder.subarray(0, length)));
+        stderrHeadBytes += length;
+        remainder = remainder.subarray(length);
+      }
+      if (stderrTailLimit === 0 || remainder.length === 0) return;
+      if (remainder.length >= stderrTailLimit) {
+        stderrTail.splice(0, stderrTail.length, Buffer.from(remainder.subarray(-stderrTailLimit)));
+        stderrTailBytes = stderrTailLimit;
+        return;
+      }
+      stderrTail.push(Buffer.from(remainder));
+      stderrTailBytes += remainder.length;
+      while (stderrTailBytes > stderrTailLimit) {
+        const excess = stderrTailBytes - stderrTailLimit;
+        const first = stderrTail[0]!;
+        if (first.length <= excess) {
+          stderrTail.shift();
+          stderrTailBytes -= first.length;
+        } else {
+          stderrTail[0] = Buffer.from(first.subarray(excess));
+          stderrTailBytes -= excess;
+        }
+      }
     });
     child.on("error", (error) => {
       if (settled) return;
@@ -152,9 +182,15 @@ export async function runMonitoredTool(
       // Tools must not leave helpers running after the direct child exits.
       killGroup();
       if (failure) return reject(failure);
-      const stderrText = Buffer.concat(stderr).toString("utf8");
+      const stderrHeadText = Buffer.concat(stderrHead).toString("utf8");
+      const stderrTailText = Buffer.concat(stderrTail).toString("utf8");
+      const stderrText = stderrHeadText + stderrTailText;
       const workspaceLimit = options.monitorLimits?.find((limit) => limit.kind === "directory");
-      if (code !== 0 && workspaceLimit && /ENOSPC|no space left|disk quota exceeded/i.test(stderrText)) {
+      const storageFull = /ENOSPC|no space left|disk quota exceeded/i;
+      const storageFullReported = stderrBytes <= options.maxStdoutBytes
+        ? storageFull.test(stderrText)
+        : storageFull.test(stderrHeadText) || storageFull.test(stderrTailText);
+      if (code !== 0 && workspaceLimit && storageFullReported) {
         return reject(new ToolExecutionError("output-limit", code, workspaceLimit.label ?? null));
       }
       if (code !== 0) return reject(new ToolExecutionError("exit", code));
