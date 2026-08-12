@@ -1,12 +1,24 @@
 import {
-  resolveContextReferences,
+  evidenceSegments,
+  resolveSegmentSelections,
+  selectionAnswersQuery,
   sourceCitation,
   type AnswerLanguage,
   type RawLlmResponse,
   type SourceCitation,
 } from "./format.ts";
-import { validateClaimSupport } from "./support.ts";
 import type { RetrievalCandidate } from "../retrieval/types.ts";
+
+export type AnswerFallbackReason =
+  | "insufficient_retrieval"
+  | "provider_not_configured"
+  | "provider_config_error"
+  | "provider_unavailable"
+  | "malformed_selection"
+  | "partial_response"
+  | "no_selection"
+  | "irrelevant_selection"
+  | "selection_normalized";
 
 export type GroundedClaim = Readonly<{
   text: string;
@@ -19,32 +31,35 @@ export type GroundedAnswer = Readonly<{
   citations: readonly SourceCitation[];
   confident: boolean;
   retrievedChunks: number;
+  fallbackReason: AnswerFallbackReason | null;
 }>;
 
 export function groundGeneratedAnswer(
   parsed: RawLlmResponse,
   chunks: readonly RetrievalCandidate[],
   language: AnswerLanguage,
+  query: string,
 ): GroundedAnswer {
-  let rejected = parsed.rejected;
-  const claims: GroundedClaim[] = [];
+  if (parsed.rejected) return extractiveFallback(language, chunks, "malformed_selection");
+  if (parsed.selections.length === 0) return extractiveFallback(language, chunks, "no_selection");
 
-  for (const claim of parsed.claims) {
-    const supportingChunks = resolveContextReferences(claim.references, chunks);
-    if (!supportingChunks || !validateClaimSupport(claim.text, supportingChunks, language).supported) {
-      rejected = true;
-      continue;
-    }
-    claims.push({ text: claim.text, citations: supportingChunks.map((chunk) => sourceCitation(chunk)) });
+  const selected = resolveSegmentSelections(parsed.selections, chunks);
+  if (!selected) return extractiveFallback(language, chunks, "malformed_selection");
+  if (!selectionAnswersQuery(query, selected, evidenceSegments(chunks))) {
+    return extractiveFallback(language, chunks, "irrelevant_selection");
   }
 
-  if (claims.length === 0) return extractiveFallback(language, chunks);
+  const claims = selected.map((segment) => ({
+    text: segment.text,
+    citations: [sourceCitation(segment.chunk, segment.quote)],
+  }));
   return {
     answer: claims.map((claim) => claim.text).join("\n\n"),
     claims,
     citations: uniqueCitations(claims.flatMap((claim) => claim.citations)),
-    confident: !rejected,
+    confident: !parsed.normalized,
     retrievedChunks: chunks.length,
+    fallbackReason: parsed.normalized ? "selection_normalized" : null,
   };
 }
 
@@ -53,43 +68,53 @@ export function unsupportedAnswer(language: AnswerLanguage, retrievedChunks: num
     en: "I could not find relevant information in the available sources for your query.",
     ru: "Не удалось найти релевантную информацию в доступных источниках по вашему запросу.",
   };
-  return { answer: messages[language], claims: [], citations: [], confident: false, retrievedChunks };
+  return {
+    answer: messages[language], claims: [], citations: [], confident: false, retrievedChunks,
+    fallbackReason: "insufficient_retrieval",
+  };
 }
 
 export function extractiveFallback(
   language: AnswerLanguage,
   chunks: readonly RetrievalCandidate[],
+  reason: Exclude<AnswerFallbackReason, "insufficient_retrieval" | "selection_normalized"> = "provider_unavailable",
 ): GroundedAnswer {
   if (chunks.length === 0) return unsupportedAnswer(language, 0);
-  const messages: Record<AnswerLanguage, string> = {
-    en: "A supported AI summary is unavailable. Review the validated source excerpts below.",
-    ru: "Подтверждённое ИИ-резюме недоступно. Ниже приведены проверенные фрагменты источников.",
-  };
+  const messages = FALLBACK_MESSAGES[language];
+  const citations = chunks.flatMap((chunk) => {
+    const segment = evidenceSegments([chunk])[0];
+    return segment ? [sourceCitation(chunk, segment.quote)] : [];
+  }).slice(0, 3);
   return {
-    answer: messages[language],
+    answer: messages[reason],
     claims: [],
-    citations: fallbackCitations(chunks),
+    citations,
     confident: false,
     retrievedChunks: chunks.length,
+    fallbackReason: reason,
   };
 }
 
-function fallbackCitations(chunks: readonly RetrievalCandidate[]): SourceCitation[] {
-  const citations: SourceCitation[] = [];
-  for (const chunk of chunks) {
-    const quote = cleanExcerpt(chunk.quoteText);
-    if (quote) citations.push(sourceCitation(chunk, quote));
-    if (citations.length === 3) break;
-  }
-  return citations;
-}
-
-function cleanExcerpt(value: string): string {
-  const normalized = value.normalize("NFC").replaceAll(/\s+/g, " ").trim();
-  if (normalized.length <= 600) return normalized;
-  const boundary = normalized.lastIndexOf(" ", 600);
-  return normalized.slice(0, boundary >= 400 ? boundary : 600).trimEnd();
-}
+const FALLBACK_MESSAGES: Record<AnswerLanguage, Record<Exclude<AnswerFallbackReason, "insufficient_retrieval" | "selection_normalized">, string>> = {
+  en: {
+    provider_not_configured: "AI answer generation is not configured. Review the retrieved source excerpts below.",
+    provider_config_error: "AI answer generation is misconfigured. Review the retrieved source excerpts below.",
+    provider_unavailable: "The AI provider is unavailable. Review the retrieved source excerpts below.",
+    malformed_selection: "The AI response could not be safely validated. Review the retrieved source excerpts below.",
+    partial_response: "The AI response was incomplete. Review the retrieved source excerpts below.",
+    no_selection: "No directly supporting segment was selected. Review the retrieved source excerpts below.",
+    irrelevant_selection: "The selected source text does not answer this question. Review the retrieved source excerpts below.",
+  },
+  ru: {
+    provider_not_configured: "Генерация ответа ИИ не настроена. Ниже приведены найденные фрагменты источников.",
+    provider_config_error: "Генерация ответа ИИ настроена неверно. Ниже приведены найденные фрагменты источников.",
+    provider_unavailable: "Провайдер ИИ недоступен. Ниже приведены найденные фрагменты источников.",
+    malformed_selection: "Ответ ИИ не прошёл безопасную проверку. Ниже приведены найденные фрагменты источников.",
+    partial_response: "Ответ ИИ был получен не полностью. Ниже приведены найденные фрагменты источников.",
+    no_selection: "Подходящий подтверждающий фрагмент не выбран. Ниже приведены найденные фрагменты источников.",
+    irrelevant_selection: "Выбранный фрагмент источника не отвечает на этот вопрос. Ниже приведены найденные фрагменты источников.",
+  },
+};
 
 function uniqueCitations(citations: readonly SourceCitation[]): SourceCitation[] {
   const seen = new Set<string>();

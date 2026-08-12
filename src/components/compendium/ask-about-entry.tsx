@@ -18,6 +18,7 @@ type AnswerResponse = Readonly<{
   claims: readonly Readonly<{ text: string; citations: readonly Citation[] }>[];
   citations: readonly Citation[];
   confident: boolean;
+  fallbackReason: string | null;
 }>;
 
 type ExactEntryScope = CompendiumEntryScope & Readonly<{
@@ -83,6 +84,8 @@ export function AskAboutEntry({
       <div className="entry-question-status" aria-live="polite">
         {error ? <p role="alert">{error}</p> : null}
         {result ? <div>
+          {!result.claims.length ? <p><strong>{copy.sourceExcerpts}</strong></p> : null}
+          {!result.confident ? <p>{copy.lowConfidence}</p> : null}
           {result.claims.length
             ? result.claims.map((claim, index) => <p key={`${claim.text}-${index}`}>{claim.text}{" "}{claim.citations.map((citation) => {
                 const citationIndex = result.citations.findIndex((candidate) => candidate.chunkId === citation.chunkId && candidate.quote === citation.quote);
@@ -114,6 +117,8 @@ const EN_COPY = {
   submit: "Ask",
   loading: "Checking sources...",
   error: "The answer could not be loaded.",
+  sourceExcerpts: "Retrieved source excerpts",
+  lowConfidence: "Low confidence",
   citations: "Source citations ({count})",
   page: "p.",
 } as const;
@@ -125,6 +130,8 @@ const RU_COPY = {
   submit: "Спросить",
   loading: "Проверяем источники...",
   error: "Не удалось загрузить ответ.",
+  sourceExcerpts: "Найденные фрагменты источников",
+  lowConfidence: "Низкая уверенность",
   citations: "Цитаты из источников ({count})",
   page: "стр.",
 } as const;

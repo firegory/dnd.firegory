@@ -117,6 +117,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       })),
       citations: result.answer.citations.map(publicCitation),
       confident: result.answer.confident,
+      fallbackReason: result.answer.fallbackReason,
       retrievedChunks: result.answer.retrievedChunks,
       meta: {
         model: result.llmModel,
@@ -127,16 +128,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     });
   } catch (error: unknown) {
     // Graceful error without leaking secrets
-    const message =
-      error instanceof Error ? error.message : "Answer generation failed";
-
-    // Check for API key config errors specifically
-    if (message.includes("LLM_API_KEY is not configured")) {
-      return NextResponse.json(
-        { error: "Answer generation is not configured." },
-        { status: 503 },
-      );
-    }
+    void error;
 
     return NextResponse.json(
       { error: "Answer generation failed. Please try again." },
