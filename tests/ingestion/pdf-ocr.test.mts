@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rename, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { buildOcrArguments, ocrExecOptions, ocrPdf, sanitizeOcrError } from "../../src/worker/ingestion/pdf-ocr.ts";
-import { ToolExecutionError } from "../../src/worker/ingestion/tool-runner.ts";
+import { runMonitoredTool, ToolExecutionError } from "../../src/worker/ingestion/tool-runner.ts";
 
 test("forced OCR command is page-scoped and uses Russian plus English", () => {
   assert.deepEqual(buildOcrArguments("input.pdf", "output.pdf", "sidecar.txt", "2,7,9"), [
@@ -32,6 +32,50 @@ test("OCR errors retain bounded reason codes without leaking filesystem paths", 
   assert.doesNotMatch(sanitizeOcrError(failure), /secret|book\.pdf/);
   const timeout = Object.assign(new Error("/secret/path"), { killed: true, signal: "SIGKILL" });
   assert.equal(sanitizeOcrError(timeout), "OCR command timed out");
+  assert.equal(sanitizeOcrError(new ToolExecutionError("monitor-error")), "OCR workspace monitoring failed");
+  assert.equal(
+    sanitizeOcrError(new ToolExecutionError("output-limit", null, "OCR output PDF")),
+    "OCR output PDF exceeded size limit",
+  );
+});
+
+test("fake OCR survives repeated workspace polls with an outside origin symlink", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ocr-symlink-"));
+  const input = join(root, "input.pdf");
+  const outputDir = join(root, "output");
+  const workspace = join(root, "private-workspace");
+  const outside = join(root, "outside.bin");
+  const script = join(root, "fake-ocr.cjs");
+  await writeFile(input, "%PDF-1.7 input");
+  await mkdir(workspace);
+  await writeFile(outside, "");
+  await truncate(outside, 3 * 1024 * 1024 * 1024);
+  await writeFile(script, `
+const fs = require("node:fs");
+const path = require("node:path");
+const [outside, ...ocrArgs] = process.argv.slice(2);
+fs.symlinkSync(outside, path.join(process.cwd(), "origin"));
+setTimeout(() => fs.writeFileSync(ocrArgs.at(-1), "%PDF-1.7 fake OCR"), 125);
+`);
+  try {
+    const started = Date.now();
+    const result = await ocrPdf(input, [1], outputDir, {
+      getOcrAvailability: async () => ({ available: true, reason: null }),
+      createWorkspace: async () => workspace,
+      runMonitoredTool: (_command, args, options) => runMonitoredTool(
+        process.execPath,
+        [script, outside, ...args],
+        { ...options, pollMs: 10 },
+      ),
+    });
+    assert.ok(Date.now() - started >= 100);
+    assert.equal(result.ocrPdfPath, join(outputDir, "ocr.pdf"));
+    assert.deepEqual(result.errors, []);
+    assert.equal((await stat(outside)).size, 3 * 1024 * 1024 * 1024);
+    await assert.rejects(access(workspace), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("OCR always recursively removes its private workspace after monitored failure", async () => {
@@ -57,4 +101,26 @@ test("OCR always recursively removes its private workspace after monitored failu
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("OCR removes the outer workspace when the monitored execution root is replaced", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ocr-root-cleanup-"));
+  const input = join(root, "input.pdf");
+  const outputDir = join(root, "output");
+  const workspaceRoot = join(root, "private-workspace");
+  await writeFile(input, "%PDF-1.7 input");
+  await mkdir(workspaceRoot);
+  const result = await ocrPdf(input, [1], outputDir, {
+    getOcrAvailability: async () => ({ available: true, reason: null }),
+    createWorkspace: async () => workspaceRoot,
+    runMonitoredTool: async (_command, _args, options) => {
+      await rename(options.cwd!, join(workspaceRoot, "moved-work"));
+      await mkdir(options.cwd!);
+      throw new ToolExecutionError("monitor-error");
+    },
+  });
+  assert.equal(result.ocrPdfPath, null);
+  assert.deepEqual(result.errors, ["OCR workspace monitoring failed"]);
+  await assert.rejects(access(workspaceRoot), /ENOENT/);
+  await rm(root, { recursive: true, force: true });
 });

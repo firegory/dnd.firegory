@@ -7,7 +7,7 @@ started with `docker compose up --build`.
 ## Prerequisites
 
 - A server with Docker and Docker Compose installed.
-- At least 2 GB RAM (4 GB recommended for OCR-heavy workloads).
+- At least 4 GB RAM (8 GB recommended for OCR-heavy workloads).
 - Sufficient disk space for PostgreSQL data, Redis, and file storage.
 - Network access to the z.ai API (for embeddings and LLM features).
 - PostgreSQL 16 built with ICU and the deterministic root collation `und-x-icu` (provided by the Compose image).
@@ -56,6 +56,11 @@ AGENT_GATEWAY_PORT=8787
 APP_BIND_ADDRESS=127.0.0.1
 GATEWAY_BIND_ADDRESS=127.0.0.1
 PRODUCTION_SECRETS_ROOT=./secrets
+
+# OCR workspace defaults; raise the OCR tmpfs and worker memory together
+WORKER_TMPFS_SIZE=1536M
+OCR_TMPFS_SIZE=2G
+WORKER_MEMORY_LIMIT=6G
 ```
 
 Create the secret files below under `PRODUCTION_SECRETS_ROOT`; every file must
@@ -176,6 +181,14 @@ Run through this checklist:
 - Is the sole read-write owner of canonical `DND_DATA_ROOT`; do not run any app container with that mount writable.
 - Requires the same environment variables as the app.
 - The image includes PDF processing packages (`poppler-utils`, `qpdf`, `ghostscript`, `ocrmypdf`, `tesseract-ocr`, `tesseract-ocr-eng`, `tesseract-ocr-rus`) needed by the ingestion pipeline.
+- The final OCR PDF has a separate 768 MiB live limit, while OCRmyPDF's private
+  temporary workspace is limited to 2 GiB. `/run/dnd-ocr` is a separate 2 GiB
+  tmpfs, so growth between application polling intervals cannot exceed that
+  physical boundary. General `/tmp` defaults to 1536 MiB for immutable snapshots.
+  The 6 GiB worker memory limit leaves processing headroom because tmpfs pages
+  count against container memory. Override `OCR_TMPFS_SIZE` and
+  `WORKER_MEMORY_LIMIT` together; the OCR tmpfs must not be smaller than the
+  application-level workspace limit.
 
 **gateway**:
 

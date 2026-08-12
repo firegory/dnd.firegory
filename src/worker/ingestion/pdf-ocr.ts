@@ -41,6 +41,8 @@ type OcrDependencies = Readonly<{
   createWorkspace: () => Promise<string>;
 }>;
 
+const OCR_TMPDIR = process.env.OCR_TMPDIR?.trim() || tmpdir();
+
 /**
  * Checks if ocrmypdf is available on the system.
  */
@@ -80,7 +82,7 @@ export async function ocrPdf(
   const dependencies: OcrDependencies = {
     getOcrAvailability,
     runMonitoredTool,
-    createWorkspace: () => mkdtemp(join(tmpdir(), "dnd-ocr-")),
+    createWorkspace: () => mkdtemp(join(OCR_TMPDIR, "dnd-ocr-")),
     ...overrides,
   };
   await mkdir(outputDir, { recursive: true });
@@ -104,8 +106,10 @@ export async function ocrPdf(
     };
   }
 
-  const workspace = await dependencies.createWorkspace();
-  await chmod(workspace, 0o700);
+  const workspaceRoot = await dependencies.createWorkspace();
+  await chmod(workspaceRoot, 0o700);
+  const workspace = join(workspaceRoot, "work");
+  await mkdir(workspace, { mode: 0o700 });
   const privateOcrPath = join(workspace, "ocr.pdf");
   const privateSidecarPath = join(workspace, "ocr-sidecar.txt");
   const ocrPdfPath = join(outputDir, "ocr.pdf");
@@ -125,8 +129,10 @@ export async function ocrPdf(
     ), {
       timeoutMs: OCR_TOOL_TIMEOUT_MS,
       maxStdoutBytes: TOOL_STDIO_MAX_BYTES,
-      maxOutputBytes: MAX_OCR_WORKSPACE_BYTES,
-      monitorPaths: [workspace],
+      monitorLimits: [
+        { path: privateOcrPath, maxBytes: MAX_OCR_OUTPUT_BYTES, kind: "file", label: "OCR output PDF" },
+        { path: workspace, maxBytes: MAX_OCR_WORKSPACE_BYTES, kind: "directory", label: "OCR workspace" },
+      ],
       cwd: workspace,
       env: { ...process.env, TMPDIR: workspace },
     });
@@ -152,7 +158,7 @@ export async function ocrPdf(
       errors,
     };
   } finally {
-    await rm(workspace, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
   }
 }
 
@@ -191,7 +197,10 @@ export async function readOcrSidecar(sidecarPath: string): Promise<string[]> {
 
 export function sanitizeOcrError(error: unknown): string {
   if (error instanceof ToolExecutionError && error.reason === "timeout") return "OCR command timed out";
-  if (error instanceof ToolExecutionError && error.reason === "output-limit") return "OCR workspace exceeded size limit";
+  if (error instanceof ToolExecutionError && error.reason === "output-limit") {
+    return `${error.limitLabel ?? "OCR workspace"} exceeded size limit`;
+  }
+  if (error instanceof ToolExecutionError && error.reason === "monitor-error") return "OCR workspace monitoring failed";
   if (error instanceof ToolExecutionError && error.reason === "stdout-limit") return "OCR command output exceeded size limit";
   if (error instanceof ToolExecutionError && error.reason === "exit") return `OCR command failed with code ${error.exitCode ?? "unknown"}`;
   if (error instanceof Error && "killed" in error && error.killed) return "OCR command timed out";
