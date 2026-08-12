@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { AppSelect } from "../../../../components/ui/select";
 import { useUiLanguage } from "../../../../components/ui/i18n";
 import type { SourceWithStats } from "../../../../server/admin/source-view";
@@ -17,6 +18,7 @@ const LANGUAGE_OPTIONS = [
 
 export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
   const { t } = useUiLanguage();
+  const router = useRouter();
   const [form, setForm] = useState(() => createSourceMetadataFormState(source));
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [message, setMessage] = useState<string | null>(null);
@@ -57,6 +59,7 @@ export function SourceMetadataEditor({ source }: { source: SourceWithStats }) {
       }
       setStatus("saved");
       setMessage(t("saved"));
+      router.refresh();
     } catch (error) {
       setStatus("error");
       setMessage(error instanceof Error ? error.message : t("networkError"));

@@ -4,6 +4,8 @@ import test from "node:test";
 import { AdminRequiredError, type AdminContext } from "../../src/server/admin/admin-context.ts";
 import {
   ContentMetadataService,
+  ContentMetadataConflictError,
+  ContentMetadataNotFoundError,
   ContentMetadataValidationError,
   normalizeFileInput,
   normalizeSourceInput,
@@ -221,20 +223,58 @@ test("content metadata service creates admin-owned source records", async () => 
   ]);
 });
 
-test("content metadata service soft-deletes sources and files", async () => {
+test("content metadata service soft-deletes files without exposing source deletion", async () => {
   const db = new RecordingDb([
-    [sourceRow({ deleted_at: now })],
     [fileRow({ deleted_at: now })],
   ]);
   const service = new ContentMetadataService(db);
 
-  const deletedSource = await service.deleteSource(admin, "source-1");
   const deletedFile = await service.deleteFile(admin, "source-1", "file-1");
 
-  assert.equal(deletedSource.deletedAt, now.toISOString());
   assert.equal(deletedFile.deletedAt, now.toISOString());
-  assert.match(db.calls[0]?.sql ?? "", /UPDATE sources SET deleted_at = now\(\)/);
-  assert.match(db.calls[1]?.sql ?? "", /UPDATE files SET deleted_at = now\(\)/);
+  assert.match(db.calls[0]?.sql ?? "", /UPDATE files SET deleted_at = now\(\)/);
+  assert.match(db.calls[0]?.sql ?? "", /SELECT id FROM sources WHERE id = \$2 AND deleted_at IS NULL FOR UPDATE/);
+});
+
+test("file deletion distinguishes a missing file from an archived source", async () => {
+  const activeSource = new ContentMetadataService(new RecordingDb([[], [{ id: "source-1", deleted_at: null }]]));
+  await assert.rejects(
+    () => activeSource.deleteFile(admin, "source-1", "missing-file"),
+    ContentMetadataNotFoundError,
+  );
+
+  const archivedSource = new ContentMetadataService(new RecordingDb([[], [{ id: "source-1", deleted_at: now }]]));
+  await assert.rejects(
+    () => archivedSource.deleteFile(admin, "source-1", "file-1"),
+    ContentMetadataConflictError,
+  );
+});
+
+test("file creation distinguishes a missing source from an archived source", async () => {
+  const input = {
+    sourceId: "source-1", originalFilename: "rules.pdf", mimeType: "application/pdf",
+    checksumSha256: checksum, byteSize: 123, storagePath: "originals/source-1/rules.pdf",
+  };
+  await assert.rejects(
+    () => new ContentMetadataService(new RecordingDb([[], []])).createFile(admin, input),
+    ContentMetadataNotFoundError,
+  );
+  await assert.rejects(
+    () => new ContentMetadataService(new RecordingDb([[], [{ id: "source-1" }]])).createFile(admin, input),
+    ContentMetadataConflictError,
+  );
+});
+
+test("content metadata service locks the active source before file updates", async () => {
+  const current = fileRow();
+  const db = new RecordingDb([[current], [{ ...current, original_filename: "updated.pdf" }]]);
+  const service = new ContentMetadataService(db);
+
+  const updated = await service.updateFile(admin, "source-1", "file-1", { originalFilename: "updated.pdf" });
+
+  assert.equal(updated.originalFilename, "updated.pdf");
+  assert.match(db.calls[1]?.sql ?? "", /SELECT id FROM sources WHERE id = \$2 AND deleted_at IS NULL FOR UPDATE/);
+  assert.match(db.calls[1]?.sql ?? "", /UPDATE files/);
 });
 
 test("content metadata service deep-merges partial publication updates without loss", async () => {
@@ -288,6 +328,7 @@ test("content metadata service creates file records linked to a source", async (
 
   assert.equal(file.sourceId, "source-1");
   assert.equal(file.uploadedByUserId, admin.userId);
+  assert.match(db.calls[0]?.sql ?? "", /SELECT id FROM sources WHERE id = \$1 AND deleted_at IS NULL FOR UPDATE/);
   assert.match(db.calls[0]?.sql ?? "", /INSERT INTO files/);
   assert.deepEqual(db.calls[0]?.values, [
     "source-1",
@@ -299,6 +340,22 @@ test("content metadata service creates file records linked to a source", async (
     null,
     admin.userId,
   ]);
+});
+
+test("content metadata service rejects file creation when the source lock finds no active source", async () => {
+  const service = new ContentMetadataService(new RecordingDb([[], [{ id: "source-1" }]]));
+
+  await assert.rejects(
+    () => service.createFile(admin, {
+      sourceId: "source-1",
+      originalFilename: "rules.pdf",
+      mimeType: "application/pdf",
+      checksumSha256: checksum,
+      byteSize: 123,
+      storagePath: "originals/source-1/rules.pdf",
+    }),
+    ContentMetadataConflictError,
+  );
 });
 
 test("invalid list filters fail before querying", async () => {

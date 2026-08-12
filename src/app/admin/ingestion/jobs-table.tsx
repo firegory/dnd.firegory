@@ -110,26 +110,6 @@ export function JobsTable() {
     }
   }
 
-  async function handleDelete(sourceId: string, jobId: string) {
-    if (!confirm(t("deleteConfirm"))) return;
-    if (!confirm(t("finalDeleteConfirm"))) return;
-    setActionStatus((prev) => ({ ...prev, [jobId]: "deleting" }));
-    try {
-      const res = await fetch(`/api/admin/ingestion/sources/${sourceId}/delete`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) {
-        alert(data.error ?? t("deleteFailed"));
-        return;
-      }
-      setActionStatus((prev) => ({ ...prev, [jobId]: "delete-ok" }));
-      await load();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : t("networkError"));
-    } finally {
-      clearAction(jobId);
-    }
-  }
-
   function clearAction(jobId: string) {
     setTimeout(() => {
       setActionStatus((prev) => {
@@ -202,7 +182,6 @@ export function JobsTable() {
                   t={t}
                   onRetry={handleRetry}
                   onReprocess={handleReprocess}
-                  onDelete={handleDelete}
                 />
               </td>
             </tr>
@@ -219,34 +198,29 @@ function Actions({
   t,
   onRetry,
   onReprocess,
-  onDelete,
 }: {
   job: JobRecord;
   actionStatus: Record<string, string>;
   t: ReturnType<typeof useUiLanguage>["t"];
   onRetry: (jobId: string) => void;
   onReprocess: (sourceId: string, jobId: string) => void;
-  onDelete: (sourceId: string, jobId: string) => void;
 }) {
   const status = actionStatus[job.id];
 
-  if (status === "retrying" || status === "reprocessing" || status === "deleting") {
+  if (status === "retrying" || status === "reprocessing") {
     return <span className="text-xs text-text-muted">{formatActionStatus(status, t)}…</span>;
   }
 
   if (status === "retry-ok") return <span className="text-xs font-semibold text-status-success">{t("retried")}</span>;
   if (status === "reprocess-ok") return <span className="text-xs font-semibold text-status-success">{t("reprocessingDone")}</span>;
-  if (status === "delete-ok") return <span className="text-xs font-semibold text-status-success">{t("deleted")}</span>;
 
   const canRetry = (job.status === "failed" || job.status === "cancelled") && job.sourceId && job.fileId;
   const canReprocess = (job.status === "succeeded" || job.status === "failed") && job.sourceId;
-  const canDelete = job.sourceId;
 
   return (
     <div className="flex gap-1.5">
       {canRetry && <button className="rounded-md border border-warning/40 px-2 py-1 text-xs font-medium text-warning hover:bg-warning/10" onClick={() => onRetry(job.id)}>{t("retry")}</button>}
       {canReprocess && <button className="rounded-md border border-accent/40 px-2 py-1 text-xs font-medium text-accent hover:bg-accent/10" onClick={() => onReprocess(job.sourceId!, job.id)}>{t("reprocess")}</button>}
-      {canDelete && <button className="rounded-md border border-danger/40 px-2 py-1 text-xs font-medium text-danger hover:bg-danger/10" onClick={() => onDelete(job.sourceId!, job.id)}>{t("delete")}</button>}
     </div>
   );
 }
@@ -254,7 +228,6 @@ function Actions({
 function formatActionStatus(status: string, t: ReturnType<typeof useUiLanguage>["t"]) {
   if (status === "retrying") return t("retrying");
   if (status === "reprocessing") return t("reprocessing");
-  if (status === "deleting") return t("deleting");
   return status;
 }
 

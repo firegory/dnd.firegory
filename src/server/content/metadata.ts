@@ -183,6 +183,13 @@ export class ContentMetadataNotFoundError extends Error {
   }
 }
 
+export class ContentMetadataConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ContentMetadataConflictError";
+  }
+}
+
 export class ContentMetadataService {
   private readonly db: Queryable;
 
@@ -337,20 +344,6 @@ export class ContentMetadataService {
     return mapSourceRow(row);
   }
 
-  async deleteSource(admin: AdminContext, sourceId: string): Promise<SourceMetadataRecord> {
-    assertAdminContext(admin);
-    validateId(sourceId, "sourceId");
-    const result = await this.db.query<SourceRow>(
-      `UPDATE sources SET deleted_at = now(), updated_at = now()
-      WHERE id = $1 AND deleted_at IS NULL
-      RETURNING *`,
-      [sourceId],
-    );
-    const row = result.rows[0];
-    if (!row) throw new ContentMetadataNotFoundError("Source metadata record was not found.");
-    return mapSourceRow(row);
-  }
-
   async listFiles(admin: AdminContext, sourceId: string, includeDeleted = false): Promise<FileMetadataRecord[]> {
     assertAdminContext(admin);
     validateId(sourceId, "sourceId");
@@ -381,7 +374,10 @@ export class ContentMetadataService {
       `INSERT INTO files (
         source_id, original_filename, mime_type, checksum_sha256,
         byte_size, storage_path, processed_artifacts_root, uploaded_by_user_id
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ) SELECT $1, $2, $3, $4, $5, $6, $7, $8
+        FROM (
+          SELECT id FROM sources WHERE id = $1 AND deleted_at IS NULL FOR UPDATE
+        ) AS active_source
       RETURNING *`,
       [
         file.sourceId,
@@ -394,7 +390,9 @@ export class ContentMetadataService {
         admin.userId,
       ],
     );
-    return mapFileRow(result.rows[0]);
+    const row = result.rows[0];
+    if (!row) return this.throwSourceWriteMiss(file.sourceId, "Archived sources cannot accept new files.");
+    return mapFileRow(row);
   }
 
   async updateFile(
@@ -407,14 +405,18 @@ export class ContentMetadataService {
     const current = await this.getFile(admin, sourceId, fileId);
     const merged = normalizeFileInput({ ...current, sourceId, ...input });
     const result = await this.db.query<FileRow>(
-      `UPDATE files
+      `WITH active_source AS MATERIALIZED (
+        SELECT id FROM sources WHERE id = $2 AND deleted_at IS NULL FOR UPDATE
+      )
+      UPDATE files
       SET original_filename = $3,
           mime_type = $4,
           checksum_sha256 = $5,
           byte_size = $6,
           storage_path = $7,
           processed_artifacts_root = $8
-      WHERE id = $1 AND source_id = $2 AND deleted_at IS NULL
+      FROM active_source
+      WHERE files.id = $1 AND files.source_id = active_source.id AND files.deleted_at IS NULL
       RETURNING *`,
       [
         fileId,
@@ -428,7 +430,7 @@ export class ContentMetadataService {
       ],
     );
     const row = result.rows[0];
-    if (!row) throw new ContentMetadataNotFoundError("File metadata record was not found.");
+    if (!row) return this.throwFileMutationMiss(sourceId, "Archived or unavailable sources cannot modify files.");
     return mapFileRow(row);
   }
 
@@ -437,14 +439,34 @@ export class ContentMetadataService {
     validateId(sourceId, "sourceId");
     validateId(fileId, "fileId");
     const result = await this.db.query<FileRow>(
-      `UPDATE files SET deleted_at = now()
-      WHERE id = $1 AND source_id = $2 AND deleted_at IS NULL
+      `WITH active_source AS MATERIALIZED (
+        SELECT id FROM sources WHERE id = $2 AND deleted_at IS NULL FOR UPDATE
+      )
+      UPDATE files SET deleted_at = now()
+      FROM active_source
+      WHERE files.id = $1 AND files.source_id = active_source.id AND files.deleted_at IS NULL
       RETURNING *`,
       [fileId, sourceId],
     );
     const row = result.rows[0];
-    if (!row) throw new ContentMetadataNotFoundError("File metadata record was not found.");
+    if (!row) return this.throwFileMutationMiss(sourceId, "Archived or unavailable sources cannot delete files.");
     return mapFileRow(row);
+  }
+
+  private async throwFileMutationMiss(sourceId: string, conflictMessage: string): Promise<never> {
+    const source = await this.db.query<{ id: string; deleted_at: Date | string | null }>(
+      "SELECT id, deleted_at FROM sources WHERE id = $1",
+      [sourceId],
+    );
+    if (!source.rows[0]) throw new ContentMetadataNotFoundError("Source metadata record was not found.");
+    if (source.rows[0].deleted_at === null) throw new ContentMetadataNotFoundError("File metadata record was not found.");
+    throw new ContentMetadataConflictError(conflictMessage);
+  }
+
+  private async throwSourceWriteMiss(sourceId: string, conflictMessage: string): Promise<never> {
+    const source = await this.db.query<{ id: string }>("SELECT id FROM sources WHERE id = $1", [sourceId]);
+    if (!source.rows[0]) throw new ContentMetadataNotFoundError("Source metadata record was not found.");
+    throw new ContentMetadataConflictError(conflictMessage);
   }
 }
 

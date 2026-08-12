@@ -5,6 +5,7 @@ import {
   ContentMetadataService,
 } from "../../../../../server/content/metadata.ts";
 import { mapContentMetadataHttpError } from "../../../../../server/content/metadata-http.ts";
+import { archiveSource, mapSourceArchiveError } from "../../../../../server/content/source-lifecycle.ts";
 
 function getService(): ContentMetadataService {
   return new ContentMetadataService();
@@ -42,8 +43,11 @@ export async function DELETE(request: Request, context: RouteContext) {
 
   try {
     const { sourceId } = await context.params;
-    return NextResponse.json(await getService().deleteSource(admin, sourceId));
+    const body = await request.json().catch(() => null) as { confirmationTitle?: unknown } | null;
+    return NextResponse.json(await archiveSource(sourceId, body?.confirmationTitle as string));
   } catch (error) {
+    const archiveError = mapSourceArchiveError(error);
+    if (archiveError) return NextResponse.json(archiveError.body, { status: archiveError.status });
     return sourceMetadataErrorResponse(error);
   }
 }
